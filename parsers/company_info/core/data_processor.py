@@ -15,17 +15,15 @@ class DataProcessor:
     
     @staticmethod
     def parse_company(response: Dict[Any, Any]) -> Dict[str, Any]:
-        """
-        Parse API response into database format.
-        
-        Args:
-            response: JSON response from API
-        
-        Returns:
-            Processed company data
-        """
+        """Parse API response with codes and descriptions."""
         
         basic = response.get('basicInfo', {})
+        
+        # Извлечь структуры {code, description}
+        krp = DataProcessor._extract_code_and_desc(basic.get('krp'))
+        kfc = DataProcessor._extract_code_and_desc(basic.get('kfc'))
+        kse = DataProcessor._extract_code_and_desc(basic.get('kse'))
+        status = DataProcessor._extract_code_and_desc(basic.get('status'))
         
         company = {
             'bin': basic.get('bin'),
@@ -35,47 +33,35 @@ class DataProcessor:
             ),
             'ceo_name': DataProcessor._extract_ceo_name(basic.get('ceo')),
             'is_nds': DataProcessor._extract_value(basic.get('isNds')),
-            'degree_of_risk': DataProcessor._extract_value(
-                basic.get('degreeOfRisk')
-            ),
-            'krp_description': DataProcessor._extract_classifier_desc(
-                basic.get('krp')
-            ),
-            'kfc_description': DataProcessor._extract_classifier_desc(
-                basic.get('kfc')
-            ),
-            'kse_description': DataProcessor._extract_classifier_desc(
-                basic.get('kse')
-            ),
-            'status_description': DataProcessor._extract_status_desc(
-                basic.get('status')
-            ),
+            'degree_of_risk': DataProcessor._extract_value(basic.get('degreeOfRisk')),
+            
+            # Справочники (код + описание)
+            'krp': krp,
+            'kfc': kfc,
+            'kse': kse,
+            'status': status,
+            
             'phone': response.get('egovContacts', {}).get('phone'),
         }
         
-        # Parse OKED
+        # OKED
         primary_oked = DataProcessor._extract_value(basic.get('primaryOKED'))
         if primary_oked:
             parts = primary_oked.split(' ', 1)
-            company['primary_oked_code'] = parts[0]
-            company['primary_oked_name'] = parts[1] if len(parts) > 1 else None
+            company['oked'] = {
+                'code': parts[0],
+                'name': parts[1] if len(parts) > 1 else None
+            }
         else:
-            company['primary_oked_code'] = None
-            company['primary_oked_name'] = None
+            company['oked'] = None
         
-        # Parse name history
+        # Остальное без изменений
         company['name_history'] = DataProcessor._parse_name_history(
             basic.get('titleRu'),
             company['registration_date']
         )
-        
-        # Parse taxes
         company['taxes'] = DataProcessor._parse_taxes(response.get('taxes'))
-        
-        # Parse NDS
         company['nds'] = DataProcessor._parse_nds(response.get('taxes'))
-
-        # Parse relations
         company['relations'] = DataProcessor._parse_relations(
             response.get('relatedCompanies'),
             company['bin']
@@ -303,7 +289,20 @@ class DataProcessor:
     
     @staticmethod
     def _extract_value(field: Optional[Dict]) -> Any:
-        """Extract value from field with metadata."""
+        """
+        Recursively extract value from nested dict structures.
+        
+        API returns data like:
+        {'value': {'value': 'actual_data'}}
+        or
+        {'value': 'actual_data'}
+        
+        Args:
+            field: Field from API response
+        
+        Returns:
+            Extracted value (primitive type or None)
+        """
         if field is None:
             return None
         
@@ -311,15 +310,16 @@ class DataProcessor:
         if not isinstance(field, dict):
             return field
         
-        # Если есть ключ 'value' - извлечь его рекурсивно
+        # РЕКУРСИВНО извлекаем value
         if 'value' in field:
-            value = field['value']
-            # Если value тоже dict - попробовать извлечь из него
-            if isinstance(value, dict) and 'value' in value:
-                return DataProcessor._extract_value(value)
-            return value
+            inner_value = field['value']
+            # Если inner_value тоже dict с 'value' - рекурсия
+            if isinstance(inner_value, dict) and 'value' in inner_value:
+                return DataProcessor._extract_value(inner_value)
+            # Иначе вернуть inner_value
+            return inner_value
         
-        # Если нет ключа 'value' - вернуть None или первый доступный ключ
+        # Если нет ключа 'value' - вернуть None
         return None
     
     @staticmethod
@@ -331,49 +331,35 @@ class DataProcessor:
         if isinstance(value, dict):
             return value.get('title')
         return None
-    
+
     @staticmethod
-    def _extract_classifier_desc(field: Optional[Dict]) -> Optional[str]:
-        """Extract classifier description (krp, kfc, kse)."""
+    def _extract_code_and_desc(field: Optional[Dict]) -> Optional[Dict[str, Any]]:
+        """
+        Извлечь код И описание из справочника.
+        
+        Структура: {"value": {"value": 160, "description": "..."}}
+        
+        Returns:
+            {'code': 160, 'name': '...'}
+        """
         if not field:
             return None
         
-        # Сначала извлечь value
-        value = DataProcessor._extract_value(field)
-        
-        # Если value - это dict, попытаться взять description
-        if isinstance(value, dict):
-            desc = value.get('description')
-            if desc:
-                return str(desc)
-        
-        # Если value - строка, вернуть её
-        if isinstance(value, str):
-            return value
-        
-        return None
-    
-    @staticmethod
-    def _extract_status_desc(field: Optional[Dict]) -> Optional[str]:
-        """Extract status description."""
-        if not field:
+        level1 = field.get('value')
+        if not level1 or not isinstance(level1, dict):
             return None
         
-        # Сначала извлечь value
-        value = DataProcessor._extract_value(field)
+        code = level1.get('value')
+        description = level1.get('description')
         
-        # Если value - это dict, попытаться взять description
-        if isinstance(value, dict):
-            desc = value.get('description')
-            if desc:
-                return str(desc)
-        
-        # Если value - строка, вернуть её
-        if isinstance(value, str):
-            return value
+        if code is not None and description:
+            return {
+                'code': int(code) if isinstance(code, (int, str)) and str(code).isdigit() else code,
+                'name': str(description)
+            }
         
         return None
-    
+
     @staticmethod
     def _parse_date(date_str: Optional[str]) -> Optional[str]:
         """Parse date to YYYY-MM-DD format."""
