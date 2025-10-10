@@ -8,7 +8,7 @@ from psycopg2.extras import RealDictCursor
 
 from .config import DB_CONFIG
 from .logger import logger
-
+from .references import ReferenceManager
 
 class DatabaseManager:
     """
@@ -19,12 +19,14 @@ class DatabaseManager:
     
     def __init__(self):
         self.conn = None
+        self.ref_manager = None
     
     def _get_connection(self):
-        """Get or create database connection to COMPANIES database."""
+        """Get or create database connection."""
         if self.conn is None or self.conn.closed:
             self.conn = psycopg2.connect(**DB_CONFIG)
-            logger.debug(f"Connected to companies database: {DB_CONFIG['database']}")
+            self.ref_manager = ReferenceManager(self.conn)
+            logger.debug(f"Connected to database: {DB_CONFIG['database']}")
         return self.conn
     
     def close(self):
@@ -72,7 +74,7 @@ class DatabaseManager:
     
     def get_company(self, bin_value: str) -> Optional[Dict[str, Any]]:
         """
-        Get company by BIN.
+        Get company by BIN with references.
         
         Args:
             bin_value: Company BIN
@@ -82,15 +84,32 @@ class DatabaseManager:
         """
         sql = """
             SELECT 
-                bin, name_ru, registration_date, ceo_name,
-                is_nds, degree_of_risk, krp_description,
-                kfc_description, kse_description,
-                primary_oked_code, primary_oked_name,
-                status_description, phone,
-                last_api_check, api_check_count,
-                created_at, updated_at
-            FROM companies
-            WHERE bin = %s
+                c.bin, c.name_ru, c.registration_date, c.ceo_name,
+                c.is_nds, c.phone,
+                c.last_api_check, c.api_check_count,
+                c.created_at, c.updated_at,
+                
+                -- Данные из справочников
+                r.code as degree_of_risk,
+                s.code as status_code,
+                s.name as status_name,
+                krp.code as krp_code,
+                krp.name as krp_name,
+                kfc.code as kfc_code,
+                kfc.name as kfc_name,
+                kse.code as kse_code,
+                kse.name as kse_name,
+                oked.code as oked_code,
+                oked.name as oked_name
+                
+            FROM companies c
+            LEFT JOIN ref_risk r ON c.risk_id = r.id
+            LEFT JOIN ref_status s ON c.status_id = s.id
+            LEFT JOIN ref_krp krp ON c.krp_id = krp.id
+            LEFT JOIN ref_kfc kfc ON c.kfc_id = kfc.id
+            LEFT JOIN ref_kse kse ON c.kse_id = kse.id
+            LEFT JOIN ref_oked oked ON c.oked_id = oked.id
+            WHERE c.bin = %s
         """
         
         try:
@@ -100,7 +119,64 @@ class DatabaseManager:
             
             result = cursor.fetchone()
             
-            return dict(result) if result else None
+            if not result:
+                return None
+            
+            # Преобразовать в формат как из data_processor
+            company = dict(result)
+            
+            # Собрать справочники в dict
+            if company.get('krp_code') is not None:
+                company['krp'] = {
+                    'code': company.pop('krp_code'),
+                    'name': company.pop('krp_name')
+                }
+            else:
+                company.pop('krp_code', None)
+                company.pop('krp_name', None)
+                company['krp'] = None
+            
+            if company.get('kfc_code') is not None:
+                company['kfc'] = {
+                    'code': company.pop('kfc_code'),
+                    'name': company.pop('kfc_name')
+                }
+            else:
+                company.pop('kfc_code', None)
+                company.pop('kfc_name', None)
+                company['kfc'] = None
+            
+            if company.get('kse_code') is not None:
+                company['kse'] = {
+                    'code': company.pop('kse_code'),
+                    'name': company.pop('kse_name')
+                }
+            else:
+                company.pop('kse_code', None)
+                company.pop('kse_name', None)
+                company['kse'] = None
+            
+            if company.get('status_code') is not None:
+                company['status'] = {
+                    'code': company.pop('status_code'),
+                    'name': company.pop('status_name')
+                }
+            else:
+                company.pop('status_code', None)
+                company.pop('status_name', None)
+                company['status'] = None
+            
+            if company.get('oked_code') is not None:
+                company['oked'] = {
+                    'code': company.pop('oked_code'),
+                    'name': company.pop('oked_name')
+                }
+            else:
+                company.pop('oked_code', None)
+                company.pop('oked_name', None)
+                company['oked'] = None
+            
+            return company
             
         except Exception as e:
             logger.error(f"Error getting company {bin_value}: {e}")
@@ -140,94 +216,75 @@ class DatabaseManager:
     # ════════════════════════════════════════════════════════════════
     
     def create_company(self, data: Dict[str, Any]):
-        """
-        Create new company with all related data.
-        
-        Args:
-            data: Parsed company data
-        """
+        """Create new company with references."""
         conn = self._get_connection()
         cursor = conn.cursor()
         
         try:
-            # ═══ HELPER FUNCTIONS ═══
-            def safe_value(value, default=None):
-                """Safely extract value, converting dict to string if needed."""
-                if value is None:
-                    return default
-                
-                # Если dict - попробовать извлечь 'value'
-                if isinstance(value, dict):
-                    if 'value' in value:
-                        return safe_value(value['value'], default)
-                    return default
-                
-                return value
+            import json
             
-            def safe_str(value):
-                """Convert to string safely (no length limit)."""
-                result = safe_value(value)
-                return str(result) if result is not None else None
+            # Получить ID из справочников
+            status_id = None
+            if data.get('status'):
+                status_id = self.ref_manager.get_or_create_status(
+                    data['status']['code'],
+                    data['status']['name']
+                )
             
-            def safe_bool(value):
-                """Convert to boolean safely."""
-                result = safe_value(value)
-                if result is None:
-                    return None
-                if isinstance(result, bool):
-                    return result
-                if isinstance(result, str):
-                    return result.lower() in ('true', '1', 'yes')
-                return bool(result)
+            risk_id = self.ref_manager.get_or_create_risk(data.get('degree_of_risk'))
             
-            def safe_int(value):
-                """Convert to int safely."""
-                result = safe_value(value)
-                if result is None:
-                    return None
-                try:
-                    return int(result)
-                except (ValueError, TypeError):
-                    return None
+            krp_id = None
+            if data.get('krp'):
+                krp_id = self.ref_manager.get_or_create_krp(
+                    data['krp']['code'],
+                    data['krp']['name']
+                )
             
-            def safe_float(value):
-                """Convert to float safely."""
-                result = safe_value(value)
-                if result is None:
-                    return 0.0
-                try:
-                    return float(result)
-                except (ValueError, TypeError):
-                    return 0.0
+            kfc_id = None
+            if data.get('kfc'):
+                kfc_id = self.ref_manager.get_or_create_kfc(
+                    data['kfc']['code'],
+                    data['kfc']['name']
+                )
             
-            # ═══ INSERT MAIN COMPANY RECORD ═══
+            kse_id = None
+            if data.get('kse'):
+                kse_id = self.ref_manager.get_or_create_kse(
+                    data['kse']['code'],
+                    data['kse']['name']
+                )
+            
+            oked_id = None
+            if data.get('oked'):
+                oked_id = self.ref_manager.get_or_create_oked(
+                    data['oked']['code'],
+                    data['oked']['name']
+                )
+            
+            # INSERT компании
             sql = """
                 INSERT INTO companies (
                     bin, name_ru, registration_date, ceo_name,
-                    is_nds, degree_of_risk, krp_description,
-                    kfc_description, kse_description,
-                    primary_oked_code, primary_oked_name,
-                    status_description, phone,
-                    last_api_check, api_check_count
+                    is_nds, risk_id, krp_id, kfc_id, kse_id, oked_id, status_id,
+                    phone, last_api_check, api_check_count
                 ) VALUES (
-                    %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, NOW(), 1
+                    %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s::jsonb, NOW(), 1
                 )
             """
             
             cursor.execute(sql, (
-                safe_str(data.get('bin')),
-                safe_str(data.get('name_ru')),
+                data.get('bin'),
+                data.get('name_ru'),
                 data.get('registration_date'),
-                safe_str(data.get('ceo_name')),
-                safe_bool(data.get('is_nds')),
-                safe_str(data.get('degree_of_risk')),
-                safe_str(data.get('krp_description')),
-                safe_str(data.get('kfc_description')),
-                safe_str(data.get('kse_description')),
-                safe_str(data.get('primary_oked_code')),
-                safe_str(data.get('primary_oked_name')),
-                safe_str(data.get('status_description')),
-                safe_str(data.get('phone'))
+                data.get('ceo_name'),
+                data.get('is_nds'),
+                risk_id,
+                krp_id,
+                kfc_id,
+                kse_id,
+                oked_id,
+                status_id,
+                json.dumps(data.get('phone')) if data.get('phone') else None
             ))
             
             # ═══ INSERT NAME HISTORY ═══
@@ -237,8 +294,8 @@ class DatabaseManager:
                         bin, name_ru, valid_from, valid_to, is_current
                     ) VALUES (%s, %s, %s, %s, %s)
                 """, (
-                    safe_str(data.get('bin')),
-                    safe_str(name_entry.get('name_ru')),
+                    data.get('bin'),
+                    name_entry.get('name_ru'),
                     name_entry.get('valid_from'),
                     name_entry.get('valid_to'),
                     bool(name_entry.get('is_current', False))
@@ -251,22 +308,11 @@ class DatabaseManager:
                         bin, ceo_name, valid_from, is_current
                     ) VALUES (%s, %s, %s, true)
                 """, (
-                    safe_str(data.get('bin')),
-                    safe_str(data.get('ceo_name')),
+                    data.get('bin'),
+                    data.get('ceo_name'),
                     data.get('registration_date')
                 ))
             
-            # ═══ INSERT OKED ═══
-            if data.get('primary_oked_code'):
-                cursor.execute("""
-                    INSERT INTO company_okeds (
-                        bin, oked_code, oked_name, is_primary
-                    ) VALUES (%s, %s, %s, true)
-                """, (
-                    safe_str(data.get('bin')),
-                    safe_str(data.get('primary_oked_code')),
-                    safe_str(data.get('primary_oked_name'))
-                ))
             
             # ═══ INSERT TAXES ═══
             for tax in data.get('taxes', []):
@@ -278,11 +324,11 @@ class DatabaseManager:
                         total_taxes = EXCLUDED.total_taxes,
                         check_date = NOW()
                 """, (
-                    safe_str(data.get('bin')),
-                    safe_int(tax.get('year')),
-                    safe_float(tax.get('total_taxes'))
+                    data.get('bin'),
+                    tax.get('year'),
+                    tax.get('total_taxes')
                 ))
-
+            
             # ═══ INSERT NDS ═══
             for nds in data.get('nds', []):
                 cursor.execute("""
@@ -293,14 +339,14 @@ class DatabaseManager:
                         nds_amount = EXCLUDED.nds_amount,
                         check_date = NOW()
                 """, (
-                    safe_str(data.get('bin')),
-                    safe_int(nds.get('year')),
-                    safe_float(nds.get('nds_amount'))
+                    data.get('bin'),
+                    nds.get('year'),
+                    nds.get('nds_amount')
                 ))
             
             # ═══ INSERT RELATIONS ═══
             for relation in data.get('relations', []):
-                bin_to = safe_str(relation.get('bin_to'))
+                bin_to = relation.get('bin_to')
                 if bin_to and self.exists_company(bin_to):
                     cursor.execute("""
                         INSERT INTO company_relations (
@@ -308,9 +354,9 @@ class DatabaseManager:
                         ) VALUES (%s, %s, %s)
                         ON CONFLICT DO NOTHING
                     """, (
-                        safe_str(relation.get('bin_from')),
+                        relation.get('bin_from'),
                         bin_to,
-                        safe_str(relation.get('relation_type'))
+                        relation.get('relation_type')
                     ))
             
             conn.commit()
@@ -323,8 +369,7 @@ class DatabaseManager:
             logger.error(traceback.format_exc())
             raise
         finally:
-            if cursor:
-                cursor.close()
+            cursor.close()
     
     # ════════════════════════════════════════════════════════════════
     # UPDATE OPERATION
@@ -337,7 +382,7 @@ class DatabaseManager:
         changes: Dict[str, Dict[str, Any]]
     ):
         """
-        Update existing company.
+        Update existing company with references.
         
         Args:
             bin_value: Company BIN
@@ -348,67 +393,59 @@ class DatabaseManager:
         cursor = conn.cursor()
         
         try:
-            # ═══ HELPER FUNCTIONS ═══
-            def safe_value(value, default=None):
-                """Safely extract value."""
-                if value is None:
-                    return default
-                if isinstance(value, dict):
-                    if 'value' in value:
-                        return safe_value(value['value'], default)
-                    return default
-                return value
+            import json
             
-            def safe_str(value):
-                """Convert to string safely."""
-                result = safe_value(value)
-                return str(result) if result is not None else None
+            # Получить ID из справочников
+            status_id = None
+            if data.get('status'):
+                status_id = self.ref_manager.get_or_create_status(
+                    data['status']['code'],
+                    data['status']['name']
+                )
             
-            def safe_bool(value):
-                """Convert to boolean safely."""
-                result = safe_value(value)
-                if result is None:
-                    return None
-                if isinstance(result, bool):
-                    return result
-                if isinstance(result, str):
-                    return result.lower() in ('true', '1', 'yes')
-                return bool(result)
+            risk_id = self.ref_manager.get_or_create_risk(data.get('degree_of_risk'))
             
-            def safe_int(value):
-                """Convert to int safely."""
-                result = safe_value(value)
-                if result is None:
-                    return None
-                try:
-                    return int(result)
-                except (ValueError, TypeError):
-                    return None
+            krp_id = None
+            if data.get('krp'):
+                krp_id = self.ref_manager.get_or_create_krp(
+                    data['krp']['code'],
+                    data['krp']['name']
+                )
             
-            def safe_float(value):
-                """Convert to float safely."""
-                result = safe_value(value)
-                if result is None:
-                    return 0.0
-                try:
-                    return float(result)
-                except (ValueError, TypeError):
-                    return 0.0
+            kfc_id = None
+            if data.get('kfc'):
+                kfc_id = self.ref_manager.get_or_create_kfc(
+                    data['kfc']['code'],
+                    data['kfc']['name']
+                )
             
-            # ═══ UPDATE MAIN RECORD ═══
+            kse_id = None
+            if data.get('kse'):
+                kse_id = self.ref_manager.get_or_create_kse(
+                    data['kse']['code'],
+                    data['kse']['name']
+                )
+            
+            oked_id = None
+            if data.get('oked'):
+                oked_id = self.ref_manager.get_or_create_oked(
+                    data['oked']['code'],
+                    data['oked']['name']
+                )
+            
+            # UPDATE компании
             sql = """
                 UPDATE companies SET
                     name_ru = %s,
                     ceo_name = %s,
                     is_nds = %s,
-                    degree_of_risk = %s,
-                    krp_description = %s,
-                    kfc_description = %s,
-                    kse_description = %s,
-                    primary_oked_code = %s,
-                    primary_oked_name = %s,
-                    status_description = %s,
-                    phone = %s,
+                    risk_id = %s,
+                    krp_id = %s,
+                    kfc_id = %s,
+                    kse_id = %s,
+                    oked_id = %s,
+                    status_id = %s,
+                    phone = %s::jsonb,
                     last_api_check = NOW(),
                     api_check_count = api_check_count + 1,
                     updated_at = NOW()
@@ -416,18 +453,17 @@ class DatabaseManager:
             """
             
             cursor.execute(sql, (
-                safe_str(data.get('name_ru')),
-                safe_str(data.get('ceo_name')),
-                safe_bool(data.get('is_nds')),
-                safe_str(data.get('degree_of_risk')),
-                safe_str(data.get('krp_description')),
-                safe_str(data.get('kfc_description')),
-                safe_str(data.get('kse_description')),
-                safe_str(data.get('primary_oked_code')),
-                safe_str(data.get('primary_oked_name')),
-                safe_str(data.get('status_description')),
-                safe_str(data.get('phone')),
-                safe_str(bin_value)
+                data.get('name_ru'),
+                data.get('ceo_name'),
+                data.get('is_nds'),
+                risk_id,
+                krp_id,
+                kfc_id,
+                kse_id,
+                oked_id,
+                status_id,
+                json.dumps(data.get('phone')) if data.get('phone') else None,
+                bin_value
             ))
             
             # ═══ HANDLE NAME CHANGE ═══
@@ -436,13 +472,13 @@ class DatabaseManager:
                     UPDATE company_names
                     SET valid_to = NOW()::DATE, is_current = false
                     WHERE bin = %s AND is_current = true
-                """, (safe_str(bin_value),))
+                """, (bin_value,))
                 
                 cursor.execute("""
                     INSERT INTO company_names (
                         bin, name_ru, valid_from, is_current
                     ) VALUES (%s, %s, NOW()::DATE, true)
-                """, (safe_str(bin_value), safe_str(data.get('name_ru'))))
+                """, (bin_value, data.get('name_ru')))
             
             # ═══ HANDLE CEO CHANGE ═══
             if 'ceo_name' in changes:
@@ -450,13 +486,13 @@ class DatabaseManager:
                     UPDATE company_ceos
                     SET valid_to = NOW()::DATE, is_current = false
                     WHERE bin = %s AND is_current = true
-                """, (safe_str(bin_value),))
+                """, (bin_value,))
                 
                 cursor.execute("""
                     INSERT INTO company_ceos (
                         bin, ceo_name, valid_from, is_current
                     ) VALUES (%s, %s, NOW()::DATE, true)
-                """, (safe_str(bin_value), safe_str(data.get('ceo_name'))))
+                """, (bin_value, data.get('ceo_name')))
             
             # ═══ UPDATE TAXES (UPSERT) ═══
             for tax in data.get('taxes', []):
@@ -468,11 +504,11 @@ class DatabaseManager:
                         total_taxes = EXCLUDED.total_taxes,
                         check_date = NOW()
                 """, (
-                    safe_str(bin_value),
-                    safe_int(tax.get('year')),
-                    safe_float(tax.get('total_taxes'))
+                    bin_value,
+                    tax.get('year'),
+                    tax.get('total_taxes')
                 ))
-
+            
             # ═══ UPDATE NDS (UPSERT) ═══
             for nds in data.get('nds', []):
                 cursor.execute("""
@@ -483,14 +519,14 @@ class DatabaseManager:
                         nds_amount = EXCLUDED.nds_amount,
                         check_date = NOW()
                 """, (
-                    safe_str(bin_value),
-                    safe_int(nds.get('year')),
-                    safe_float(nds.get('nds_amount'))
+                    bin_value,
+                    nds.get('year'),
+                    nds.get('nds_amount')
                 ))
             
             # ═══ UPDATE RELATIONS (APPEND NEW) ═══
             for relation in data.get('relations', []):
-                bin_to = safe_str(relation.get('bin_to'))
+                bin_to = relation.get('bin_to')
                 if bin_to and self.exists_company(bin_to):
                     cursor.execute("""
                         INSERT INTO company_relations (
@@ -498,9 +534,9 @@ class DatabaseManager:
                         ) VALUES (%s, %s, %s)
                         ON CONFLICT DO NOTHING
                     """, (
-                        safe_str(relation.get('bin_from')),
+                        relation.get('bin_from'),
                         bin_to,
-                        safe_str(relation.get('relation_type'))
+                        relation.get('relation_type')
                     ))
             
             conn.commit()
@@ -518,8 +554,7 @@ class DatabaseManager:
             logger.error(traceback.format_exc())
             raise
         finally:
-            if cursor:
-                cursor.close()
+            cursor.close()
     
     # ════════════════════════════════════════════════════════════════
     # UTILITY OPERATIONS

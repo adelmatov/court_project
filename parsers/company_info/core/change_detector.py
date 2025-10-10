@@ -17,11 +17,11 @@ class ChangeDetector:
         'ceo_name',
         'is_nds',
         'degree_of_risk',
-        'krp_description',
-        'kfc_description',
-        'kse_description',
-        'primary_oked_code',
-        'status_description',
+        'krp',    # теперь dict {'code': ..., 'name': ...}
+        'kfc',
+        'kse',
+        'status',
+        'oked',
         'phone'
     ]
     
