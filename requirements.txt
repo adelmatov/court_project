@@ -1,0 +1,11 @@
+playwright
+tenacity
+selectolax
+requests
+lxml
+aiohttp
+tqdm
+openpyxl
+httpx
+psycopg2
+aiofiles
