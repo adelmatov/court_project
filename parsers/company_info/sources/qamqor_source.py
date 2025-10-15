@@ -43,44 +43,6 @@ class QamqorBinSource(BinSource):
             logger.debug(f"Connected to target database: {TARGET_DB_CONFIG['database']}")
         return self.target_conn
     
-    def _is_iin(self, bin_code: str) -> bool:
-        """
-        Check if code is IIN (individual) instead of BIN (company).
-        
-        IIN format: ГГММДД (year, month, day of birth)
-        - Positions 3-4: month (01-12 or 13-32 for 1800s)
-        
-        BIN format: starts with year + 40/41/42
-        - Positions 3-4: always 40, 41, or 42
-        
-        Args:
-            bin_code: 12-digit code
-            
-        Returns:
-            True if IIN (individual), False if BIN (company)
-        """
-        if len(bin_code) != 12:
-            return False
-        
-        # Проверяем 4-ю и 5-ю цифры (позиции 3-4)
-        month_code = bin_code[3:5]
-        
-        # БИН: месяц регистрации = 40, 41, 42
-        # ИИН: месяц рождения = 01-12 (или 13-32 для 1800-х годов)
-        if month_code in ['40', '41', '42']:
-            return False  # Это БИН (компания)
-        
-        # Дополнительная проверка: месяц должен быть в валидном диапазоне для ИИН
-        try:
-            month = int(month_code)
-            # 01-12 (1900-1999), 13-24 (1800-1899), 25-36 (2000-2099)
-            if 1 <= month <= 36:
-                return True  # Это ИИН (физлицо)
-        except ValueError:
-            pass
-        
-        return False
-    
     def _get_existing_bins(self) -> Set[str]:
         """
         Get set of BINs that already exist in companies table.
@@ -124,28 +86,68 @@ class QamqorBinSource(BinSource):
     
     def get_bins(self, limit: Optional[int] = None) -> List[str]:
         """
-        Extract unique BINs from qamqor_tax and qamqor_customs,
-        excluding IINs (individuals) and already processed companies.
+        Extract unique 12-digit codes from qamqor_tax and qamqor_customs,
+        excluding codes that already exist in companies table.
         
         Args:
-            limit: Maximum number of NEW BINs to return
+            limit: Maximum number of NEW codes to return
         
         Returns:
-            List of unique BIN strings (companies only, not individuals)
+            List of 12-digit codes (BIN or IIN - doesn't matter)
         """
         
-        # Получаем существующие БИНы из target БД (companies)
-        existing_bins = self._get_existing_bins()
+        # Проверяем существование таблицы companies в target БД
+        try:
+            target_conn = self._get_target_connection()
+            target_cursor = target_conn.cursor()
+            
+            target_cursor.execute("""
+                SELECT EXISTS (
+                    SELECT FROM information_schema.tables 
+                    WHERE table_schema = 'public' 
+                    AND table_name = 'companies'
+                )
+            """)
+            
+            table_exists = target_cursor.fetchone()[0]
+            target_cursor.close()
+            
+            if not table_exists:
+                logger.warning("⚠️  Table 'companies' does not exist yet in target database")
+                has_existing = False
+            else:
+                # Получаем количество существующих кодов
+                target_cursor = target_conn.cursor()
+                target_cursor.execute("SELECT COUNT(*) FROM companies WHERE bin IS NOT NULL")
+                existing_count = target_cursor.fetchone()[0]
+                target_cursor.close()
+                
+                has_existing = existing_count > 0
+                if has_existing:
+                    logger.info(f"Excluding {existing_count} existing codes from companies table")
+                else:
+                    logger.info("No existing codes to exclude (table is empty)")
+            
+        except Exception as e:
+            logger.warning(f"⚠️  Could not check companies table: {e}")
+            has_existing = False
         
-        if existing_bins:
-            logger.info(f"Excluding {len(existing_bins)} existing BINs from companies table")
+        # Загружаем существующие коды
+        if has_existing:
+            try:
+                target_cursor = target_conn.cursor()
+                target_cursor.execute("SELECT bin FROM companies WHERE bin IS NOT NULL")
+                existing_codes_list = [row[0] for row in target_cursor.fetchall()]
+                target_cursor.close()
+                
+                logger.debug(f"Loaded {len(existing_codes_list)} existing codes from companies table")
+            except Exception as e:
+                logger.warning(f"Failed to load existing codes: {e}")
+                existing_codes_list = []
         else:
-            logger.info("No existing BINs to exclude (table is empty or doesn't exist)")
+            existing_codes_list = []
         
-        # SQL запрос к qamqor БД с запасом
-        # Берём в 20 раз больше, чтобы после фильтрации ИИН осталось достаточно БИНов
-        fetch_limit = limit * 20 if limit else None
-        
+        # ✅ Простой SQL: только 12 цифр + исключить существующие
         sql = """
             SELECT DISTINCT subject_bin
             FROM (
@@ -156,61 +158,53 @@ class QamqorBinSource(BinSource):
                 WHERE subject_bin IS NOT NULL
             ) combined
             WHERE subject_bin ~ '^[0-9]{12}$'
-            ORDER BY subject_bin
         """
         
-        if fetch_limit:
-            sql += f" LIMIT {fetch_limit}"
+        # Добавляем фильтр NOT IN, если есть существующие коды
+        params = []
+        if existing_codes_list:
+            sql += " AND subject_bin NOT IN %s"
+            params.append(tuple(existing_codes_list))
+        
+        sql += " ORDER BY subject_bin"
+        
+        # Лимит применяется к УЖЕ отфильтрованным данным
+        if limit:
+            sql += f" LIMIT {limit}"
         
         try:
             conn = self._get_qamqor_connection()
             cursor = conn.cursor()
-            cursor.execute(sql)
             
-            all_bins = cursor.fetchall()
+            if params:
+                cursor.execute(sql, params)
+            else:
+                cursor.execute(sql)
             
-            # Фильтруем: валидация + исключаем ИИН + исключаем существующие БИНы
-            new_bins = []
-            iin_count = 0
+            all_codes = cursor.fetchall()
             
-            for row in all_bins:
-                bin_code = row[0]
-                
-                # Пропускаем невалидные
-                if not validate_bin(bin_code):
-                    continue
-                
-                # Пропускаем ИИН (физлица)
-                if self._is_iin(bin_code):
-                    iin_count += 1
-                    logger.debug(f"Skipping IIN (individual): {bin_code}")
-                    continue
-                
-                # Пропускаем уже существующие
-                if bin_code in existing_bins:
-                    continue
-                
-                new_bins.append(bin_code)
-                
-                # Применяем лимит
-                if limit and len(new_bins) >= limit:
-                    break
+            # ✅ Минимальная валидация (только формат)
+            new_codes = []
             
-            excluded_count = len(all_bins) - len(new_bins)
+            for row in all_codes:
+                code = row[0]
+                
+                # Только проверка что это 12 цифр
+                if validate_bin(code):
+                    new_codes.append(code)
             
             logger.info(
-                f"✅ Extracted {len(new_bins)} NEW company BINs from qamqor tables"
+                f"✅ Extracted {len(new_codes)} NEW codes from qamqor tables"
             )
             logger.info(
-                f"📊 Stats: fetched {len(all_bins)}, excluded {iin_count} IINs, "
-                f"excluded {excluded_count - iin_count} existing/invalid"
+                f"📊 Stats: fetched {len(all_codes)}"
             )
             
             cursor.close()
-            return new_bins
+            return new_codes
             
         except Exception as e:
-            logger.error(f"❌ Error extracting BINs from qamqor: {e}")
+            logger.error(f"❌ Error extracting codes from qamqor: {e}")
             raise
     
     def __del__(self):

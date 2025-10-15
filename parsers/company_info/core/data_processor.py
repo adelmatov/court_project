@@ -46,7 +46,6 @@ class DataProcessor:
             ),
             'ceo_name': DataProcessor._extract_ceo_name(basic.get('ceo')),
             'is_nds': DataProcessor._extract_value(basic.get('isNds')),
-            'degree_of_risk': DataProcessor._extract_value(basic.get('degreeOfRisk')),
             
             # Справочники (код + описание)
             'krp': krp,

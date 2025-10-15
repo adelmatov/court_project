@@ -16,8 +16,7 @@ class ChangeDetector:
         'name_ru',
         'ceo_name',
         'is_nds',
-        'degree_of_risk',
-        'krp',    # теперь dict {'code': ..., 'name': ...}
+        'krp',
         'kfc',
         'kse',
         'status',

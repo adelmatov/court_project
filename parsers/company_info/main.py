@@ -4,8 +4,10 @@ Company Parser - Main entry point
 
 import sys
 import argparse
+import logging
 from pathlib import Path
 from typing import List, Optional
+from tqdm import tqdm
 
 from .core.logger import logger, setup_logger
 from .core.api_client import APIClient, APIError, CompanyNotFoundError
@@ -93,19 +95,53 @@ class CompanyParser:
         # Process BINs
         self.stats['total'] = len(bins)
         
-        for i, bin_value in enumerate(bins, 1):
-            logger.info(f"[{i}/{len(bins)}] Processing BIN: {bin_value}")
+        # ✅ Зелёный прогресс-бар с ETA
+        try:
+            from tqdm import tqdm
             
+            # ✅ Временно отключить console handler
+            console_handler = None
+            for handler in logger.handlers:
+                if isinstance(handler, logging.StreamHandler) and handler.stream == sys.stdout:
+                    console_handler = handler
+                    logger.removeHandler(handler)
+                    break
+            
+            progress_bar = tqdm(
+                bins,
+                desc="🚀 Processing",
+                unit=" BIN",
+                colour="green",
+                bar_format='{desc}: {percentage:3.0f}%|{bar}| {n_fmt}/{total_fmt} [⏱️ {elapsed} < {remaining}]'
+            )
+            use_progress = True
+        except ImportError:
+            logger.warning("tqdm not installed, progress bar disabled")
+            progress_bar = bins
+            use_progress = False
+            console_handler = None
+        
+        for i, bin_value in enumerate(progress_bar, 1):
             try:
                 self._process_bin(bin_value)
                 
             except KeyboardInterrupt:
                 logger.warning("Interrupted by user")
+                if use_progress:
+                    progress_bar.close()
                 break
             
             except Exception as e:
                 self.stats['errors'] += 1
                 logger.exception(f"Unexpected error for {bin_value}: {e}")
+        
+        # ✅ Закрыть прогресс-бар
+        if use_progress:
+            progress_bar.close()
+            
+            # ✅ Вернуть console handler
+            if console_handler:
+                logger.addHandler(console_handler)
         
         # Print summary
         self._print_summary()

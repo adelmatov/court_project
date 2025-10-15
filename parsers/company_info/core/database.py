@@ -90,7 +90,6 @@ class DatabaseManager:
                 c.created_at, c.updated_at,
                 
                 -- Данные из справочников
-                r.code as degree_of_risk,
                 s.code as status_code,
                 s.name as status_name,
                 krp.code as krp_code,
@@ -103,7 +102,6 @@ class DatabaseManager:
                 oked.name as oked_name
                 
             FROM companies c
-            LEFT JOIN ref_risk r ON c.risk_id = r.id
             LEFT JOIN ref_status s ON c.status_id = s.id
             LEFT JOIN ref_krp krp ON c.krp_id = krp.id
             LEFT JOIN ref_kfc kfc ON c.kfc_id = kfc.id
@@ -231,8 +229,6 @@ class DatabaseManager:
                     data['status']['name']
                 )
             
-            risk_id = self.ref_manager.get_or_create_risk(data.get('degree_of_risk'))
-            
             krp_id = None
             if data.get('krp'):
                 krp_id = self.ref_manager.get_or_create_krp(
@@ -265,10 +261,10 @@ class DatabaseManager:
             sql = """
                 INSERT INTO companies (
                     bin, name_ru, registration_date, ceo_name,
-                    is_nds, risk_id, krp_id, kfc_id, kse_id, oked_id, status_id,
+                    is_nds, krp_id, kfc_id, kse_id, oked_id, status_id,
                     phone, last_api_check, api_check_count
                 ) VALUES (
-                    %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s::jsonb, NOW(), 1
+                    %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s::jsonb, NOW(), 1
                 )
             """
             
@@ -278,7 +274,6 @@ class DatabaseManager:
                 data.get('registration_date'),
                 data.get('ceo_name'),
                 data.get('is_nds'),
-                risk_id,
                 krp_id,
                 kfc_id,
                 kse_id,
@@ -403,8 +398,6 @@ class DatabaseManager:
                     data['status']['name']
                 )
             
-            risk_id = self.ref_manager.get_or_create_risk(data.get('degree_of_risk'))
-            
             krp_id = None
             if data.get('krp'):
                 krp_id = self.ref_manager.get_or_create_krp(
@@ -439,7 +432,6 @@ class DatabaseManager:
                     name_ru = %s,
                     ceo_name = %s,
                     is_nds = %s,
-                    risk_id = %s,
                     krp_id = %s,
                     kfc_id = %s,
                     kse_id = %s,
@@ -456,7 +448,6 @@ class DatabaseManager:
                 data.get('name_ru'),
                 data.get('ceo_name'),
                 data.get('is_nds'),
-                risk_id,
                 krp_id,
                 kfc_id,
                 kse_id,
