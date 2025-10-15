@@ -16,4 +16,4 @@ python -m parsers.company_info.main --source qamqor --limit 100
 python -m parsers.company_info.main --bins "060840008420"
 python -m parsers.company_info.main --file bins.txt
 python -m parsers.company_info.main --source qamqor --force
-python -m parsers.company_info.main --source qamqor --limit 10 --dry-run
+python -m parsers.company_info.main --source qamqor --limit 10 --dry-runs

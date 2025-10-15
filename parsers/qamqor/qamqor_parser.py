@@ -866,7 +866,6 @@ class QamqorParser:
         self.logger.info(f"   └─ Обработано: {metrics['records_processed']}")
         self.logger.info(f"   └─ Скорость: {metrics['records_per_second']} зап/с")
 
-
 # ✅ StealthTabManager с правильным применением stealth
 class StealthTabManager:
     """TabManager с автоматическим применением stealth к каждой вкладке."""

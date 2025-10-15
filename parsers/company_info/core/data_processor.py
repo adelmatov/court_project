@@ -41,7 +41,11 @@ class DataProcessor:
             'kse': kse,
             'status': status,
             
-            'phone': response.get('egovContacts', {}).get('phone'),
+            'phone': [
+                p.get('value')
+                for p in response.get('egovContacts', {}).get('phone', [])
+                if p.get('value')
+            ],
         }
         
         # OKED
