@@ -18,6 +18,19 @@ class DataProcessor:
         """Parse API response with codes and descriptions."""
         
         basic = response.get('basicInfo', {})
+
+        # ✅ Проверяем флаг isDeleted
+        is_deleted = basic.get('isDeleted', False)
+        
+        if is_deleted:
+            # Возвращаем минимальные данные для сохранения как DELETED
+            return {
+                'bin': basic.get('bin'),
+                'is_deleted': True,
+                'registration_date': DataProcessor._parse_date(
+                    DataProcessor._extract_value(basic.get('registrationDate'))
+                )
+            }
         
         # Извлечь структуры {code, description}
         krp = DataProcessor._extract_code_and_desc(basic.get('krp'))
@@ -41,11 +54,8 @@ class DataProcessor:
             'kse': kse,
             'status': status,
             
-            'phone': [
-                p.get('value')
-                for p in response.get('egovContacts', {}).get('phone', [])
-                if p.get('value')
-            ],
+            # Безопасное извлечение телефонов
+            'phone': DataProcessor._extract_phones(response),
         }
         
         # OKED
@@ -101,6 +111,7 @@ class DataProcessor:
         current_name = title_ru.get('value')
         history_list = title_ru.get('actualListFront', [])
         
+        # Проверка на None и пустой список
         if not history_list:
             return [{
                 'name_ru': current_name,
@@ -109,19 +120,27 @@ class DataProcessor:
                 'is_current': True
             }]
         
-        # Sort by actualFrom (latest last)
+        # Sort by actualFrom (latest last) с защитой от None
         sorted_history = sorted(
             history_list,
-            key=lambda x: x['history']['actualFrom']
+            key=lambda x: x.get('history', {}).get('actualFrom', '') if isinstance(x.get('history'), dict) else ''
         )
         
-        # Get last entry
-        last_entry = sorted_history[-1]['history']
-        last_name = last_entry['value']
-        last_date = DataProcessor._parse_date(last_entry['actualFrom'])
+        # Get last entry с проверкой на None
+        last_history = sorted_history[-1].get('history') if sorted_history[-1] else None
+        if not last_history:
+            return [{
+                'name_ru': current_name,
+                'valid_from': registration_date,
+                'valid_to': None,
+                'is_current': True
+            }]
+        
+        last_name = last_history.get('value')
+        last_date = DataProcessor._parse_date(last_history.get('actualFrom'))
         
         # If last differs from current
-        if last_name != current_name:
+        if last_name and last_name != current_name:
             return [
                 {
                     'name_ru': last_name,
@@ -139,24 +158,25 @@ class DataProcessor:
         
         # Check previous entry
         if len(sorted_history) > 1:
-            prev_entry = sorted_history[-2]['history']
-            prev_name = prev_entry['value']
-            
-            if prev_name != current_name:
-                return [
-                    {
-                        'name_ru': prev_name,
-                        'valid_from': registration_date,
-                        'valid_to': last_date,
-                        'is_current': False
-                    },
-                    {
-                        'name_ru': current_name,
-                        'valid_from': last_date,
-                        'valid_to': None,
-                        'is_current': True
-                    }
-                ]
+            prev_history = sorted_history[-2].get('history') if sorted_history[-2] else None
+            if prev_history:
+                prev_name = prev_history.get('value')
+                
+                if prev_name and prev_name != current_name:
+                    return [
+                        {
+                            'name_ru': prev_name,
+                            'valid_from': registration_date,
+                            'valid_to': last_date,
+                            'is_current': False
+                        },
+                        {
+                            'name_ru': current_name,
+                            'valid_from': last_date,
+                            'valid_to': None,
+                            'is_current': True
+                        }
+                    ]
         
         # No rename
         return [{
@@ -165,7 +185,45 @@ class DataProcessor:
             'valid_to': None,
             'is_current': True
         }]
-    
+
+    @staticmethod
+    def _extract_phones(response: Dict[Any, Any]) -> List[str]:
+        """
+        Safely extract phone numbers from egovContacts or gosZakupContacts.
+        
+        Args:
+            response: Full API response
+        
+        Returns:
+            List of phone numbers (empty list if none found)
+        """
+        phones = []
+        
+        # Try egovContacts first
+        egov_contacts = response.get('egovContacts')
+        if egov_contacts and isinstance(egov_contacts, dict):
+            phone_list = egov_contacts.get('phone', [])
+            if phone_list and isinstance(phone_list, list):
+                phones.extend([
+                    p.get('value')
+                    for p in phone_list
+                    if p and isinstance(p, dict) and p.get('value')
+                ])
+        
+        # Try gosZakupContacts if egovContacts was empty or None
+        if not phones:
+            gos_contacts = response.get('gosZakupContacts')
+            if gos_contacts and isinstance(gos_contacts, dict):
+                phone_list = gos_contacts.get('phone', [])
+                if phone_list and isinstance(phone_list, list):
+                    phones.extend([
+                        p.get('value')
+                        for p in phone_list
+                        if p and isinstance(p, dict) and p.get('value')
+                    ])
+        
+        return phones
+
     @staticmethod
     def _parse_taxes(taxes: Optional[Dict]) -> List[Dict[str, Any]]:
         """Parse taxes by year (only taxGraph, WITHOUT nds_paid)."""
@@ -190,38 +248,6 @@ class DataProcessor:
         
         return result
     
-    @staticmethod
-    def _parse_nds(taxes: Optional[Dict]) -> List[Dict[str, Any]]:
-        """
-        Parse NDS data from ndsGraph.
-        
-        Args:
-            taxes: taxes section from API response
-        
-        Returns:
-            List of NDS entries by year
-        """
-        if not taxes:
-            return []
-        
-        nds_graph = taxes.get('ndsGraph', [])
-        
-        result = []
-        for item in nds_graph:
-            if not item:
-                continue
-            
-            year = item.get('year')
-            if not year:
-                continue
-            
-            result.append({
-                'year': year,
-                'nds_amount': item.get('value', 0)
-            })
-        
-        return result
-
     @staticmethod
     def _parse_nds(taxes: Optional[Dict]) -> List[Dict[str, Any]]:
         """
