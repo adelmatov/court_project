@@ -9,6 +9,17 @@ from psycopg2.extras import RealDictCursor
 from .logger import logger
 
 
+"""
+Reference Manager - Управление справочниками
+"""
+
+from typing import Optional, Dict, Any, Tuple
+import psycopg2
+from psycopg2.extras import RealDictCursor
+
+from .logger import logger
+
+
 class ReferenceManager:
     """
     Кеширование и управление справочными таблицами.
@@ -18,7 +29,6 @@ class ReferenceManager:
         self.conn = conn
         self._cache = {
             'status': {},    # {code: id}
-            'risk': {},      # {code: id}
             'krp': {},       # {code: id}
             'kfc': {},       # {code: id}
             'kse': {},       # {code: id}
@@ -35,11 +45,6 @@ class ReferenceManager:
             cursor.execute("SELECT id, code FROM ref_status")
             for row in cursor.fetchall():
                 self._cache['status'][row['code']] = row['id']
-            
-            # Risk
-            cursor.execute("SELECT id, code FROM ref_risk")
-            for row in cursor.fetchall():
-                self._cache['risk'][row['code']] = row['id']
             
             # KRP
             cursor.execute("SELECT id, code FROM ref_krp")
@@ -63,7 +68,7 @@ class ReferenceManager:
             
             logger.debug(
                 f"Loaded refs: status={len(self._cache['status'])}, "
-                f"risk={len(self._cache['risk'])}, krp={len(self._cache['krp'])}, "
+                f"krp={len(self._cache['krp'])}, "
                 f"kfc={len(self._cache['kfc'])}, kse={len(self._cache['kse'])}, "
                 f"oked={len(self._cache['oked'])}"
             )
@@ -91,15 +96,6 @@ class ReferenceManager:
             return ref_id
         finally:
             cursor.close()
-    
-    def get_or_create_risk(self, code: str) -> Optional[int]:
-        """Получить ID риска."""
-        code_lower = code.lower() if code else None
-        
-        if code_lower in self._cache['risk']:
-            return self._cache['risk'][code_lower]
-        
-        return None  # Риск должен быть предзаполнен
     
     def get_or_create_krp(self, code: int, name: str) -> Optional[int]:
         """Получить/создать ID KRP."""

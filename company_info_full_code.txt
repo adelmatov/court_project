@@ -1,0 +1,2618 @@
+================================================================================
+COMPANY_INFO PARSER - COMPLETE CODE
+================================================================================
+Project: court_project
+Module: parsers/company_info
+Generated: 2025-10-15 18:15:38
+================================================================================
+
+
+================================================================================
+FILE: __init__.py
+================================================================================
+
+"""
+Company Info Parser Package
+Парсер данных о компаниях из ba.prg.kz API
+"""
+
+__version__ = '1.0.0'
+
+# Экспортируем основные классы для удобного импорта
+from .main import CompanyParser
+from .sources.registry import registry
+
+__all__ = ['CompanyParser', 'registry']
+
+================================================================================
+FILE: core\__init__.py
+================================================================================
+
+
+
+================================================================================
+FILE: core\api_client.py
+================================================================================
+
+"""
+API Client for ba.prg.kz
+"""
+
+import time
+import random
+from typing import Optional, Dict, Any
+import requests
+from requests.adapters import HTTPAdapter
+from urllib3.util.retry import Retry
+
+from .config import (
+    API_BASE_URL,
+    API_ENDPOINTS,
+    API_HEADERS,
+    API_TIMEOUT,
+    RATE_LIMIT,
+    RETRY_POLICY
+)
+from .logger import logger
+
+
+class APIError(Exception):
+    """API request error."""
+    pass
+
+
+class CompanyNotFoundError(APIError):
+    """Company not found in API."""
+    pass
+
+
+class APIClient:
+    """
+    HTTP client for ba.prg.kz API with rate limiting and retry logic.
+    """
+    
+    def __init__(self):
+        self.base_url = API_BASE_URL
+        self.session = self._create_session()
+        self.last_request_time = 0
+    
+    def _create_session(self) -> requests.Session:
+        """Create session with retry strategy."""
+        session = requests.Session()
+        
+        retry_strategy = Retry(
+            total=0,  # We handle retries manually
+            status_forcelist=[]
+        )
+        
+        adapter = HTTPAdapter(max_retries=retry_strategy)
+        session.mount("http://", adapter)
+        session.mount("https://", adapter)
+        
+        return session
+    
+    def _rate_limit(self):
+        """Apply rate limiting delay."""
+        delay = random.uniform(
+            RATE_LIMIT['min_delay_seconds'],
+            RATE_LIMIT['max_delay_seconds']
+        )
+        
+        elapsed = time.time() - self.last_request_time
+        if elapsed < delay:
+            sleep_time = delay - elapsed
+            logger.debug(f"Rate limit: sleeping {sleep_time:.2f}s")
+            time.sleep(sleep_time)
+        
+        self.last_request_time = time.time()
+    
+    def _make_request(
+        self,
+        method: str,
+        url: str,
+        **kwargs
+    ) -> Dict[Any, Any]:
+        """
+        Make HTTP request with retry logic.
+        
+        Args:
+            method: HTTP method (GET, POST)
+            url: Request URL
+            **kwargs: Additional request parameters
+        
+        Returns:
+            JSON response as dict
+        
+        Raises:
+            APIError: On request failure
+        """
+        
+        kwargs.setdefault('headers', API_HEADERS)
+        kwargs.setdefault('timeout', API_TIMEOUT)
+        
+        for attempt in range(RETRY_POLICY['max_attempts']):
+            try:
+                self._rate_limit()
+                
+                response = self.session.request(method, url, **kwargs)
+                
+                if response.status_code == 200:
+                    return response.json()
+                
+                elif response.status_code == 404:
+                    raise CompanyNotFoundError(f"Not found: {url}")
+                
+                elif response.status_code == 429:
+                    delay = RATE_LIMIT['retry_429_delay']
+                    logger.warning(
+                        f"Rate limit hit (429), waiting {delay}s"
+                    )
+                    time.sleep(delay)
+                    continue
+                
+                elif response.status_code in RETRY_POLICY['retry_on_status']:
+                    if attempt < RETRY_POLICY['max_attempts'] - 1:
+                        delay = RETRY_POLICY['backoff_delays'][attempt]
+                        logger.warning(
+                            f"HTTP {response.status_code}, "
+                            f"retry {attempt + 1}/{RETRY_POLICY['max_attempts']} "
+                            f"in {delay}s"
+                        )
+                        time.sleep(delay)
+                        continue
+                    else:
+                        raise APIError(
+                            f"HTTP {response.status_code}: {response.text}"
+                        )
+                
+                else:
+                    raise APIError(
+                        f"HTTP {response.status_code}: {response.text}"
+                    )
+            
+            except requests.Timeout:
+                if attempt < RETRY_POLICY['max_attempts'] - 1:
+                    delay = RETRY_POLICY['backoff_delays'][attempt]
+                    logger.warning(
+                        f"Timeout, retry {attempt + 1}/"
+                        f"{RETRY_POLICY['max_attempts']} in {delay}s"
+                    )
+                    time.sleep(delay)
+                    continue
+                else:
+                    raise APIError("Request timeout")
+            
+            except requests.RequestException as e:
+                raise APIError(f"Request failed: {e}")
+        
+        raise APIError(
+            f"Failed after {RETRY_POLICY['max_attempts']} attempts"
+        )
+    
+    def check_company_exists(self, bin_value: str) -> bool:
+        """
+        Check if company exists via search endpoint.
+        
+        Args:
+            bin_value: BIN to check
+        
+        Returns:
+            True if company exists, False otherwise
+        """
+        
+        url = f"{self.base_url}{API_ENDPOINTS['search']}"
+        
+        payload = {
+            "page": 1,
+            "pageSize": 10,
+            "text": bin_value,
+            "market": {"value": None},
+            "tax": {"value": None},
+            "krp": [],
+            "oked": [],
+            "kato": []
+        }
+        
+        try:
+            response = self._make_request('POST', url, json=payload)
+            
+            total = response.get('total', 0)
+            results = response.get('results', [])
+            
+            exists = total > 0 and len(results) > 0
+            
+            if exists:
+                logger.debug(f"BIN {bin_value} exists in API")
+            else:
+                logger.debug(f"BIN {bin_value} not found in API")
+            
+            return exists
+            
+        except CompanyNotFoundError:
+            return False
+        except APIError as e:
+            logger.error(f"Error checking BIN {bin_value}: {e}")
+            raise
+    
+    def get_company_info(self, bin_value: str) -> Dict[Any, Any]:
+        """
+        Get full company information.
+        
+        Args:
+            bin_value: Company BIN
+        
+        Returns:
+            Company data as dict
+        
+        Raises:
+            CompanyNotFoundError: If company not found
+            APIError: On request failure
+        """
+        
+        url = f"{self.base_url}{API_ENDPOINTS['info']}"
+        params = {'id': bin_value, 'lang': 'ru'}
+        
+        try:
+            response = self._make_request('GET', url, params=params)
+            logger.debug(f"Fetched info for BIN {bin_value}")
+            return response
+            
+        except CompanyNotFoundError:
+            logger.warning(f"Company not found: {bin_value}")
+            raise
+        except APIError as e:
+            logger.error(f"Error fetching info for {bin_value}: {e}")
+            raise
+
+================================================================================
+FILE: core\change_detector.py
+================================================================================
+
+"""
+Change detector - Compare old and new company data
+"""
+
+from typing import Dict, Any
+
+from .logger import logger
+
+
+class ChangeDetector:
+    """
+    Detect changes between old and new company data.
+    """
+    
+    FIELDS_TO_CHECK = [
+        'name_ru',
+        'ceo_name',
+        'is_nds',
+        'degree_of_risk',
+        'krp',    # теперь dict {'code': ..., 'name': ...}
+        'kfc',
+        'kse',
+        'status',
+        'oked',
+        'phone'
+    ]
+    
+    @staticmethod
+    def detect_changes(
+        old_data: Dict[str, Any],
+        new_data: Dict[str, Any]
+    ) -> Dict[str, Dict[str, Any]]:
+        """
+        Detect changes between old and new data.
+        
+        Args:
+            old_data: Existing company data from DB
+            new_data: New company data from API
+        
+        Returns:
+            Dict with changed fields:
+            {
+                'name_ru': {'old': 'OLD NAME', 'new': 'NEW NAME'},
+                'ceo_name': {'old': 'OLD CEO', 'new': 'NEW CEO'}
+            }
+        """
+        
+        changes = {}
+        
+        for field in ChangeDetector.FIELDS_TO_CHECK:
+            old_value = old_data.get(field)
+            new_value = new_data.get(field)
+            
+            if old_value != new_value:
+                changes[field] = {
+                    'old': old_value,
+                    'new': new_value
+                }
+        
+        if changes:
+            logger.debug(
+                f"Detected {len(changes)} changes for BIN {new_data.get('bin')}"
+            )
+        
+        return changes
+
+================================================================================
+FILE: core\config.py
+================================================================================
+
+"""
+Configuration settings for company parser
+"""
+
+import os
+from pathlib import Path
+from typing import Dict, Any
+
+# ════════════════════════════════════════════════════════════════
+# LOAD .env FROM PARSER DIRECTORY
+# ════════════════════════════════════════════════════════════════
+
+from dotenv import load_dotenv
+
+parser_dir = Path(__file__).resolve().parent.parent
+env_path = parser_dir / '.env'
+
+load_dotenv(dotenv_path=env_path)
+
+if env_path.exists():
+    print(f"✅ Loaded .env from: {env_path}")
+else:
+    print(f"⚠️  .env not found at: {env_path}")
+    print(f"   Please create .env file or set environment variables")
+
+# ════════════════════════════════════════════════════════════════
+# DATABASE SETTINGS - COMPANIES (основная БД для парсера)
+# ════════════════════════════════════════════════════════════════
+
+DB_CONFIG = {
+    'host': os.getenv('DB_HOST', 'localhost'),
+    'port': int(os.getenv('DB_PORT', '5432')),
+    'database': os.getenv('DB_NAME', 'companies'),  # БД для компаний
+    'user': os.getenv('DB_USER'),
+    'password': os.getenv('DB_PASSWORD')
+}
+
+# Валидация обязательных параметров
+_required_db_params = ['user', 'password']
+_missing_params = [k for k in _required_db_params if not DB_CONFIG.get(k)]
+
+if _missing_params:
+    raise ValueError(
+        f"Missing required database parameters: {', '.join(_missing_params)}\n"
+        f"Please set them in .env file: {env_path}\n"
+        f"Or copy .env.example and fill it:\n"
+        f"  cp {parser_dir}/.env.example {parser_dir}/.env"
+    )
+
+# ════════════════════════════════════════════════════════════════
+# DATABASE SETTINGS - QAMQOR (для чтения БИН)
+# ════════════════════════════════════════════════════════════════
+
+QAMQOR_DB_CONFIG = {
+    'host': os.getenv('QAMQOR_DB_HOST', os.getenv('DB_HOST', 'localhost')),
+    'port': int(os.getenv('QAMQOR_DB_PORT', os.getenv('DB_PORT', '5432'))),
+    'database': 'qamqor',  # Всегда qamqor
+    'user': os.getenv('QAMQOR_DB_USER', os.getenv('DB_USER')),
+    'password': os.getenv('QAMQOR_DB_PASSWORD', os.getenv('DB_PASSWORD'))
+}
+
+# ════════════════════════════════════════════════════════════════
+# DATABASE SETTINGS - TARGET (для проверки company таблицы)
+# ════════════════════════════════════════════════════════════════
+
+TARGET_DB_CONFIG = {
+    'host': os.getenv('TARGET_DB_HOST', os.getenv('DB_HOST', 'localhost')),
+    'port': int(os.getenv('TARGET_DB_PORT', os.getenv('DB_PORT', '5432'))),
+    'database': os.getenv('TARGET_DB_NAME', os.getenv('DB_NAME', 'companies')),
+    'user': os.getenv('TARGET_DB_USER', os.getenv('DB_USER')),
+    'password': os.getenv('TARGET_DB_PASSWORD', os.getenv('DB_PASSWORD'))
+}
+
+# ════════════════════════════════════════════════════════════════
+# API SETTINGS
+# ════════════════════════════════════════════════════════════════
+
+API_BASE_URL = os.getenv('COMPANY_API_URL', 'https://apiba.prgapp.kz')
+API_TIMEOUT = int(os.getenv('API_TIMEOUT', '30'))
+
+API_ENDPOINTS = {
+    'search': '/GetCompanyListAsync',
+    'info': '/CompanyFullInfo'
+}
+
+API_HEADERS = {
+    'accept': 'application/json',
+    'content-type': 'application/json',
+    'origin': 'https://ba.prg.kz',
+    'referer': 'https://ba.prg.kz/',
+    'user-agent': (
+        'Mozilla/5.0 (Windows NT 10.0; Win64; x64) '
+        'AppleWebKit/537.36 (KHTML, like Gecko) '
+        'Chrome/141.0.0.0 Safari/537.36 Edg/141.0.0.0'
+    )
+}
+
+# ════════════════════════════════════════════════════════════════
+# RATE LIMITING
+# ════════════════════════════════════════════════════════════════
+
+RATE_LIMIT: Dict[str, Any] = {
+    'requests_per_minute': int(os.getenv('RATE_LIMIT_RPM', '10')),
+    'min_delay_seconds': float(os.getenv('MIN_DELAY', '6.0')),
+    'max_delay_seconds': float(os.getenv('MAX_DELAY', '10.0')),
+    'retry_429_delay': int(os.getenv('RETRY_429_DELAY', '300'))
+}
+
+# ════════════════════════════════════════════════════════════════
+# RETRY POLICY
+# ════════════════════════════════════════════════════════════════
+
+RETRY_POLICY: Dict[str, Any] = {
+    'max_attempts': int(os.getenv('MAX_RETRIES', '3')),
+    'backoff_delays': [60, 180, 600],
+    'retry_on_status': [429, 500, 502, 503, 504]
+}
+
+# ════════════════════════════════════════════════════════════════
+# PARSING
+# ════════════════════════════════════════════════════════════════
+
+BATCH_SIZE = int(os.getenv('BATCH_SIZE', '100'))
+UPDATE_DAYS_THRESHOLD = int(os.getenv('UPDATE_THRESHOLD_DAYS', '90'))
+
+# ════════════════════════════════════════════════════════════════
+# LOGGING
+# ════════════════════════════════════════════════════════════════
+
+LOG_CONFIG = {
+    'format': '%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    'date_format': '%Y-%m-%d %H:%M:%S',
+    'file': os.getenv('LOG_FILE', 'logs/company_parser.log'),
+    'level': os.getenv('LOG_LEVEL', 'INFO')
+}
+
+================================================================================
+FILE: core\data_processor.py
+================================================================================
+
+"""
+Data processor - Parse JSON from API
+"""
+
+from typing import Dict, List, Optional, Any
+from datetime import datetime
+
+from .logger import logger
+
+
+class DataProcessor:
+    """
+    Process JSON data from API into database-ready format.
+    """
+    
+    @staticmethod
+    def parse_company(response: Dict[Any, Any]) -> Dict[str, Any]:
+        """Parse API response with codes and descriptions."""
+        
+        basic = response.get('basicInfo', {})
+
+        # ✅ Проверяем флаг isDeleted
+        is_deleted = basic.get('isDeleted', False)
+        
+        if is_deleted:
+            # Возвращаем минимальные данные для сохранения как DELETED
+            return {
+                'bin': basic.get('bin'),
+                'is_deleted': True,
+                'registration_date': DataProcessor._parse_date(
+                    DataProcessor._extract_value(basic.get('registrationDate'))
+                )
+            }
+        
+        # Извлечь структуры {code, description}
+        krp = DataProcessor._extract_code_and_desc(basic.get('krp'))
+        kfc = DataProcessor._extract_code_and_desc(basic.get('kfc'))
+        kse = DataProcessor._extract_code_and_desc(basic.get('kse'))
+        status = DataProcessor._extract_code_and_desc(basic.get('status'))
+        
+        company = {
+            'bin': basic.get('bin'),
+            'name_ru': DataProcessor._extract_value(basic.get('titleRu')),
+            'registration_date': DataProcessor._parse_date(
+                DataProcessor._extract_value(basic.get('registrationDate'))
+            ),
+            'ceo_name': DataProcessor._extract_ceo_name(basic.get('ceo')),
+            'is_nds': DataProcessor._extract_value(basic.get('isNds')),
+            'degree_of_risk': DataProcessor._extract_value(basic.get('degreeOfRisk')),
+            
+            # Справочники (код + описание)
+            'krp': krp,
+            'kfc': kfc,
+            'kse': kse,
+            'status': status,
+            
+            # Безопасное извлечение телефонов
+            'phone': DataProcessor._extract_phones(response),
+        }
+        
+        # OKED
+        primary_oked = DataProcessor._extract_value(basic.get('primaryOKED'))
+        if primary_oked:
+            parts = primary_oked.split(' ', 1)
+            company['oked'] = {
+                'code': parts[0],
+                'name': parts[1] if len(parts) > 1 else None
+            }
+        else:
+            company['oked'] = None
+        
+        # Остальное без изменений
+        company['name_history'] = DataProcessor._parse_name_history(
+            basic.get('titleRu'),
+            company['registration_date']
+        )
+        company['taxes'] = DataProcessor._parse_taxes(response.get('taxes'))
+        company['nds'] = DataProcessor._parse_nds(response.get('taxes'))
+        company['relations'] = DataProcessor._parse_relations(
+            response.get('relatedCompanies'),
+            company['bin']
+        )
+        
+        return company
+    
+    @staticmethod
+    def _parse_name_history(
+        title_ru: Optional[Dict],
+        registration_date: str
+    ) -> List[Dict[str, Any]]:
+        """
+        Parse name history from titleRu.actualListFront.
+        
+        Logic:
+        1. Get current name from value
+        2. Sort actualListFront by actualFrom (latest last)
+        3. Take LAST entry from history
+        4. If it differs from current → there was a rename
+        
+        Args:
+            title_ru: titleRu field from API
+            registration_date: Company registration date
+        
+        Returns:
+            List of name history entries
+        """
+        
+        if not title_ru:
+            return []
+        
+        current_name = title_ru.get('value')
+        history_list = title_ru.get('actualListFront', [])
+        
+        # Проверка на None и пустой список
+        if not history_list:
+            return [{
+                'name_ru': current_name,
+                'valid_from': registration_date,
+                'valid_to': None,
+                'is_current': True
+            }]
+        
+        # Sort by actualFrom (latest last) с защитой от None
+        sorted_history = sorted(
+            history_list,
+            key=lambda x: x.get('history', {}).get('actualFrom', '') if isinstance(x.get('history'), dict) else ''
+        )
+        
+        # Get last entry с проверкой на None
+        last_history = sorted_history[-1].get('history') if sorted_history[-1] else None
+        if not last_history:
+            return [{
+                'name_ru': current_name,
+                'valid_from': registration_date,
+                'valid_to': None,
+                'is_current': True
+            }]
+        
+        last_name = last_history.get('value')
+        last_date = DataProcessor._parse_date(last_history.get('actualFrom'))
+        
+        # If last differs from current
+        if last_name and last_name != current_name:
+            return [
+                {
+                    'name_ru': last_name,
+                    'valid_from': registration_date,
+                    'valid_to': last_date,
+                    'is_current': False
+                },
+                {
+                    'name_ru': current_name,
+                    'valid_from': last_date,
+                    'valid_to': None,
+                    'is_current': True
+                }
+            ]
+        
+        # Check previous entry
+        if len(sorted_history) > 1:
+            prev_history = sorted_history[-2].get('history') if sorted_history[-2] else None
+            if prev_history:
+                prev_name = prev_history.get('value')
+                
+                if prev_name and prev_name != current_name:
+                    return [
+                        {
+                            'name_ru': prev_name,
+                            'valid_from': registration_date,
+                            'valid_to': last_date,
+                            'is_current': False
+                        },
+                        {
+                            'name_ru': current_name,
+                            'valid_from': last_date,
+                            'valid_to': None,
+                            'is_current': True
+                        }
+                    ]
+        
+        # No rename
+        return [{
+            'name_ru': current_name,
+            'valid_from': registration_date,
+            'valid_to': None,
+            'is_current': True
+        }]
+
+    @staticmethod
+    def _extract_phones(response: Dict[Any, Any]) -> List[str]:
+        """
+        Safely extract phone numbers from egovContacts or gosZakupContacts.
+        
+        Args:
+            response: Full API response
+        
+        Returns:
+            List of phone numbers (empty list if none found)
+        """
+        phones = []
+        
+        # Try egovContacts first
+        egov_contacts = response.get('egovContacts')
+        if egov_contacts and isinstance(egov_contacts, dict):
+            phone_list = egov_contacts.get('phone', [])
+            if phone_list and isinstance(phone_list, list):
+                phones.extend([
+                    p.get('value')
+                    for p in phone_list
+                    if p and isinstance(p, dict) and p.get('value')
+                ])
+        
+        # Try gosZakupContacts if egovContacts was empty or None
+        if not phones:
+            gos_contacts = response.get('gosZakupContacts')
+            if gos_contacts and isinstance(gos_contacts, dict):
+                phone_list = gos_contacts.get('phone', [])
+                if phone_list and isinstance(phone_list, list):
+                    phones.extend([
+                        p.get('value')
+                        for p in phone_list
+                        if p and isinstance(p, dict) and p.get('value')
+                    ])
+        
+        return phones
+
+    @staticmethod
+    def _parse_taxes(taxes: Optional[Dict]) -> List[Dict[str, Any]]:
+        """Parse taxes by year (only taxGraph, WITHOUT nds_paid)."""
+        if not taxes:
+            return []
+        
+        tax_graph = taxes.get('taxGraph', [])
+        
+        result = []
+        for item in tax_graph:
+            if not item:
+                continue
+            
+            year = item.get('year')
+            if not year:
+                continue
+            
+            result.append({
+                'year': year,
+                'total_taxes': item.get('value', 0)
+            })
+        
+        return result
+    
+    @staticmethod
+    def _parse_nds(taxes: Optional[Dict]) -> List[Dict[str, Any]]:
+        """
+        Parse NDS data from ndsGraph.
+        
+        Args:
+            taxes: taxes section from API response
+        
+        Returns:
+            List of NDS entries by year
+        """
+        if not taxes:
+            return []
+        
+        nds_graph = taxes.get('ndsGraph', [])
+        
+        result = []
+        for item in nds_graph:
+            if not item:
+                continue
+            
+            year = item.get('year')
+            if not year:
+                continue
+            
+            result.append({
+                'year': year,
+                'nds_amount': item.get('value', 0)
+            })
+        
+        return result
+    
+    @staticmethod
+    def _parse_relations(
+        related: Optional[Dict],
+        bin_from: str
+    ) -> List[Dict[str, Any]]:
+        """Parse related companies."""
+        if not related:
+            return []
+        
+        result = []
+        
+        # Same address
+        same_address = related.get('sameAddress', {}).get('results', [])
+        for item in same_address:
+            if item and item.get('bin'):
+                result.append({
+                    'bin_from': bin_from,
+                    'bin_to': item['bin'],
+                    'relation_type': 'same_address'
+                })
+        
+        # Same CEO
+        same_fio = related.get('sameFio', {}).get('results', [])
+        for item in same_fio:
+            if item and item.get('bin'):
+                result.append({
+                    'bin_from': bin_from,
+                    'bin_to': item['bin'],
+                    'relation_type': 'same_ceo'
+                })
+        
+        return result
+    
+    # ════════════════════════════════════════════════════════════════
+    # HELPER METHODS
+    # ════════════════════════════════════════════════════════════════
+    
+    @staticmethod
+    def _extract_value(field: Optional[Dict]) -> Any:
+        """
+        Recursively extract value from nested dict structures.
+        
+        API returns data like:
+        {'value': {'value': 'actual_data'}}
+        or
+        {'value': 'actual_data'}
+        
+        Args:
+            field: Field from API response
+        
+        Returns:
+            Extracted value (primitive type or None)
+        """
+        if field is None:
+            return None
+        
+        # Если это не dict - вернуть как есть
+        if not isinstance(field, dict):
+            return field
+        
+        # РЕКУРСИВНО извлекаем value
+        if 'value' in field:
+            inner_value = field['value']
+            # Если inner_value тоже dict с 'value' - рекурсия
+            if isinstance(inner_value, dict) and 'value' in inner_value:
+                return DataProcessor._extract_value(inner_value)
+            # Иначе вернуть inner_value
+            return inner_value
+        
+        # Если нет ключа 'value' - вернуть None
+        return None
+    
+    @staticmethod
+    def _extract_ceo_name(ceo_field: Optional[Dict]) -> Optional[str]:
+        """Extract CEO name."""
+        if not ceo_field:
+            return None
+        value = ceo_field.get('value', {})
+        if isinstance(value, dict):
+            return value.get('title')
+        return None
+
+    @staticmethod
+    def _extract_code_and_desc(field: Optional[Dict]) -> Optional[Dict[str, Any]]:
+        """
+        Извлечь код И описание из справочника.
+        
+        Структура: {"value": {"value": 160, "description": "..."}}
+        
+        Returns:
+            {'code': 160, 'name': '...'}
+        """
+        if not field:
+            return None
+        
+        level1 = field.get('value')
+        if not level1 or not isinstance(level1, dict):
+            return None
+        
+        code = level1.get('value')
+        description = level1.get('description')
+        
+        if code is not None and description:
+            return {
+                'code': int(code) if isinstance(code, (int, str)) and str(code).isdigit() else code,
+                'name': str(description)
+            }
+        
+        return None
+
+    @staticmethod
+    def _parse_date(date_str: Optional[str]) -> Optional[str]:
+        """Parse date to YYYY-MM-DD format."""
+        if not date_str:
+            return None
+        try:
+            dt = datetime.fromisoformat(date_str.replace('Z', '+00:00'))
+            return dt.strftime('%Y-%m-%d')
+        except Exception as e:
+            logger.warning(f"Failed to parse date '{date_str}': {e}")
+            return None
+
+================================================================================
+FILE: core\database.py
+================================================================================
+
+"""
+Database manager for company data
+"""
+
+from typing import List, Optional, Dict, Any
+import psycopg2
+from psycopg2.extras import RealDictCursor
+
+from .config import DB_CONFIG
+from .logger import logger
+from .references import ReferenceManager
+
+class DatabaseManager:
+    """
+    PostgreSQL database manager for company data.
+    
+    Подключается к БД 'companies' для сохранения данных.
+    """
+    
+    def __init__(self):
+        self.conn = None
+        self.ref_manager = None
+    
+    def _get_connection(self):
+        """Get or create database connection."""
+        if self.conn is None or self.conn.closed:
+            self.conn = psycopg2.connect(**DB_CONFIG)
+            self.ref_manager = ReferenceManager(self.conn)
+            logger.debug(f"Connected to database: {DB_CONFIG['database']}")
+        return self.conn
+    
+    def close(self):
+        """Close database connection."""
+        if self.conn and not self.conn.closed:
+            self.conn.close()
+            logger.debug("Database connection closed")
+    
+    # ════════════════════════════════════════════════════════════════
+    # READ OPERATIONS
+    # ════════════════════════════════════════════════════════════════
+    
+    def get_existing_bins(self, bins: List[str]) -> List[str]:
+        """
+        Get BINs that already exist in database.
+        
+        Args:
+            bins: List of BINs to check
+        
+        Returns:
+            List of existing BINs
+        """
+        if not bins:
+            return []
+        
+        sql = "SELECT bin FROM companies WHERE bin = ANY(%s)"
+        
+        try:
+            conn = self._get_connection()
+            cursor = conn.cursor()
+            cursor.execute(sql, (bins,))
+            
+            existing = [row[0] for row in cursor.fetchall()]
+            
+            logger.debug(f"Found {len(existing)}/{len(bins)} existing BINs")
+            
+            return existing
+            
+        except Exception as e:
+            logger.error(f"Error checking existing BINs: {e}")
+            raise
+        finally:
+            if cursor:
+                cursor.close()
+    
+    def get_company(self, bin_value: str) -> Optional[Dict[str, Any]]:
+        """
+        Get company by BIN with references.
+        
+        Args:
+            bin_value: Company BIN
+        
+        Returns:
+            Company data as dict or None if not found
+        """
+        sql = """
+            SELECT 
+                c.bin, c.name_ru, c.registration_date, c.ceo_name,
+                c.is_nds, c.phone,
+                c.last_api_check, c.api_check_count,
+                c.created_at, c.updated_at,
+                
+                -- Данные из справочников
+                r.code as degree_of_risk,
+                s.code as status_code,
+                s.name as status_name,
+                krp.code as krp_code,
+                krp.name as krp_name,
+                kfc.code as kfc_code,
+                kfc.name as kfc_name,
+                kse.code as kse_code,
+                kse.name as kse_name,
+                oked.code as oked_code,
+                oked.name as oked_name
+                
+            FROM companies c
+            LEFT JOIN ref_risk r ON c.risk_id = r.id
+            LEFT JOIN ref_status s ON c.status_id = s.id
+            LEFT JOIN ref_krp krp ON c.krp_id = krp.id
+            LEFT JOIN ref_kfc kfc ON c.kfc_id = kfc.id
+            LEFT JOIN ref_kse kse ON c.kse_id = kse.id
+            LEFT JOIN ref_oked oked ON c.oked_id = oked.id
+            WHERE c.bin = %s
+        """
+        
+        try:
+            conn = self._get_connection()
+            cursor = conn.cursor(cursor_factory=RealDictCursor)
+            cursor.execute(sql, (bin_value,))
+            
+            result = cursor.fetchone()
+            
+            if not result:
+                return None
+            
+            # Преобразовать в формат как из data_processor
+            company = dict(result)
+            
+            # Собрать справочники в dict
+            if company.get('krp_code') is not None:
+                company['krp'] = {
+                    'code': company.pop('krp_code'),
+                    'name': company.pop('krp_name')
+                }
+            else:
+                company.pop('krp_code', None)
+                company.pop('krp_name', None)
+                company['krp'] = None
+            
+            if company.get('kfc_code') is not None:
+                company['kfc'] = {
+                    'code': company.pop('kfc_code'),
+                    'name': company.pop('kfc_name')
+                }
+            else:
+                company.pop('kfc_code', None)
+                company.pop('kfc_name', None)
+                company['kfc'] = None
+            
+            if company.get('kse_code') is not None:
+                company['kse'] = {
+                    'code': company.pop('kse_code'),
+                    'name': company.pop('kse_name')
+                }
+            else:
+                company.pop('kse_code', None)
+                company.pop('kse_name', None)
+                company['kse'] = None
+            
+            if company.get('status_code') is not None:
+                company['status'] = {
+                    'code': company.pop('status_code'),
+                    'name': company.pop('status_name')
+                }
+            else:
+                company.pop('status_code', None)
+                company.pop('status_name', None)
+                company['status'] = None
+            
+            if company.get('oked_code') is not None:
+                company['oked'] = {
+                    'code': company.pop('oked_code'),
+                    'name': company.pop('oked_name')
+                }
+            else:
+                company.pop('oked_code', None)
+                company.pop('oked_name', None)
+                company['oked'] = None
+            
+            return company
+            
+        except Exception as e:
+            logger.error(f"Error getting company {bin_value}: {e}")
+            raise
+        finally:
+            if cursor:
+                cursor.close()
+    
+    def exists_company(self, bin_value: str) -> bool:
+        """
+        Check if company exists.
+        
+        Args:
+            bin_value: Company BIN
+        
+        Returns:
+            True if exists, False otherwise
+        """
+        sql = "SELECT EXISTS(SELECT 1 FROM companies WHERE bin = %s)"
+        
+        try:
+            conn = self._get_connection()
+            cursor = conn.cursor()
+            cursor.execute(sql, (bin_value,))
+            
+            return cursor.fetchone()[0]
+            
+        except Exception as e:
+            logger.error(f"Error checking company existence {bin_value}: {e}")
+            raise
+        finally:
+            if cursor:
+                cursor.close()
+    
+    # ════════════════════════════════════════════════════════════════
+    # CREATE OPERATION
+    # ════════════════════════════════════════════════════════════════
+    
+    def create_company(self, data: Dict[str, Any]):
+        """Create new company with references."""
+        conn = self._get_connection()
+        cursor = conn.cursor()
+        
+        try:
+            import json
+            
+            # Получить ID из справочников
+            status_id = None
+            if data.get('status'):
+                status_id = self.ref_manager.get_or_create_status(
+                    data['status']['code'],
+                    data['status']['name']
+                )
+            
+            risk_id = self.ref_manager.get_or_create_risk(data.get('degree_of_risk'))
+            
+            krp_id = None
+            if data.get('krp'):
+                krp_id = self.ref_manager.get_or_create_krp(
+                    data['krp']['code'],
+                    data['krp']['name']
+                )
+            
+            kfc_id = None
+            if data.get('kfc'):
+                kfc_id = self.ref_manager.get_or_create_kfc(
+                    data['kfc']['code'],
+                    data['kfc']['name']
+                )
+            
+            kse_id = None
+            if data.get('kse'):
+                kse_id = self.ref_manager.get_or_create_kse(
+                    data['kse']['code'],
+                    data['kse']['name']
+                )
+            
+            oked_id = None
+            if data.get('oked'):
+                oked_id = self.ref_manager.get_or_create_oked(
+                    data['oked']['code'],
+                    data['oked']['name']
+                )
+            
+            # INSERT компании
+            sql = """
+                INSERT INTO companies (
+                    bin, name_ru, registration_date, ceo_name,
+                    is_nds, risk_id, krp_id, kfc_id, kse_id, oked_id, status_id,
+                    phone, last_api_check, api_check_count
+                ) VALUES (
+                    %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s::jsonb, NOW(), 1
+                )
+            """
+            
+            cursor.execute(sql, (
+                data.get('bin'),
+                data.get('name_ru'),
+                data.get('registration_date'),
+                data.get('ceo_name'),
+                data.get('is_nds'),
+                risk_id,
+                krp_id,
+                kfc_id,
+                kse_id,
+                oked_id,
+                status_id,
+                json.dumps(data.get('phone')) if data.get('phone') else None
+            ))
+            
+            # ═══ INSERT NAME HISTORY ═══
+            for name_entry in data.get('name_history', []):
+                cursor.execute("""
+                    INSERT INTO company_names (
+                        bin, name_ru, valid_from, valid_to, is_current
+                    ) VALUES (%s, %s, %s, %s, %s)
+                """, (
+                    data.get('bin'),
+                    name_entry.get('name_ru'),
+                    name_entry.get('valid_from'),
+                    name_entry.get('valid_to'),
+                    bool(name_entry.get('is_current', False))
+                ))
+            
+            # ═══ INSERT CEO ═══
+            if data.get('ceo_name'):
+                cursor.execute("""
+                    INSERT INTO company_ceos (
+                        bin, ceo_name, valid_from, is_current
+                    ) VALUES (%s, %s, %s, true)
+                """, (
+                    data.get('bin'),
+                    data.get('ceo_name'),
+                    data.get('registration_date')
+                ))
+            
+            
+            # ═══ INSERT TAXES ═══
+            for tax in data.get('taxes', []):
+                cursor.execute("""
+                    INSERT INTO company_taxes (
+                        bin, year, total_taxes, check_date
+                    ) VALUES (%s, %s, %s, NOW())
+                    ON CONFLICT (bin, year) DO UPDATE SET
+                        total_taxes = EXCLUDED.total_taxes,
+                        check_date = NOW()
+                """, (
+                    data.get('bin'),
+                    tax.get('year'),
+                    tax.get('total_taxes')
+                ))
+            
+            # ═══ INSERT NDS ═══
+            for nds in data.get('nds', []):
+                cursor.execute("""
+                    INSERT INTO company_nds (
+                        bin, year, nds_amount, check_date
+                    ) VALUES (%s, %s, %s, NOW())
+                    ON CONFLICT (bin, year) DO UPDATE SET
+                        nds_amount = EXCLUDED.nds_amount,
+                        check_date = NOW()
+                """, (
+                    data.get('bin'),
+                    nds.get('year'),
+                    nds.get('nds_amount')
+                ))
+            
+            # ═══ INSERT RELATIONS ═══
+            for relation in data.get('relations', []):
+                bin_to = relation.get('bin_to')
+                if bin_to and self.exists_company(bin_to):
+                    cursor.execute("""
+                        INSERT INTO company_relations (
+                            bin_from, bin_to, relation_type
+                        ) VALUES (%s, %s, %s)
+                        ON CONFLICT DO NOTHING
+                    """, (
+                        relation.get('bin_from'),
+                        bin_to,
+                        relation.get('relation_type')
+                    ))
+            
+            conn.commit()
+            logger.info(f"✅ Created company: {data.get('bin')} - {data.get('name_ru')}")
+            
+        except Exception as e:
+            conn.rollback()
+            logger.error(f"Error creating company {data.get('bin')}: {e}")
+            import traceback
+            logger.error(traceback.format_exc())
+            raise
+        finally:
+            cursor.close()
+    
+    # ════════════════════════════════════════════════════════════════
+    # UPDATE OPERATION
+    # ════════════════════════════════════════════════════════════════
+    
+    def update_company(
+        self,
+        bin_value: str,
+        data: Dict[str, Any],
+        changes: Dict[str, Dict[str, Any]]
+    ):
+        """
+        Update existing company with references.
+        
+        Args:
+            bin_value: Company BIN
+            data: New company data
+            changes: Detected changes
+        """
+        conn = self._get_connection()
+        cursor = conn.cursor()
+        
+        try:
+            import json
+            
+            # Получить ID из справочников
+            status_id = None
+            if data.get('status'):
+                status_id = self.ref_manager.get_or_create_status(
+                    data['status']['code'],
+                    data['status']['name']
+                )
+            
+            risk_id = self.ref_manager.get_or_create_risk(data.get('degree_of_risk'))
+            
+            krp_id = None
+            if data.get('krp'):
+                krp_id = self.ref_manager.get_or_create_krp(
+                    data['krp']['code'],
+                    data['krp']['name']
+                )
+            
+            kfc_id = None
+            if data.get('kfc'):
+                kfc_id = self.ref_manager.get_or_create_kfc(
+                    data['kfc']['code'],
+                    data['kfc']['name']
+                )
+            
+            kse_id = None
+            if data.get('kse'):
+                kse_id = self.ref_manager.get_or_create_kse(
+                    data['kse']['code'],
+                    data['kse']['name']
+                )
+            
+            oked_id = None
+            if data.get('oked'):
+                oked_id = self.ref_manager.get_or_create_oked(
+                    data['oked']['code'],
+                    data['oked']['name']
+                )
+            
+            # UPDATE компании
+            sql = """
+                UPDATE companies SET
+                    name_ru = %s,
+                    ceo_name = %s,
+                    is_nds = %s,
+                    risk_id = %s,
+                    krp_id = %s,
+                    kfc_id = %s,
+                    kse_id = %s,
+                    oked_id = %s,
+                    status_id = %s,
+                    phone = %s::jsonb,
+                    last_api_check = NOW(),
+                    api_check_count = api_check_count + 1,
+                    updated_at = NOW()
+                WHERE bin = %s
+            """
+            
+            cursor.execute(sql, (
+                data.get('name_ru'),
+                data.get('ceo_name'),
+                data.get('is_nds'),
+                risk_id,
+                krp_id,
+                kfc_id,
+                kse_id,
+                oked_id,
+                status_id,
+                json.dumps(data.get('phone')) if data.get('phone') else None,
+                bin_value
+            ))
+            
+            # ═══ HANDLE NAME CHANGE ═══
+            if 'name_ru' in changes:
+                cursor.execute("""
+                    UPDATE company_names
+                    SET valid_to = NOW()::DATE, is_current = false
+                    WHERE bin = %s AND is_current = true
+                """, (bin_value,))
+                
+                cursor.execute("""
+                    INSERT INTO company_names (
+                        bin, name_ru, valid_from, is_current
+                    ) VALUES (%s, %s, NOW()::DATE, true)
+                """, (bin_value, data.get('name_ru')))
+            
+            # ═══ HANDLE CEO CHANGE ═══
+            if 'ceo_name' in changes:
+                cursor.execute("""
+                    UPDATE company_ceos
+                    SET valid_to = NOW()::DATE, is_current = false
+                    WHERE bin = %s AND is_current = true
+                """, (bin_value,))
+                
+                cursor.execute("""
+                    INSERT INTO company_ceos (
+                        bin, ceo_name, valid_from, is_current
+                    ) VALUES (%s, %s, NOW()::DATE, true)
+                """, (bin_value, data.get('ceo_name')))
+            
+            # ═══ UPDATE TAXES (UPSERT) ═══
+            for tax in data.get('taxes', []):
+                cursor.execute("""
+                    INSERT INTO company_taxes (
+                        bin, year, total_taxes, check_date
+                    ) VALUES (%s, %s, %s, NOW())
+                    ON CONFLICT (bin, year) DO UPDATE SET
+                        total_taxes = EXCLUDED.total_taxes,
+                        check_date = NOW()
+                """, (
+                    bin_value,
+                    tax.get('year'),
+                    tax.get('total_taxes')
+                ))
+            
+            # ═══ UPDATE NDS (UPSERT) ═══
+            for nds in data.get('nds', []):
+                cursor.execute("""
+                    INSERT INTO company_nds (
+                        bin, year, nds_amount, check_date
+                    ) VALUES (%s, %s, %s, NOW())
+                    ON CONFLICT (bin, year) DO UPDATE SET
+                        nds_amount = EXCLUDED.nds_amount,
+                        check_date = NOW()
+                """, (
+                    bin_value,
+                    nds.get('year'),
+                    nds.get('nds_amount')
+                ))
+            
+            # ═══ UPDATE RELATIONS (APPEND NEW) ═══
+            for relation in data.get('relations', []):
+                bin_to = relation.get('bin_to')
+                if bin_to and self.exists_company(bin_to):
+                    cursor.execute("""
+                        INSERT INTO company_relations (
+                            bin_from, bin_to, relation_type
+                        ) VALUES (%s, %s, %s)
+                        ON CONFLICT DO NOTHING
+                    """, (
+                        relation.get('bin_from'),
+                        bin_to,
+                        relation.get('relation_type')
+                    ))
+            
+            conn.commit()
+            
+            change_fields = ', '.join(changes.keys())
+            logger.info(
+                f"🔄 Updated company: {bin_value} - "
+                f"Changes: {change_fields}"
+            )
+            
+        except Exception as e:
+            conn.rollback()
+            logger.error(f"Error updating company {bin_value}: {e}")
+            import traceback
+            logger.error(traceback.format_exc())
+            raise
+        finally:
+            cursor.close()
+    
+    # ════════════════════════════════════════════════════════════════
+    # UTILITY OPERATIONS
+    # ════════════════════════════════════════════════════════════════
+    
+    def touch_last_check(self, bin_value: str):
+        """
+        Update last_api_check timestamp (no changes).
+        
+        Args:
+            bin_value: Company BIN
+        """
+        sql = """
+            UPDATE companies
+            SET last_api_check = NOW(),
+                api_check_count = api_check_count + 1
+            WHERE bin = %s
+        """
+        
+        try:
+            conn = self._get_connection()
+            cursor = conn.cursor()
+            cursor.execute(sql, (bin_value,))
+            conn.commit()
+            
+            logger.debug(f"⏭️ No changes: {bin_value}")
+            
+        except Exception as e:
+            conn.rollback()
+            logger.error(f"Error touching last_check for {bin_value}: {e}")
+            raise
+        finally:
+            if cursor:
+                cursor.close()
+    
+    def mark_not_found(self, bin_value: str):
+        """
+        Mark BIN as not found in API.
+        
+        Args:
+            bin_value: Company BIN
+        """
+        sql = """
+            INSERT INTO companies (
+                bin, name_ru, api_not_found, last_api_check, api_check_count
+            ) VALUES (%s, %s, true, NOW(), 1)
+            ON CONFLICT (bin) DO UPDATE SET
+                api_not_found = true,
+                last_api_check = NOW(),
+                api_check_count = companies.api_check_count + 1
+        """
+        
+        try:
+            conn = self._get_connection()
+            cursor = conn.cursor()
+            cursor.execute(sql, (bin_value, f'NOT_FOUND_{bin_value}'))
+            conn.commit()
+            
+            logger.warning(f"❌ Marked as not found: {bin_value}")
+            
+        except Exception as e:
+            conn.rollback()
+            logger.error(f"Error marking not found {bin_value}: {e}")
+            raise
+        finally:
+            if cursor:
+                cursor.close()
+    
+    def mark_deleted(self, bin_value: str, registration_date: Optional[str] = None):
+        """
+        Mark BIN as deleted company.
+        
+        Args:
+            bin_value: Company BIN
+            registration_date: Registration date if available
+        """
+        sql = """
+            INSERT INTO companies (
+                bin, name_ru, registration_date, api_not_found, 
+                last_api_check, api_check_count
+            ) VALUES (%s, %s, %s, true, NOW(), 1)
+            ON CONFLICT (bin) DO UPDATE SET
+                api_not_found = true,
+                last_api_check = NOW(),
+                api_check_count = companies.api_check_count + 1
+        """
+        
+        try:
+            conn = self._get_connection()
+            cursor = conn.cursor()
+            cursor.execute(sql, (
+                bin_value, 
+                f'DELETED_{bin_value}',
+                registration_date
+            ))
+            conn.commit()
+            
+            logger.warning(f"🗑️ Marked as deleted: {bin_value}")
+            
+        except Exception as e:
+            conn.rollback()
+            logger.error(f"Error marking deleted {bin_value}: {e}")
+            raise
+        finally:
+            if cursor:
+                cursor.close()
+
+    def __del__(self):
+        """Cleanup on deletion."""
+        self.close()
+
+================================================================================
+FILE: core\logger.py
+================================================================================
+
+"""
+Logging configuration
+"""
+
+import logging
+import sys
+from pathlib import Path
+from typing import Optional
+
+from .config import LOG_CONFIG
+
+
+def setup_logger(
+    name: str,
+    log_file: Optional[str] = None,
+    level: str = 'INFO'
+) -> logging.Logger:
+    """
+    Setup logger with console and file handlers.
+    
+    Args:
+        name: Logger name
+        log_file: Path to log file (optional)
+        level: Log level (DEBUG, INFO, WARNING, ERROR)
+    
+    Returns:
+        Configured logger instance
+    """
+    
+    logger = logging.getLogger(name)
+    logger.setLevel(getattr(logging, level.upper()))
+    
+    # Remove existing handlers
+    logger.handlers.clear()
+    
+    # Console handler
+    console_handler = logging.StreamHandler(sys.stdout)
+    console_handler.setLevel(logging.INFO)
+    console_formatter = logging.Formatter(
+        '%(asctime)s - %(levelname)s - %(message)s',
+        datefmt='%H:%M:%S'
+    )
+    console_handler.setFormatter(console_formatter)
+    logger.addHandler(console_handler)
+    
+    # File handler
+    if log_file:
+        log_path = Path(log_file)
+        log_path.parent.mkdir(parents=True, exist_ok=True)
+        
+        file_handler = logging.FileHandler(log_file, encoding='utf-8')
+        file_handler.setLevel(logging.DEBUG)
+        file_formatter = logging.Formatter(
+            LOG_CONFIG['format'],
+            datefmt=LOG_CONFIG['date_format']
+        )
+        file_handler.setFormatter(file_formatter)
+        logger.addHandler(file_handler)
+    
+    return logger
+
+
+# Default logger
+logger = setup_logger(
+    'company_parser',
+    log_file=LOG_CONFIG['file'],
+    level=LOG_CONFIG['level']
+)
+
+================================================================================
+FILE: core\references.py
+================================================================================
+
+"""
+Reference Manager - Управление справочниками
+"""
+
+from typing import Optional, Dict, Any, Tuple
+import psycopg2
+from psycopg2.extras import RealDictCursor
+
+from .logger import logger
+
+
+class ReferenceManager:
+    """
+    Кеширование и управление справочными таблицами.
+    """
+    
+    def __init__(self, conn):
+        self.conn = conn
+        self._cache = {
+            'status': {},    # {code: id}
+            'risk': {},      # {code: id}
+            'krp': {},       # {code: id}
+            'kfc': {},       # {code: id}
+            'kse': {},       # {code: id}
+            'oked': {}       # {code: id}
+        }
+        self._load_cache()
+    
+    def _load_cache(self):
+        """Загрузить все справочники в память."""
+        cursor = self.conn.cursor(cursor_factory=RealDictCursor)
+        
+        try:
+            # Status
+            cursor.execute("SELECT id, code FROM ref_status")
+            for row in cursor.fetchall():
+                self._cache['status'][row['code']] = row['id']
+            
+            # Risk
+            cursor.execute("SELECT id, code FROM ref_risk")
+            for row in cursor.fetchall():
+                self._cache['risk'][row['code']] = row['id']
+            
+            # KRP
+            cursor.execute("SELECT id, code FROM ref_krp")
+            for row in cursor.fetchall():
+                self._cache['krp'][row['code']] = row['id']
+            
+            # KFC
+            cursor.execute("SELECT id, code FROM ref_kfc")
+            for row in cursor.fetchall():
+                self._cache['kfc'][row['code']] = row['id']
+            
+            # KSE
+            cursor.execute("SELECT id, code FROM ref_kse")
+            for row in cursor.fetchall():
+                self._cache['kse'][row['code']] = row['id']
+            
+            # OKED
+            cursor.execute("SELECT id, code FROM ref_oked")
+            for row in cursor.fetchall():
+                self._cache['oked'][row['code']] = row['id']
+            
+            logger.debug(
+                f"Loaded refs: status={len(self._cache['status'])}, "
+                f"risk={len(self._cache['risk'])}, krp={len(self._cache['krp'])}, "
+                f"kfc={len(self._cache['kfc'])}, kse={len(self._cache['kse'])}, "
+                f"oked={len(self._cache['oked'])}"
+            )
+        
+        finally:
+            cursor.close()
+    
+    def get_or_create_status(self, code: int, name: str) -> Optional[int]:
+        """Получить ID статуса."""
+        if code in self._cache['status']:
+            return self._cache['status'][code]
+        
+        cursor = self.conn.cursor()
+        try:
+            cursor.execute("""
+                INSERT INTO ref_status (code, name)
+                VALUES (%s, %s)
+                ON CONFLICT (code) DO UPDATE SET name = EXCLUDED.name
+                RETURNING id
+            """, (code, name))
+            
+            ref_id = cursor.fetchone()[0]
+            self.conn.commit()
+            self._cache['status'][code] = ref_id
+            return ref_id
+        finally:
+            cursor.close()
+    
+    def get_or_create_risk(self, code: str) -> Optional[int]:
+        """Получить ID риска."""
+        code_lower = code.lower() if code else None
+        
+        if code_lower in self._cache['risk']:
+            return self._cache['risk'][code_lower]
+        
+        return None  # Риск должен быть предзаполнен
+    
+    def get_or_create_krp(self, code: int, name: str) -> Optional[int]:
+        """Получить/создать ID KRP."""
+        if code in self._cache['krp']:
+            return self._cache['krp'][code]
+        
+        cursor = self.conn.cursor()
+        try:
+            cursor.execute("""
+                INSERT INTO ref_krp (code, name)
+                VALUES (%s, %s)
+                ON CONFLICT (code) DO UPDATE SET name = EXCLUDED.name
+                RETURNING id
+            """, (code, name))
+            
+            ref_id = cursor.fetchone()[0]
+            self.conn.commit()
+            self._cache['krp'][code] = ref_id
+            logger.debug(f"Created KRP: {code} - {name}")
+            return ref_id
+        finally:
+            cursor.close()
+    
+    def get_or_create_kfc(self, code: int, name: str) -> Optional[int]:
+        """Получить/создать ID KFC."""
+        if code in self._cache['kfc']:
+            return self._cache['kfc'][code]
+        
+        cursor = self.conn.cursor()
+        try:
+            cursor.execute("""
+                INSERT INTO ref_kfc (code, name)
+                VALUES (%s, %s)
+                ON CONFLICT (code) DO UPDATE SET name = EXCLUDED.name
+                RETURNING id
+            """, (code, name))
+            
+            ref_id = cursor.fetchone()[0]
+            self.conn.commit()
+            self._cache['kfc'][code] = ref_id
+            logger.debug(f"Created KFC: {code} - {name}")
+            return ref_id
+        finally:
+            cursor.close()
+    
+    def get_or_create_kse(self, code: int, name: str) -> Optional[int]:
+        """Получить/создать ID KSE."""
+        if code in self._cache['kse']:
+            return self._cache['kse'][code]
+        
+        cursor = self.conn.cursor()
+        try:
+            cursor.execute("""
+                INSERT INTO ref_kse (code, name)
+                VALUES (%s, %s)
+                ON CONFLICT (code) DO UPDATE SET name = EXCLUDED.name
+                RETURNING id
+            """, (code, name))
+            
+            ref_id = cursor.fetchone()[0]
+            self.conn.commit()
+            self._cache['kse'][code] = ref_id
+            logger.debug(f"Created KSE: {code} - {name}")
+            return ref_id
+        finally:
+            cursor.close()
+    
+    def get_or_create_oked(self, code: str, name: str) -> Optional[int]:
+        """Получить/создать ID OKED."""
+        if code in self._cache['oked']:
+            return self._cache['oked'][code]
+        
+        cursor = self.conn.cursor()
+        try:
+            cursor.execute("""
+                INSERT INTO ref_oked (code, name)
+                VALUES (%s, %s)
+                ON CONFLICT (code) DO UPDATE SET name = EXCLUDED.name
+                RETURNING id
+            """, (code, name))
+            
+            ref_id = cursor.fetchone()[0]
+            self.conn.commit()
+            self._cache['oked'][code] = ref_id
+            logger.debug(f"Created OKED: {code}")
+            return ref_id
+        finally:
+            cursor.close()
+
+================================================================================
+FILE: main.py
+================================================================================
+
+"""
+Company Parser - Main entry point
+"""
+
+import sys
+import argparse
+from pathlib import Path
+from typing import List, Optional
+
+from .core.logger import logger, setup_logger
+from .core.api_client import APIClient, APIError, CompanyNotFoundError
+from .core.data_processor import DataProcessor
+from .core.database import DatabaseManager
+from .core.change_detector import ChangeDetector
+from .sources.registry import registry
+from .utils.validators import validate_bin, normalize_bin
+
+
+class CompanyParser:
+    """
+    Main parser class for company data.
+    """
+    
+    def __init__(
+        self,
+        verify: bool = False,
+        dry_run: bool = False
+    ):
+        """
+        Initialize parser.
+        
+        Args:
+            verify: Enable BIN verification via search API
+            dry_run: Run without saving to database
+        """
+        self.api_client = APIClient()
+        self.db = DatabaseManager()
+        self.data_processor = DataProcessor()
+        self.change_detector = ChangeDetector()
+        
+        self.verify = verify
+        self.dry_run = dry_run
+        
+        # Statistics
+        self.stats = {
+            'total': 0,
+            'created': 0,
+            'updated': 0,
+            'no_changes': 0,
+            'not_found': 0,
+            'errors': 0
+        }
+    
+    def parse_bins(
+        self,
+        bins: List[str],
+        force: bool = False
+    ):
+        """
+        Parse list of BINs.
+        
+        Args:
+            bins: List of BINs to parse
+            force: Force re-parse even if exists
+        """
+        
+        if not bins:
+            logger.warning("No BINs to parse")
+            return
+        
+        # Validate and normalize
+        bins = [normalize_bin(b) for b in bins if validate_bin(b)]
+        
+        if not bins:
+            logger.error("No valid BINs found")
+            return
+        
+        logger.info(f"Total BINs to process: {len(bins)}")
+        
+        # Filter existing (if not force)
+        if not force and not self.dry_run:
+            existing = self.db.get_existing_bins(bins)
+            bins = [b for b in bins if b not in existing]
+            logger.info(
+                f"Filtered {len(existing)} existing BINs "
+                f"({len(bins)} remaining)"
+            )
+        
+        if not bins:
+            logger.info("All BINs already exist in database")
+            return
+        
+        # Process BINs
+        self.stats['total'] = len(bins)
+        
+        for i, bin_value in enumerate(bins, 1):
+            logger.info(f"[{i}/{len(bins)}] Processing BIN: {bin_value}")
+            
+            try:
+                self._process_bin(bin_value)
+                
+            except KeyboardInterrupt:
+                logger.warning("Interrupted by user")
+                break
+            
+            except Exception as e:
+                self.stats['errors'] += 1
+                logger.exception(f"Unexpected error for {bin_value}: {e}")
+        
+        # Print summary
+        self._print_summary()
+    
+    def _process_bin(self, bin_value: str):
+        """
+        Process single BIN.
+        
+        Args:
+            bin_value: BIN to process
+        """
+        
+        # 1. Verify existence (if enabled)
+        if self.verify:
+            try:
+                exists = self.api_client.check_company_exists(bin_value)
+                
+                if not exists:
+                    self.stats['not_found'] += 1
+                    if not self.dry_run:
+                        self.db.mark_not_found(bin_value)
+                    return
+                
+            except APIError as e:
+                logger.error(f"Verification failed for {bin_value}: {e}")
+                self.stats['errors'] += 1
+                return
+        
+        # 2. Get full company info
+        try:
+            response = self.api_client.get_company_info(bin_value)
+            
+        except CompanyNotFoundError:
+            self.stats['not_found'] += 1
+            if not self.dry_run:
+                self.db.mark_not_found(bin_value)
+            return
+        
+        except APIError as e:
+            logger.error(f"Failed to fetch info for {bin_value}: {e}")
+            self.stats['errors'] += 1
+            return
+        
+        # 3. Parse JSON
+        try:
+            parsed = self.data_processor.parse_company(response)
+            
+            # ✅ Проверка на deleted компанию
+            if parsed and parsed.get('is_deleted'):
+                self.stats['not_found'] += 1
+                if not self.dry_run:
+                    self.db.mark_deleted(
+                        bin_value,
+                        parsed.get('registration_date')
+                    )
+                return
+            
+        except Exception as e:
+            logger.error(f"Failed to parse data for {bin_value}: {e}")
+            self.stats['errors'] += 1
+            return
+        
+        # 4. Dry-run mode
+        if self.dry_run:
+            logger.info(f"[DRY-RUN] Would process: {parsed['name_ru']}")
+            return
+        
+        # 5. Check if exists
+        existing = self.db.get_company(bin_value)
+        
+        if not existing:
+            # Create new
+            try:
+                self.db.create_company(parsed)
+                self.stats['created'] += 1
+                
+            except Exception as e:
+                logger.error(f"Failed to create {bin_value}: {e}")
+                self.stats['errors'] += 1
+        
+        else:
+            # Update existing
+            changes = self.change_detector.detect_changes(existing, parsed)
+            
+            if changes:
+                try:
+                    self.db.update_company(bin_value, parsed, changes)
+                    self.stats['updated'] += 1
+                    
+                except Exception as e:
+                    logger.error(f"Failed to update {bin_value}: {e}")
+                    self.stats['errors'] += 1
+            else:
+                self.db.touch_last_check(bin_value)
+                self.stats['no_changes'] += 1
+    
+    def _print_summary(self):
+        """Print parsing statistics."""
+        logger.info("=" * 60)
+        logger.info("PARSING SUMMARY")
+        logger.info("=" * 60)
+        logger.info(f"Total processed:  {self.stats['total']}")
+        logger.info(f"✅ Created:       {self.stats['created']}")
+        logger.info(f"🔄 Updated:       {self.stats['updated']}")
+        logger.info(f"⏭️  No changes:    {self.stats['no_changes']}")
+        logger.info(f"❌ Not found:     {self.stats['not_found']}")
+        logger.info(f"⚠️  Errors:        {self.stats['errors']}")
+        logger.info("=" * 60)
+    
+    def cleanup(self):
+        """Cleanup resources."""
+        if self.db:
+            self.db.close()
+
+
+def parse_file(filepath: str) -> List[str]:
+    """
+    Parse BINs from file.
+    
+    Args:
+        filepath: Path to file with BINs (one per line)
+    
+    Returns:
+        List of BINs
+    """
+    path = Path(filepath)
+    
+    if not path.exists():
+        logger.error(f"File not found: {filepath}")
+        return []
+    
+    bins = []
+    
+    with open(path, 'r', encoding='utf-8') as f:
+        for line in f:
+            bin_value = line.strip()
+            if bin_value and validate_bin(bin_value):
+                bins.append(bin_value)
+    
+    logger.info(f"Loaded {len(bins)} BINs from file: {filepath}")
+    
+    return bins
+
+
+def main():
+    """Main CLI entry point."""
+    
+    parser = argparse.ArgumentParser(
+        description='Company Info Parser',
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+Examples:
+  # Parse from qamqor
+  python -m parsers.company_info.main --source qamqor
+  
+  # Parse specific BINs
+  python -m parsers.company_info.main --bins "060840008420,060540010332"
+  
+  # Parse from file
+  python -m parsers.company_info.main --file bins.txt
+  
+  # Parse with verification
+  python -m parsers.company_info.main --source qamqor --verify
+  
+  # Dry-run mode
+  python -m parsers.company_info.main --source qamqor --limit 10 --dry-run
+        """
+    )
+    
+    # Source selection
+    source_group = parser.add_mutually_exclusive_group()
+    source_group.add_argument(
+        '--source',
+        choices=registry.list_sources(),
+        help='BIN source (e.g., qamqor)'
+    )
+    source_group.add_argument(
+        '--bins',
+        help='Comma-separated list of BINs'
+    )
+    source_group.add_argument(
+        '--file',
+        help='File with BINs (one per line)'
+    )
+    
+    # Options
+    parser.add_argument(
+        '--limit',
+        type=int,
+        help='Limit number of BINs to process'
+    )
+    
+    parser.add_argument(
+        '--force',
+        action='store_true',
+        help='Force re-parse even if exists'
+    )
+    
+    parser.add_argument(
+        '--verify',
+        action='store_true',
+        help='Verify BIN existence via search API before parsing'
+    )
+    
+    parser.add_argument(
+        '--dry-run',
+        action='store_true',
+        help='Run without saving to database'
+    )
+    
+    parser.add_argument(
+        '--log-level',
+        choices=['DEBUG', 'INFO', 'WARNING', 'ERROR'],
+        default='INFO',
+        help='Log level'
+    )
+    
+    args = parser.parse_args()
+    
+    # Setup logger
+    setup_logger(
+        'company_parser',
+        log_file='logs/company_parser.log',
+        level=args.log_level
+    )
+    
+    # Get BINs
+    bins = []
+    
+    if args.source:
+        try:
+            source = registry.get(args.source)
+            bins = source.get_bins(limit=args.limit)
+            
+        except Exception as e:
+            logger.error(f"Failed to get BINs from source '{args.source}': {e}")
+            sys.exit(1)
+    
+    elif args.bins:
+        bins = [b.strip() for b in args.bins.split(',')]
+    
+    elif args.file:
+        bins = parse_file(args.file)
+    
+    else:
+        parser.print_help()
+        sys.exit(1)
+    
+    if not bins:
+        logger.error("No BINs to process")
+        sys.exit(1)
+    
+    # Apply limit
+    if args.limit and len(bins) > args.limit:
+        bins = bins[:args.limit]
+        logger.info(f"Limited to {args.limit} BINs")
+    
+    # Run parser
+    company_parser = CompanyParser(
+        verify=args.verify,
+        dry_run=args.dry_run
+    )
+    
+    try:
+        company_parser.parse_bins(bins, force=args.force)
+        
+    except KeyboardInterrupt:
+        logger.warning("Interrupted by user")
+    
+    except Exception as e:
+        logger.exception(f"Fatal error: {e}")
+        sys.exit(1)
+    
+    finally:
+        company_parser.cleanup()
+
+
+if __name__ == '__main__':
+    main()
+
+================================================================================
+FILE: sources\__init__.py
+================================================================================
+
+
+
+================================================================================
+FILE: sources\base.py
+================================================================================
+
+"""
+Abstract base class for BIN sources
+"""
+
+from abc import ABC, abstractmethod
+from typing import List, Optional
+
+
+class BinSource(ABC):
+    """
+    Abstract base class for BIN sources.
+    
+    All BIN sources must inherit from this class and implement
+    the get_bins() method.
+    """
+    
+    @abstractmethod
+    def get_bins(self, limit: Optional[int] = None) -> List[str]:
+        """
+        Get list of BINs from source.
+        
+        Args:
+            limit: Maximum number of BINs to return (optional)
+        
+        Returns:
+            List of BIN strings
+        """
+        pass
+    
+    @property
+    @abstractmethod
+    def name(self) -> str:
+        """Source name for logging."""
+        pass
+
+================================================================================
+FILE: sources\qamqor_source.py
+================================================================================
+
+"""
+QamqorBinSource - Extract BINs from qamqor_tax and qamqor_customs tables
+"""
+
+from typing import List, Optional, Set
+import psycopg2
+from psycopg2.extras import RealDictCursor
+
+from .base import BinSource
+from ..core.config import QAMQOR_DB_CONFIG, TARGET_DB_CONFIG
+from ..core.logger import logger
+from ..utils.validators import validate_bin
+
+
+class QamqorBinSource(BinSource):
+    """
+    Extract BINs from qamqor_tax and qamqor_customs tables.
+    
+    Подключается к двум БД PostgreSQL:
+    - QAMQOR_DB_CONFIG: для чтения БИНов из qamqor_tax, qamqor_customs (БД: qamqor)
+    - TARGET_DB_CONFIG: для проверки companies таблицы (БД: companies)
+    """
+    
+    def __init__(self):
+        self.qamqor_conn = None
+        self.target_conn = None
+    
+    @property
+    def name(self) -> str:
+        return 'qamqor'
+    
+    def _get_qamqor_connection(self):
+        """Get or create database connection to QAMQOR (source)."""
+        if self.qamqor_conn is None or self.qamqor_conn.closed:
+            self.qamqor_conn = psycopg2.connect(**QAMQOR_DB_CONFIG)
+            logger.debug(f"Connected to qamqor database: {QAMQOR_DB_CONFIG['database']}")
+        return self.qamqor_conn
+    
+    def _get_target_connection(self):
+        """Get or create database connection to TARGET (where companies table is)."""
+        if self.target_conn is None or self.target_conn.closed:
+            self.target_conn = psycopg2.connect(**TARGET_DB_CONFIG)
+            logger.debug(f"Connected to target database: {TARGET_DB_CONFIG['database']}")
+        return self.target_conn
+    
+    def _is_iin(self, bin_code: str) -> bool:
+        """
+        Check if code is IIN (individual) instead of BIN (company).
+        
+        IIN format: ГГММДД (year, month, day of birth)
+        - Positions 3-4: month (01-12 or 13-32 for 1800s)
+        
+        BIN format: starts with year + 40/41/42
+        - Positions 3-4: always 40, 41, or 42
+        
+        Args:
+            bin_code: 12-digit code
+            
+        Returns:
+            True if IIN (individual), False if BIN (company)
+        """
+        if len(bin_code) != 12:
+            return False
+        
+        # Проверяем 4-ю и 5-ю цифры (позиции 3-4)
+        month_code = bin_code[3:5]
+        
+        # БИН: месяц регистрации = 40, 41, 42
+        # ИИН: месяц рождения = 01-12 (или 13-32 для 1800-х годов)
+        if month_code in ['40', '41', '42']:
+            return False  # Это БИН (компания)
+        
+        # Дополнительная проверка: месяц должен быть в валидном диапазоне для ИИН
+        try:
+            month = int(month_code)
+            # 01-12 (1900-1999), 13-24 (1800-1899), 25-36 (2000-2099)
+            if 1 <= month <= 36:
+                return True  # Это ИИН (физлицо)
+        except ValueError:
+            pass
+        
+        return False
+    
+    def _get_existing_bins(self) -> Set[str]:
+        """
+        Get set of BINs that already exist in companies table.
+        
+        Returns:
+            Set of existing BIN strings (empty set if table doesn't exist or on error)
+        """
+        try:
+            conn = self._get_target_connection()
+            cursor = conn.cursor()
+            
+            # Проверяем существование таблицы companies
+            cursor.execute("""
+                SELECT EXISTS (
+                    SELECT FROM information_schema.tables 
+                    WHERE table_schema = 'public' 
+                    AND table_name = 'companies'
+                )
+            """)
+            
+            table_exists = cursor.fetchone()[0]
+            
+            if not table_exists:
+                logger.warning("⚠️  Table 'companies' does not exist yet in target database")
+                cursor.close()
+                return set()
+            
+            # Читаем БИНы из таблицы companies
+            cursor.execute("SELECT bin FROM companies WHERE bin IS NOT NULL")
+            existing_bins = {row[0] for row in cursor.fetchall()}
+            
+            cursor.close()
+            
+            logger.debug(f"Found {len(existing_bins)} existing BINs in companies table")
+            
+            return existing_bins
+            
+        except Exception as e:
+            logger.warning(f"⚠️  Could not fetch existing BINs from companies table: {e}")
+            return set()
+    
+    def get_bins(self, limit: Optional[int] = None) -> List[str]:
+        """
+        Extract unique BINs from qamqor_tax and qamqor_customs,
+        excluding IINs (individuals) and already processed companies.
+        
+        Args:
+            limit: Maximum number of NEW BINs to return
+        
+        Returns:
+            List of unique BIN strings (companies only, not individuals)
+        """
+        
+        # Получаем существующие БИНы из target БД (companies)
+        existing_bins = self._get_existing_bins()
+        
+        if existing_bins:
+            logger.info(f"Excluding {len(existing_bins)} existing BINs from companies table")
+        else:
+            logger.info("No existing BINs to exclude (table is empty or doesn't exist)")
+        
+        # SQL запрос к qamqor БД с запасом
+        # Берём в 20 раз больше, чтобы после фильтрации ИИН осталось достаточно БИНов
+        fetch_limit = limit * 20 if limit else None
+        
+        sql = """
+            SELECT DISTINCT subject_bin
+            FROM (
+                SELECT subject_bin FROM qamqor_tax 
+                WHERE subject_bin IS NOT NULL
+                UNION
+                SELECT subject_bin FROM qamqor_customs 
+                WHERE subject_bin IS NOT NULL
+            ) combined
+            WHERE subject_bin ~ '^[0-9]{12}$'
+            ORDER BY subject_bin
+        """
+        
+        if fetch_limit:
+            sql += f" LIMIT {fetch_limit}"
+        
+        try:
+            conn = self._get_qamqor_connection()
+            cursor = conn.cursor()
+            cursor.execute(sql)
+            
+            all_bins = cursor.fetchall()
+            
+            # Фильтруем: валидация + исключаем ИИН + исключаем существующие БИНы
+            new_bins = []
+            iin_count = 0
+            
+            for row in all_bins:
+                bin_code = row[0]
+                
+                # Пропускаем невалидные
+                if not validate_bin(bin_code):
+                    continue
+                
+                # Пропускаем ИИН (физлица)
+                if self._is_iin(bin_code):
+                    iin_count += 1
+                    logger.debug(f"Skipping IIN (individual): {bin_code}")
+                    continue
+                
+                # Пропускаем уже существующие
+                if bin_code in existing_bins:
+                    continue
+                
+                new_bins.append(bin_code)
+                
+                # Применяем лимит
+                if limit and len(new_bins) >= limit:
+                    break
+            
+            excluded_count = len(all_bins) - len(new_bins)
+            
+            logger.info(
+                f"✅ Extracted {len(new_bins)} NEW company BINs from qamqor tables"
+            )
+            logger.info(
+                f"📊 Stats: fetched {len(all_bins)}, excluded {iin_count} IINs, "
+                f"excluded {excluded_count - iin_count} existing/invalid"
+            )
+            
+            cursor.close()
+            return new_bins
+            
+        except Exception as e:
+            logger.error(f"❌ Error extracting BINs from qamqor: {e}")
+            raise
+    
+    def __del__(self):
+        """Close connections on cleanup."""
+        if self.qamqor_conn and not self.qamqor_conn.closed:
+            self.qamqor_conn.close()
+            logger.debug("Closed qamqor database connection")
+        if self.target_conn and not self.target_conn.closed:
+            self.target_conn.close()
+            logger.debug("Closed target database connection")
+
+================================================================================
+FILE: sources\registry.py
+================================================================================
+
+"""
+Source Registry - Register and retrieve BIN sources
+"""
+
+from typing import Dict, Type, Optional
+
+from .base import BinSource
+from .qamqor_source import QamqorBinSource
+from ..core.logger import logger
+
+
+class SourceRegistry:
+    """
+    Registry for BIN sources.
+    
+    Usage:
+        registry = SourceRegistry()
+        source = registry.get('qamqor')
+        bins = source.get_bins()
+    """
+    
+    def __init__(self):
+        self._sources: Dict[str, Type[BinSource]] = {}
+        self._register_default_sources()
+    
+    def _register_default_sources(self):
+        """Register built-in sources."""
+        self.register('qamqor', QamqorBinSource)
+    
+    def register(self, name: str, source_class: Type[BinSource]):
+        """
+        Register a new BIN source.
+        
+        Args:
+            name: Source identifier
+            source_class: BinSource subclass
+        """
+        if not issubclass(source_class, BinSource):
+            raise TypeError(f"{source_class} must inherit from BinSource")
+        
+        self._sources[name] = source_class
+        logger.debug(f"Registered BIN source: {name}")
+    
+    def get(self, name: str) -> BinSource:
+        """
+        Get source instance by name.
+        
+        Args:
+            name: Source identifier
+        
+        Returns:
+            BinSource instance
+        
+        Raises:
+            ValueError: If source not found
+        """
+        if name not in self._sources:
+            available = ', '.join(self._sources.keys())
+            raise ValueError(
+                f"Unknown source '{name}'. "
+                f"Available sources: {available}"
+            )
+        
+        return self._sources[name]()
+    
+    def list_sources(self) -> list:
+        """Get list of registered source names."""
+        return list(self._sources.keys())
+
+
+# Global registry instance
+registry = SourceRegistry()
+
+================================================================================
+FILE: utils\__init__.py
+================================================================================
+
+
+
+================================================================================
+FILE: utils\validators.py
+================================================================================
+
+"""
+Validation utilities
+"""
+
+import re
+from typing import Optional
+
+
+BIN_PATTERN = re.compile(r'^[0-9]{12}$')
+
+
+def validate_bin(bin_value: Optional[str]) -> bool:
+    """
+    Validate BIN format.
+    
+    Args:
+        bin_value: BIN string to validate
+    
+    Returns:
+        True if valid, False otherwise
+    """
+    if not bin_value:
+        return False
+    
+    return bool(BIN_PATTERN.match(bin_value))
+
+
+def normalize_bin(bin_value: str) -> str:
+    """
+    Normalize BIN (strip whitespace).
+    
+    Args:
+        bin_value: BIN string
+    
+    Returns:
+        Normalized BIN
+    """
+    return bin_value.strip() if bin_value else ''
+
+================================================================================
+END OF CODE
+================================================================================
