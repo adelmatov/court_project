@@ -153,6 +153,16 @@ class CompanyParser:
         try:
             parsed = self.data_processor.parse_company(response)
             
+            # ✅ Проверка на deleted компанию
+            if parsed and parsed.get('is_deleted'):
+                self.stats['not_found'] += 1
+                if not self.dry_run:
+                    self.db.mark_deleted(
+                        bin_value,
+                        parsed.get('registration_date')
+                    )
+                return
+            
         except Exception as e:
             logger.error(f"Failed to parse data for {bin_value}: {e}")
             self.stats['errors'] += 1

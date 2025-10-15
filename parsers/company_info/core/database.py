@@ -623,6 +623,45 @@ class DatabaseManager:
             if cursor:
                 cursor.close()
     
+    def mark_deleted(self, bin_value: str, registration_date: Optional[str] = None):
+        """
+        Mark BIN as deleted company.
+        
+        Args:
+            bin_value: Company BIN
+            registration_date: Registration date if available
+        """
+        sql = """
+            INSERT INTO companies (
+                bin, name_ru, registration_date, api_not_found, 
+                last_api_check, api_check_count
+            ) VALUES (%s, %s, %s, true, NOW(), 1)
+            ON CONFLICT (bin) DO UPDATE SET
+                api_not_found = true,
+                last_api_check = NOW(),
+                api_check_count = companies.api_check_count + 1
+        """
+        
+        try:
+            conn = self._get_connection()
+            cursor = conn.cursor()
+            cursor.execute(sql, (
+                bin_value, 
+                f'DELETED_{bin_value}',
+                registration_date
+            ))
+            conn.commit()
+            
+            logger.warning(f"🗑️ Marked as deleted: {bin_value}")
+            
+        except Exception as e:
+            conn.rollback()
+            logger.error(f"Error marking deleted {bin_value}: {e}")
+            raise
+        finally:
+            if cursor:
+                cursor.close()
+
     def __del__(self):
         """Cleanup on deletion."""
         self.close()
