@@ -375,16 +375,22 @@ class DatabaseManager:
                     cursor = conn.cursor()
                     tax_inserted = customs_inserted = 0
                     
-                    # ✅ Используем COPY для больших батчей
-                    if len(tax_data) > 1000:
+                    # Используем COPY для больших батчей
+                    if len(tax_data) > self.config.BULK_COPY_THRESHOLD:
                         tax_inserted = await self._bulk_copy(cursor, "qamqor_tax", tax_data)
                     elif tax_data:
-                        tax_inserted = await self._bulk_execute_values(cursor, "qamqor_tax", tax_data)
-                    
-                    if len(customs_data) > 1000:
-                        customs_inserted = await self._bulk_copy(cursor, "qamqor_customs", customs_data)
+                        tax_inserted = await self._bulk_execute_values(
+                            cursor, "qamqor_tax", tax_data
+                        )
+
+                    if len(customs_data) > self.config.BULK_COPY_THRESHOLD:
+                        customs_inserted = await self._bulk_copy(
+                            cursor, "qamqor_customs", customs_data
+                        )
                     elif customs_data:
-                        customs_inserted = await self._bulk_execute_values(cursor, "qamqor_customs", customs_data)
+                        customs_inserted = await self._bulk_execute_values(
+                            cursor, "qamqor_customs", customs_data
+                        )
                     
                     if not silent and (tax_inserted > 0 or customs_inserted > 0):
                         self.logger.info(f"💾 TAX: +{tax_inserted}, CUSTOMS: +{customs_inserted}")
@@ -393,7 +399,7 @@ class DatabaseManager:
                 
             except (psycopg2.OperationalError, psycopg2.InterfaceError) as e:
                 if attempt < 3:
-                    delay = 2 ** attempt  # Экспоненциальная задержка
+                    delay = self.config.RETRY_BACKOFF_BASE ** attempt
                     self.logger.warning(f"⚠️ DB retry {attempt}/3 через {delay}s")
                     await asyncio.sleep(delay)
                 else:
@@ -419,7 +425,9 @@ class DatabaseManager:
             ON CONFLICT (registration_number) DO NOTHING
         """
         
-        psycopg2.extras.execute_values(cursor, insert_sql, data, page_size=500)
+        psycopg2.extras.execute_values(
+            cursor, insert_sql, data, page_size=self.config.EXECUTE_VALUES_PAGE_SIZE
+        )
         return cursor.rowcount
     
     def _prepare_db_values(self, item: Dict) -> Tuple:

@@ -7,8 +7,11 @@ import asyncio
 import argparse
 import signal
 import sys
-from typing import Dict, List, Optional
-from contextlib import asynccontextmanager
+import random
+from types import FrameType
+from typing import Any, Dict, List, Optional, Tuple
+from contextlib import asynccontextmanager, suppress
+from signal import Signals
 from datetime import datetime
 
 from playwright.async_api import async_playwright, Page, Response
@@ -19,57 +22,15 @@ from .core import (
     DataProcessor,
     APIValidator,
     WebClient,
-    TabManager,
-    LogManager
+    StealthTabManager,
+    LogManager,
+    apply_stealth
 )
-
-
-async def apply_stealth(page: Page) -> bool:
-    """
-    Эффективная маскировка браузера без внешних библиотек.
-    Работает стабильно во всех версиях Playwright.
-    """
-    try:
-        await page.add_init_script("""
-            // Удаляем webdriver
-            Object.defineProperty(navigator, 'webdriver', {
-                get: () => undefined
-            });
-            
-            // Chrome объект
-            window.navigator.chrome = {
-                runtime: {},
-                loadTimes: function() {},
-                csi: function() {}
-            };
-            
-            // Permissions
-            const originalQuery = window.navigator.permissions.query;
-            window.navigator.permissions.query = (parameters) => (
-                parameters.name === 'notifications' ?
-                    Promise.resolve({ state: Notification.permission }) :
-                    originalQuery(parameters)
-            );
-            
-            // Plugins
-            Object.defineProperty(navigator, 'plugins', {
-                get: () => [1, 2, 3, 4, 5]
-            });
-            
-            // Languages
-            Object.defineProperty(navigator, 'languages', {
-                get: () => ['ru-RU', 'ru', 'en-US', 'en']
-            });
-        """)
-        return True
-    except Exception:
-        return False
-
 
 class QamqorParser:
     """Основной парсер QAMQOR с обходом CAPTCHA и тестовыми задержками."""
     
-    def __init__(self, mode: str = "full"):
+    def __init__(self, mode: str = "full") -> None:
         self.config = Config()
         self.config.MODE = mode
         
@@ -90,7 +51,7 @@ class QamqorParser:
         signal.signal(signal.SIGINT, self._signal_handler)
         signal.signal(signal.SIGTERM, self._signal_handler)
     
-    def _signal_handler(self, signum, frame):
+    def _signal_handler(self, signum: Signals, frame: Optional[FrameType]) -> None:
         """Обработчик сигналов завершения."""
         self.logger.warning(f"⚠️ Получен сигнал {signum}, завершение работы...")
         self.shutdown_event.set()
@@ -122,7 +83,7 @@ class QamqorParser:
         """Главная функция запуска парсера."""
         try:
             self.logger.info("=" * 80)
-            self.logger.info(f"🚀 ЗАПУСК ПАРСЕРА QAMQOR | Режим: {self.config.MODE.upper()}")
+            self.logger.info("🚀 ЗАПУСК ПАРСЕРА QAMQOR | Режим: %s", self.config.MODE.upper())
             self.logger.info("=" * 80)
             
             await self.db_manager.initialize_tables()
@@ -285,7 +246,7 @@ class QamqorParser:
                 region_name = self.config.REGIONS[region_code]
                 await region_queue.put((region_code, region_name, start_pos))
             
-            self.logger.info(f"📋 В очереди {len(self.config.REGIONS)} регионов")
+            self.logger.info("📋 В очереди %d регионов", len(self.config.REGIONS))
             
             # Запуск воркеров
             self.active_workers = [
@@ -296,7 +257,7 @@ class QamqorParser:
                 for worker_id in range(self.config.MAX_CONCURRENT_TABS)
             ]
             
-            self.logger.info(f"👷 Запущено {len(self.active_workers)} воркеров")
+            self.logger.info("👷 Запущено %d воркеров", len(self.active_workers))
             
             try:
                 await asyncio.gather(*self.active_workers, return_exceptions=True)
@@ -337,7 +298,7 @@ class QamqorParser:
             return
         
         total_missing = sum(len(nums) for nums in missing_numbers.values())
-        self.logger.info(f"📋 Найдено пропущенных номеров: {total_missing}")
+        self.logger.info("📋 Найдено пропущенных номеров: %d", total_missing)
         
         async with async_playwright() as playwright:
             browser = await playwright.chromium.launch(
@@ -386,9 +347,9 @@ class QamqorParser:
     async def _region_worker(
         self,
         worker_id: int,
-        region_queue: asyncio.Queue,
-        tab_manager: TabManager
-    ):
+        region_queue: asyncio.Queue[Tuple[int, str, int]],
+        tab_manager: StealthTabManager
+    ) -> None:
         """Воркер для обработки региона."""
         self.logger.debug(f"✅ W{worker_id} запущен")
         
@@ -456,9 +417,9 @@ class QamqorParser:
     async def _missing_numbers_worker(
         self,
         worker_id: int,
-        missing_queue: asyncio.Queue,
-        tab_manager: TabManager
-    ):
+        missing_queue: asyncio.Queue[Tuple[int, str, List[int]]],
+        tab_manager: StealthTabManager
+    ) -> None:
         """Воркер для обработки пропущенных номеров."""
         self.logger.debug(f"✅ MW{worker_id} запущен (missing)")
         
@@ -528,7 +489,9 @@ class QamqorParser:
         )
         
         # Случайная задержка для естественности
-        await asyncio.sleep(1 + (hash(region_name) % 20) / 10)
+        await asyncio.sleep(
+            random.uniform(self.config.NATURAL_DELAY_MIN, self.config.NATURAL_DELAY_MAX)
+        )
         
         current_position = start_position
         empty_count = 0
@@ -574,7 +537,7 @@ class QamqorParser:
             self.region_stats[region_code]['found_new'] += found_count
         
         self.log_manager.increment_metric('regions_completed')
-        self.logger.info(f"✅ {region_name} завершен (найдено: {found_count})")
+        self.logger.info("✅ %s завершен (найдено: %d)", region_name, found_count)
     
     async def _process_missing_numbers(
         self,
@@ -629,7 +592,12 @@ class QamqorParser:
         if region_code in self.region_stats:
             self.region_stats[region_code]['found_new'] += found_count
         
-        self.logger.info(f"✅ {region_name}: пропущенные ({found_count}/{len(numbers)})")
+        self.logger.info(
+            "✅ %s: пропущенные (%d/%d)", 
+            region_name, 
+            found_count, 
+            len(numbers)
+        )
     
     async def _try_number_safe(
         self,
@@ -650,12 +618,16 @@ class QamqorParser:
                 await page.wait_for_selector(input_selector, state="visible", timeout=5000)
                 
                 # Случайная задержка для имитации человека
-                await asyncio.sleep(0.3 + (hash(registration_number) % 10) / 20)
-                
+                await asyncio.sleep(
+                    random.uniform(self.config.NATURAL_DELAY_MIN, self.config.NATURAL_DELAY_MAX)
+                )
+
                 await page.fill(input_selector, '')
                 await page.fill(input_selector, registration_number)
-                
-                await asyncio.sleep(0.2 + (hash(registration_number) % 5) / 20)
+
+                await asyncio.sleep(
+                    random.uniform(self.config.TYPING_DELAY_MIN, self.config.TYPING_DELAY_MAX)
+                )
                 
                 async with self._response_listener(page) as wait_response:
                     await page.click(button_selector)
@@ -737,12 +709,10 @@ class QamqorParser:
         try:
             yield wait_response
         finally:
-            try:
+            with suppress(Exception):
                 page.remove_listener("response", handle_response)
-            except:
-                pass
     
-    async def _data_handler(self):
+    async def _data_handler(self) -> None:
         """Обработчик очереди данных с периодическим сохранением."""
         batch = []
         last_save_time = asyncio.get_event_loop().time()
@@ -779,7 +749,7 @@ class QamqorParser:
                         self.log_manager.increment_metric('db_inserts', total_inserted)
                         
                         if total_inserted > 0:
-                            self.logger.info(f"💾 Сохранено: TAX={tax}, CUSTOMS={customs}, всего={total_saved}")
+                            self.logger.info("💾 Сохранено: TAX=%d, CUSTOMS=%d, всего=%d", tax, customs, total_saved)
                     except Exception as e:
                         self.logger.error(f"❌ Ошибка сохранения: {e}")
                     
@@ -820,7 +790,7 @@ class QamqorParser:
         
         self.logger.info(f"✅ Data handler завершен. Всего: {total_saved} записей")
     
-    async def _print_final_table(self):
+    async def _print_final_table(self) -> None:
         """Вывод красивой итоговой таблицы."""
         self.logger.info("")
         self.logger.info("=" * 120)
@@ -865,143 +835,6 @@ class QamqorParser:
         self.logger.info(f"   └─ API запросов: {metrics['api_requests']}")
         self.logger.info(f"   └─ Обработано: {metrics['records_processed']}")
         self.logger.info(f"   └─ Скорость: {metrics['records_per_second']} зап/с")
-
-# ✅ StealthTabManager с правильным применением stealth
-class StealthTabManager:
-    """TabManager с автоматическим применением stealth к каждой вкладке."""
-    
-    def __init__(self, context, config, logger):
-        self.context = context
-        self.config = config
-        self.logger = logger
-        self.available_tabs: asyncio.Queue = asyncio.Queue()
-        self.all_tabs: List[Page] = []
-        self._lock = asyncio.Lock()
-        self._closed = False
-    
-    async def initialize(self):
-        """Инициализация пула вкладок с stealth."""
-        self.logger.debug(f"🔧 Инициализация {self.config.MAX_CONCURRENT_TABS} вкладок...")
-        
-        for i in range(self.config.MAX_CONCURRENT_TABS):
-            try:
-                page = await self._create_configured_page()
-                
-                # Применяем stealth
-                await apply_stealth(page)
-                
-                self.all_tabs.append(page)
-                await self.available_tabs.put(page)
-                self.logger.debug(f"✅ Вкладка {i+1} (stealth) создана")
-            except Exception as e:
-                self.logger.error(f"❌ Ошибка создания вкладки {i+1}: {e}")
-                await self.close_all()
-                raise
-        
-        self.logger.debug("✅ Пул вкладок (stealth) инициализирован")
-    
-    async def _create_configured_page(self) -> Page:
-        """Создание настроенной вкладки."""
-        page = await self.context.new_page()
-        
-        blocked_types = {"image", "stylesheet", "font", "media"}
-        
-        async def route_handler(route):
-            try:
-                if route.request.resource_type in blocked_types:
-                    await route.abort()
-                else:
-                    await route.continue_()
-            except Exception:
-                try:
-                    await route.abort()
-                except Exception:
-                    pass
-        
-        await page.route("**/*", route_handler)
-        
-        return page
-    
-    @asynccontextmanager
-    async def get_tab(self):
-        """Получение вкладки."""
-        if self._closed:
-            raise RuntimeError("TabManager закрыт")
-        
-        page = await self.available_tabs.get()
-        
-        if page.is_closed():
-            async with self._lock:
-                if page.is_closed():
-                    self.logger.warning("⚠️ Вкладка закрыта, создаем новую")
-                    try:
-                        new_page = await self._create_configured_page()
-                        await apply_stealth(new_page)
-                        
-                        try:
-                            idx = self.all_tabs.index(page)
-                            self.all_tabs[idx] = new_page
-                        except ValueError:
-                            self.all_tabs.append(new_page)
-                        
-                        page = new_page
-                    except Exception as e:
-                        self.logger.error(f"❌ Не удалось создать вкладку: {e}")
-                        await self.available_tabs.put(page)
-                        raise
-        
-        try:
-            yield page
-        except Exception as e:
-            self.logger.error(f"❌ Ошибка работы с вкладкой: {e}")
-            async with self._lock:
-                try:
-                    if not page.is_closed():
-                        await page.close()
-                except Exception:
-                    pass
-                
-                try:
-                    page = await self._create_configured_page()
-                    await apply_stealth(new_page)
-                    self.logger.info("✅ Вкладка восстановлена")
-                except Exception as create_error:
-                    self.logger.critical(f"🚨 Не удалось восстановить вкладку: {create_error}")
-                    raise
-            raise
-        finally:
-            if not page.is_closed():
-                await self.available_tabs.put(page)
-            else:
-                asyncio.create_task(self._restore_pool_tab(page))
-    
-    async def _restore_pool_tab(self, closed_page: Page):
-        """Асинхронное восстановление вкладки."""
-        async with self._lock:
-            try:
-                new_page = await self._create_configured_page()
-                await apply_stealth(new_page)
-                await self.available_tabs.put(new_page)
-                
-                try:
-                    idx = self.all_tabs.index(closed_page)
-                    self.all_tabs[idx] = new_page
-                except ValueError:
-                    self.all_tabs.append(new_page)
-            except Exception as e:
-                self.logger.critical(f"🚨 Не удалось восстановить пул: {e}")
-    
-    async def close_all(self):
-        """Закрытие всех вкладок."""
-        self._closed = True
-        async with self._lock:
-            for i, page in enumerate(self.all_tabs):
-                try:
-                    if not page.is_closed():
-                        await page.close()
-                except Exception:
-                    pass
-
 
 def parse_arguments():
     """Парсинг аргументов командной строки."""
