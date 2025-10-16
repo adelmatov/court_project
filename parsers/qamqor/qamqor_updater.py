@@ -7,9 +7,12 @@ import asyncio
 import argparse
 import signal
 import sys
+import random
 from datetime import datetime, timedelta
-from typing import Dict, List, Optional
-from contextlib import asynccontextmanager
+from types import FrameType
+from typing import Any, Dict, List, Optional
+from contextlib import asynccontextmanager, suppress
+from signal import Signals
 
 from playwright.async_api import async_playwright, Page, Response
 
@@ -19,56 +22,19 @@ from .core import (
     DataProcessor,
     APIValidator,
     WebClient,
-    TabManager,
-    LogManager
+    StealthTabManager,
+    LogManager,
+    apply_stealth
 )
-
-
-async def apply_stealth(page: Page) -> bool:
-    """
-    Эффективная маскировка браузера без внешних библиотек.
-    """
-    try:
-        await page.add_init_script("""
-            // Удаляем webdriver
-            Object.defineProperty(navigator, 'webdriver', {
-                get: () => undefined
-            });
-            
-            // Chrome объект
-            window.navigator.chrome = {
-                runtime: {},
-                loadTimes: function() {},
-                csi: function() {}
-            };
-            
-            // Permissions
-            const originalQuery = window.navigator.permissions.query;
-            window.navigator.permissions.query = (parameters) => (
-                parameters.name === 'notifications' ?
-                    Promise.resolve({ state: Notification.permission }) :
-                    originalQuery(parameters)
-            );
-            
-            // Plugins
-            Object.defineProperty(navigator, 'plugins', {
-                get: () => [1, 2, 3, 4, 5]
-            });
-            
-            // Languages
-            Object.defineProperty(navigator, 'languages', {
-                get: () => ['ru-RU', 'ru', 'en-US', 'en']
-            });
-        """)
-        return True
-    except Exception:
-        return False
-
 
 class QamqorUpdater:
     """Апдейтер с синхронизацией парсера."""
     
-    def __init__(self, force: bool = False, statuses: Optional[List[str]] = None):
+    def __init__(
+        self, 
+        force: bool = False, 
+        statuses: Optional[List[str]] = None
+    ) -> None:
         self.config = Config()
         self.log_manager = LogManager(self.config, name="qamqor_updater")
         self.logger = self.log_manager.logger
@@ -98,7 +64,7 @@ class QamqorUpdater:
         signal.signal(signal.SIGINT, self._signal_handler)
         signal.signal(signal.SIGTERM, self._signal_handler)
     
-    def _signal_handler(self, signum, frame):
+    def _signal_handler(self, signum: Signals, frame: Optional[FrameType]) -> None:
         self.logger.warning(f"⚠️ Получен сигнал {signum}")
         self.shutdown_event.set()
     
@@ -146,7 +112,7 @@ class QamqorUpdater:
                 self.logger.info("✅ Нет записей для обновления")
                 return True
             
-            self.logger.info(f"📋 Записей для обновления: {total}")
+            self.logger.info("📋 Записей для обновления: %d", total)
             
             await self._run_update_process(records)
             await self._print_update_summary()
@@ -244,7 +210,7 @@ class QamqorUpdater:
                 for worker_id in range(self.config.MAX_CONCURRENT_TABS)
             ]
             
-            self.logger.info(f"👷 Запущено {len(self.active_workers)} воркеров")
+            self.logger.info("👷 Запущено %d воркеров", len(self.active_workers))
             
             try:
                 await asyncio.gather(*self.active_workers, return_exceptions=True)
@@ -273,7 +239,11 @@ class QamqorUpdater:
                 await browser.close()
                 self.logger.info("🔒 Браузер закрыт")
     
-    async def _update_worker(self, worker_id: int, tab_manager):
+    async def _update_worker(
+        self, 
+        worker_id: int, 
+        tab_manager: StealthTabManager
+    ) -> None:
         """Воркер обновления."""
         self.logger.debug(f"✅ UW{worker_id} запущен")
         
@@ -312,7 +282,7 @@ class QamqorUpdater:
                         self.stats['not_found'] += 1
                 except Exception as e:
                     self.stats['errors'] += 1
-                    self.logger.error(f"❌ UW{worker_id} | {reg_num}: {e}")
+                    self.logger.error("❌ UW%d | %s: %s", worker_id, reg_num, e)
                 finally:
                     self.update_queue.task_done()
         
@@ -339,13 +309,16 @@ class QamqorUpdater:
                 )
                 
                 # Случайная задержка для имитации человека
-                import random
-                await asyncio.sleep(random.uniform(0.3, 0.8))
-                
+                await asyncio.sleep(
+                    random.uniform(self.config.NATURAL_DELAY_MIN, self.config.NATURAL_DELAY_MAX)
+                )
+
                 await page.fill('input[placeholder="Тексеру/ тіркеу нөмірі"]', '')
                 await page.fill('input[placeholder="Тексеру/ тіркеу нөмірі"]', registration_number)
-                
-                await asyncio.sleep(random.uniform(0.2, 0.5))
+
+                await asyncio.sleep(
+                    random.uniform(self.config.TYPING_DELAY_MIN, self.config.TYPING_DELAY_MAX)
+                )
                 
                 async with self._response_listener(page) as wait_response:
                     await page.click("button.btn.btn-primary:has-text('Іздеу')")
@@ -425,12 +398,10 @@ class QamqorUpdater:
         try:
             yield wait_response
         finally:
-            try:
+            with suppress(Exception):
                 page.remove_listener("response", handle_response)
-            except:
-                pass
     
-    async def _update_data_handler(self):
+    async def _update_data_handler(self) -> None:
         """Обработчик данных обновления."""
         batch = []
         last_save_time = asyncio.get_event_loop().time()
@@ -470,7 +441,7 @@ class QamqorUpdater:
                         self.log_manager.increment_metric('db_updates', total)
                         
                         if total > 0:
-                            self.logger.info(f"🔄 Обновлено: TAX={tax}, CUSTOMS={customs}, всего={total_saved}")
+                            self.logger.info("🔄 Обновлено: TAX=%d, CUSTOMS=%d, всего=%d", tax, customs, total_saved)
                     except Exception as e:
                         self.logger.error(f"❌ Ошибка обновления: {e}")
                     
@@ -520,7 +491,7 @@ class QamqorUpdater:
         
         self.logger.info(f"✅ Update data handler завершен. Всего обновлено: {total_saved}")
     
-    async def _print_update_summary(self):
+    async def _print_update_summary(self) -> None:
         """Итоговая статистика."""
         self.logger.info("")
         self.logger.info("=" * 80)
@@ -541,140 +512,6 @@ class QamqorUpdater:
         self.logger.info(f"   └─ API запросов: {metrics['api_requests']}")
         self.logger.info(f"   └─ Обработано: {metrics['records_processed']}")
         self.logger.info(f"   └─ Скорость: {metrics['records_per_second']} зап/с")
-
-
-# ✅ StealthTabManager (копия из парсера)
-class StealthTabManager:
-    """TabManager с автоматическим применением stealth."""
-    
-    def __init__(self, context, config, logger):
-        self.context = context
-        self.config = config
-        self.logger = logger
-        self.available_tabs: asyncio.Queue = asyncio.Queue()
-        self.all_tabs: List[Page] = []
-        self._lock = asyncio.Lock()
-        self._closed = False
-    
-    async def initialize(self):
-        """Инициализация пула вкладок."""
-        self.logger.debug(f"🔧 Инициализация {self.config.MAX_CONCURRENT_TABS} вкладок...")
-        
-        for i in range(self.config.MAX_CONCURRENT_TABS):
-            try:
-                page = await self._create_configured_page()
-                await apply_stealth(page)
-                
-                self.all_tabs.append(page)
-                await self.available_tabs.put(page)
-                self.logger.debug(f"✅ Вкладка {i+1} (stealth) создана")
-            except Exception as e:
-                self.logger.error(f"❌ Ошибка создания вкладки {i+1}: {e}")
-                await self.close_all()
-                raise
-        
-        self.logger.debug("✅ Пул вкладок инициализирован")
-    
-    async def _create_configured_page(self) -> Page:
-        """Создание настроенной вкладки."""
-        page = await self.context.new_page()
-        
-        blocked_types = {"image", "stylesheet", "font", "media"}
-        
-        async def route_handler(route):
-            try:
-                if route.request.resource_type in blocked_types:
-                    await route.abort()
-                else:
-                    await route.continue_()
-            except Exception:
-                try:
-                    await route.abort()
-                except Exception:
-                    pass
-        
-        await page.route("**/*", route_handler)
-        return page
-    
-    @asynccontextmanager
-    async def get_tab(self):
-        """Получение вкладки."""
-        if self._closed:
-            raise RuntimeError("TabManager закрыт")
-        
-        page = await self.available_tabs.get()
-        
-        if page.is_closed():
-            async with self._lock:
-                if page.is_closed():
-                    self.logger.warning("⚠️ Вкладка закрыта, создаем новую")
-                    try:
-                        new_page = await self._create_configured_page()
-                        await apply_stealth(new_page)
-                        
-                        try:
-                            idx = self.all_tabs.index(page)
-                            self.all_tabs[idx] = new_page
-                        except ValueError:
-                            self.all_tabs.append(new_page)
-                        
-                        page = new_page
-                    except Exception as e:
-                        self.logger.error(f"❌ Не удалось создать вкладку: {e}")
-                        await self.available_tabs.put(page)
-                        raise
-        
-        try:
-            yield page
-        except Exception as e:
-            self.logger.error(f"❌ Ошибка работы с вкладкой: {e}")
-            async with self._lock:
-                try:
-                    if not page.is_closed():
-                        await page.close()
-                except Exception:
-                    pass
-                
-                try:
-                    page = await self._create_configured_page()
-                    await apply_stealth(page)
-                    self.logger.info("✅ Вкладка восстановлена")
-                except Exception as create_error:
-                    self.logger.critical(f"🚨 Не удалось восстановить вкладку: {create_error}")
-                    raise
-            raise
-        finally:
-            if not page.is_closed():
-                await self.available_tabs.put(page)
-            else:
-                asyncio.create_task(self._restore_pool_tab(page))
-    
-    async def _restore_pool_tab(self, closed_page: Page):
-        """Асинхронное восстановление вкладки."""
-        async with self._lock:
-            try:
-                new_page = await self._create_configured_page()
-                await apply_stealth(new_page)
-                await self.available_tabs.put(new_page)
-                
-                try:
-                    idx = self.all_tabs.index(closed_page)
-                    self.all_tabs[idx] = new_page
-                except ValueError:
-                    self.all_tabs.append(new_page)
-            except Exception as e:
-                self.logger.critical(f"🚨 Не удалось восстановить пул: {e}")
-    
-    async def close_all(self):
-        """Закрытие всех вкладок."""
-        self._closed = True
-        async with self._lock:
-            for page in self.all_tabs:
-                try:
-                    if not page.is_closed():
-                        await page.close()
-                except Exception:
-                    pass
 
 
 def parse_arguments():
