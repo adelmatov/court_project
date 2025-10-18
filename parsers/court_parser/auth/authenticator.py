@@ -204,41 +204,74 @@ class Authenticator:
             self.logger.debug("Логин и пароль отправлены")
     
     async def _verify_authentication(self, session: aiohttp.ClientSession) -> bool:
-        """Проверка успешности авторизации"""
+        """
+        Проверка успешности авторизации
+        
+        Raises:
+            aiohttp.ClientError: при HTTP 502, 503, 504 (retriable ошибки)
+            NonRetriableError: при HTTP 401, 403 (постоянные ошибки)
+        
+        Returns:
+            True если авторизация успешна
+            False если не удалось определить (будет обработано в _do_authenticate)
+        """
         url = f"{self.base_url}/form/proceedings/services.xhtml"
         
-        async with session.get(url, headers=self._get_base_headers()) as response:
-            if response.status != 200:
-                self.logger.error(f"HTTP {response.status} при проверке авторизации")
+        try:
+            async with session.get(url, headers=self._get_base_headers()) as response:
+                # КРИТИЧЕСКОЕ ИСПРАВЛЕНИЕ: обработка HTTP ошибок
+                
+                # Постоянные ошибки (не авторизован)
+                if response.status in [401, 403]:
+                    self.logger.error(f"HTTP {response.status}: Неверные учетные данные")
+                    raise NonRetriableError(f"HTTP {response.status}: Авторизация отклонена сервером")
+                
+                # Временные ошибки сервера (retry)
+                if response.status in [500, 502, 503, 504]:
+                    self.logger.warning(f"HTTP {response.status}: Временная ошибка сервера")
+                    raise aiohttp.ClientError(f"HTTP {response.status}: Сервер недоступен")
+                
+                # Успешный ответ
+                if response.status != 200:
+                    self.logger.error(f"HTTP {response.status} при проверке авторизации")
+                    return False
+                
+                html = await response.text()
+                
+                # Проверяем наличие элементов авторизованной страницы
+                checks = {
+                    'profile-context-menu': 'profile-context-menu' in html,
+                    'Выйти': 'Выйти' in html,
+                    'logout()': 'logout()' in html,
+                    'userInfo.xhtml': 'userInfo.xhtml' in html
+                }
+                
+                passed = sum(checks.values())
+                
+                if passed >= 3:  # Минимум 3 признака из 4
+                    self.logger.info(f"✅ Авторизация подтверждена ({passed}/4 проверок)")
+                    return True
+                
+                self.logger.error(f"❌ Авторизация не подтверждена ({passed}/4 проверок)")
+                
+                # Сохраняем HTML для отладки
+                try:
+                    with open('failed_auth_debug.html', 'w', encoding='utf-8') as f:
+                        f.write(html)
+                    self.logger.info("HTML сохранён в failed_auth_debug.html")
+                except:
+                    pass
+                
                 return False
-            
-            html = await response.text()
-            
-            # Проверяем наличие элементов авторизованной страницы
-            checks = {
-                'profile-context-menu': 'profile-context-menu' in html,
-                'Выйти': 'Выйти' in html,
-                'logout()': 'logout()' in html,
-                'userInfo.xhtml': 'userInfo.xhtml' in html
-            }
-            
-            passed = sum(checks.values())
-            
-            if passed >= 3:  # Минимум 3 признака из 4
-                self.logger.info(f"✅ Авторизация подтверждена ({passed}/4 проверок)")
-                return True
-            
-            self.logger.error(f"❌ Авторизация не подтверждена ({passed}/4 проверок)")
-            
-            # Сохраняем HTML для отладки
-            try:
-                with open('failed_auth_debug.html', 'w', encoding='utf-8') as f:
-                    f.write(html)
-                self.logger.info("HTML сохранён в failed_auth_debug.html")
-            except:
-                pass
-            
-            return False
+        
+        except (aiohttp.ClientError, NonRetriableError):
+            # Пробрасываем исключения дальше (для retry логики)
+            raise
+        
+        except Exception as e:
+            # Неожиданная ошибка
+            self.logger.error(f"Неожиданная ошибка при проверке авторизации: {e}")
+            raise aiohttp.ClientError(f"Ошибка проверки авторизации: {e}")
     
     def _extract_viewstate(self, html: str) -> Optional[str]:
         """Извлечение ViewState из HTML"""

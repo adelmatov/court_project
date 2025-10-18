@@ -23,12 +23,12 @@ from utils.retry import RetryStrategy, RetryConfig, NonRetriableError
 class CourtParser:
     """Главный класс парсера с retry и восстановлением"""
     
-    def __init__(self, config_path: Optional[str] = None, update_mode: bool = False):  # ← ДОБАВЛЕН параметр
+    def __init__(self, config_path: Optional[str] = None, update_mode: bool = False):
         # Загрузка конфигурации
         self.settings = Settings(config_path)
         
-        # РЕЖИМ РАБОТЫ (НОВОЕ)
-        self.update_mode = update_mode  # ← ДОБАВЛЕНО
+        # РЕЖИМ РАБОТЫ
+        self.update_mode = update_mode
         
         # Retry конфигурация
         self.retry_config = self.settings.config.get('retry_settings', {})
@@ -51,6 +51,9 @@ class CourtParser:
         self.db_manager = DatabaseManager(self.settings.database)
         self.text_processor = TextProcessor()
         
+        # НОВОЕ: Lock для stateful операций с формой
+        self.form_lock = asyncio.Lock()
+        
         # Счетчик ошибок для переавторизации
         self.session_error_count = 0
         self.max_session_errors = 10
@@ -63,20 +66,34 @@ class CourtParser:
         
         self.logger = get_logger('court_parser')
         
-        # ДОБАВЛЕНО: логирование режима
+        # Логирование режима
         mode_name = "Update Mode" if self.update_mode else "Full Scan Mode"
         self.logger.info(f"🚀 Парсер инициализирован в режиме: {mode_name}")
     
     async def initialize(self):
         """Инициализация (подключение к БД, авторизация)"""
-        await self.db_manager.connect()
-        await self.authenticator.authenticate(self.session_manager)
-        self.logger.info("✅ Парсер готов к работе")
+        try:
+            await self.db_manager.connect()
+            await self.authenticator.authenticate(self.session_manager)
+            self.logger.info("✅ Парсер готов к работе")
+        except Exception as e:
+            # При ошибке инициализации закрываем ресурсы
+            self.logger.error(f"❌ Ошибка инициализации: {e}")
+            await self.cleanup()
+            raise
     
     async def cleanup(self):
         """Очистка ресурсов"""
-        await self.db_manager.disconnect()
-        await self.session_manager.close()
+        try:
+            await self.db_manager.disconnect()
+        except Exception as e:
+            self.logger.error(f"Ошибка закрытия БД: {e}")
+        
+        try:
+            await self.session_manager.close()
+        except Exception as e:
+            self.logger.error(f"Ошибка закрытия сессии: {e}")
+        
         self.logger.info("Ресурсы очищены")
     
     async def _handle_session_recovery(self, error: Exception) -> bool:
@@ -238,9 +255,13 @@ class CourtParser:
         return await self.search_and_save_with_retry(*args, **kwargs)
     
     async def _do_search_and_save(self, region_key: str, court_key: str,
-                            case_number: str, year: str) -> Dict[str, Any]:
+                        case_number: str, year: str) -> Dict[str, Any]:
         """
-        Один цикл поиска и сохранения
+        Один цикл поиска и сохранения с Lock на stateful операции
+        
+        Архитектура:
+        1. [LOCK] Подготовка формы + выбор региона + поиск (stateful)
+        2. [БЕЗ LOCK] Парсинг HTML + сохранение в БД (stateless)
         
         Returns:
             {
@@ -248,7 +269,8 @@ class CourtParser:
                 'target_found': True/False,
                 'total_saved': 5,
                 'related_saved': 4,
-                'target_case_number': '6294-25-00-4/1'
+                'target_case_number': '6294-25-00-4/1',
+                'error': None или строка с ошибкой
             }
         """
         # Получение конфигурации
@@ -262,32 +284,51 @@ class CourtParser:
         
         self.logger.info(f"🔍 Ищу дело: {full_case_number}")
         
-        # Получение сессии
-        session = await self.session_manager.get_session()
+        # ============================================================
+        # КРИТИЧЕСКАЯ СЕКЦИЯ: Stateful операции (под Lock)
+        # ============================================================
+        async with self.form_lock:
+            self.logger.debug(f"[{region_key}] Захватил form_lock")
+            
+            # Получение сессии
+            session = await self.session_manager.get_session()
+            
+            # Подготовка формы
+            viewstate, form_ids = await self.form_handler.prepare_search_form(session)
+            
+            # Выбор региона
+            await self.form_handler.select_region(
+                session, viewstate, region_config['id'], form_ids
+            )
+            
+            await asyncio.sleep(1)
+            
+            # Поиск
+            results_html = await self.search_engine.search_case(
+                session, viewstate, region_config['id'], court_config['id'],
+                year, full_case_number, form_ids,
+                extract_sequence=self.update_mode
+            )
+            
+            self.logger.debug(f"[{region_key}] Освободил form_lock")
         
-        # Подготовка формы
-        viewstate, form_ids = await self.form_handler.prepare_search_form(session)
-        
-        # Выбор региона
-        await self.form_handler.select_region(
-            session, viewstate, region_config['id'], form_ids
-        )
-        
-        await asyncio.sleep(1)
-        
-        # Поиск (ИЗМЕНЕНО: добавлен параметр extract_sequence)
-        results_html = await self.search_engine.search_case(
-            session, viewstate, region_config['id'], court_config['id'],
-            year, full_case_number, form_ids,
-            extract_sequence=self.update_mode  # ← ИЗМЕНЕНО: используем флаг парсера
-        )
+        # ============================================================
+        # Stateless операции (БЕЗ Lock — параллельно для всех)
+        # ============================================================
         
         # Парсинг
         cases = self.results_parser.parse(results_html)
         
         if not cases:
             self.logger.info(f"❌ Ничего не найдено: {full_case_number}")
-            raise NonRetriableError("Дело не найдено")
+            return {
+                'success': False,
+                'target_found': False,
+                'total_saved': 0,
+                'related_saved': 0,
+                'target_case_number': full_case_number,
+                'error': 'no_results'
+            }
         
         # Сохранение всех найденных дел
         saved_count = 0
@@ -347,7 +388,16 @@ class CourtParser:
                 'target_case_number': full_case_number
             }
         else:
-            raise NonRetriableError("Не удалось сохранить дела")
+            self.logger.info(f"❌ Ничего не сохранено для дела {full_case_number}")
+            
+            return {
+                'success': False,
+                'target_found': False,
+                'total_saved': 0,
+                'related_saved': 0,
+                'target_case_number': full_case_number,
+                'error': 'nothing_saved'
+            }
     
     # Алиас для обратной совместимости
     async def search_and_save(self, *args, **kwargs):
@@ -359,3 +409,5 @@ class CourtParser:
     
     async def __aexit__(self, exc_type, exc_val, exc_tb):
         await self.cleanup()
+        # Не подавляем исключения
+        return False
