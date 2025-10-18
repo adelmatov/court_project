@@ -5,7 +5,7 @@
 
 import asyncio
 import aiohttp
-from typing import Optional, Dict, List, Any
+from typing import Optional, Dict, List, Any, Set
 
 from config.settings import Settings
 from core.session import SessionManager
@@ -63,6 +63,19 @@ class CourtParser:
         self.max_reauth = self.retry_config.get('session_recovery', {}).get(
             'max_reauth_attempts', 2
         )
+        
+        self.logger = get_logger('court_parser')
+        
+        # Логирование режима
+        mode_name = "Update Mode" if self.update_mode else "Full Scan Mode"
+        self.logger.info(f"🚀 Парсер инициализирован в режиме: {mode_name}")
+
+        # НОВОЕ: Кеш существующих номеров дел
+        # Структура: {
+        #     'astana_smas_2025': {1, 2, 5, 10, 15, ...},
+        #     'almaty_appellate_2025': {1, 3, 7, 12, ...}
+        # }
+        self.existing_cases_cache: Dict[str, Set[int]] = {}
         
         self.logger = get_logger('court_parser')
         
@@ -281,6 +294,26 @@ class CourtParser:
         full_case_number = self.text_processor.generate_case_number(
             region_config, court_config, year, int(case_number)
         )
+
+        # ============================================================
+        # НОВОЕ: Проверка существования в кеше
+        # ============================================================
+        sequence_num = int(case_number)
+        
+        if self._is_case_in_cache(region_key, court_key, year, sequence_num):
+            self.logger.debug(f"⏭️  Дело {full_case_number} уже в БД, пропускаю")
+            return {
+                'success': True,
+                'target_found': True,
+                'total_saved': 0,
+                'related_saved': 0,
+                'target_case_number': full_case_number,
+                'skipped': True  # Новый флаг для статистики
+            }
+        
+        # ============================================================
+        # Существующий код поиска и сохранения
+        # ============================================================
         
         self.logger.info(f"🔍 Ищу дело: {full_case_number}")
         
@@ -353,6 +386,15 @@ class CourtParser:
             
             if save_result['status'] in ['saved', 'updated']:
                 saved_count += 1
+
+                # Извлекаем порядковый номер из case_number
+                if '/' in case.case_number:
+                    try:
+                        seq_str = case.case_number.split('/')[-1]
+                        seq_num = int(seq_str)
+                        self._add_to_cache(region_key, court_key, year, seq_num)
+                    except (ValueError, IndexError):
+                        pass  # Некорректный формат - пропускаем
                 
                 if is_target:
                     judge = "✅ судья" if case.judge else "⚠️ без судьи"
@@ -411,3 +453,81 @@ class CourtParser:
         await self.cleanup()
         # Не подавляем исключения
         return False
+    
+    def _get_cache_key(self, region_key: str, court_key: str, year: str) -> str:
+        """
+        Генерация ключа для кеша
+        
+        Returns:
+            'astana_smas_2025'
+        """
+        return f"{region_key}_{court_key}_{year}"
+
+    async def _load_existing_cases_cache(
+        self, 
+        region_key: str, 
+        court_key: str, 
+        year: str
+    ) -> Set[int]:
+        """
+        Загрузка существующих номеров дел в кеш
+        
+        Returns:
+            Множество порядковых номеров
+        """
+        cache_key = self._get_cache_key(region_key, court_key, year)
+        
+        # Проверяем кеш
+        if cache_key in self.existing_cases_cache:
+            self.logger.debug(f"Кеш для {cache_key} уже загружен")
+            return self.existing_cases_cache[cache_key]
+        
+        # Загружаем из БД
+        existing = await self.db_manager.get_existing_case_numbers(
+            region_key, court_key, year, self.settings
+        )
+        
+        # Сохраняем в кеш
+        self.existing_cases_cache[cache_key] = existing
+        
+        return existing
+
+    def _is_case_in_cache(
+        self, 
+        region_key: str, 
+        court_key: str, 
+        year: str, 
+        sequence_number: int
+    ) -> bool:
+        """
+        Проверка существования дела в кеше
+        
+        Args:
+            sequence_number: порядковый номер (1, 2, 1075, ...)
+        
+        Returns:
+            True если дело уже в БД
+        """
+        cache_key = self._get_cache_key(region_key, court_key, year)
+        
+        if cache_key not in self.existing_cases_cache:
+            return False
+        
+        return sequence_number in self.existing_cases_cache[cache_key]
+
+    def _add_to_cache(
+        self, 
+        region_key: str, 
+        court_key: str, 
+        year: str, 
+        sequence_number: int
+    ):
+        """
+        Добавление номера дела в кеш после сохранения
+        """
+        cache_key = self._get_cache_key(region_key, court_key, year)
+        
+        if cache_key not in self.existing_cases_cache:
+            self.existing_cases_cache[cache_key] = set()
+        
+        self.existing_cases_cache[cache_key].add(sequence_number)

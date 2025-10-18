@@ -71,6 +71,7 @@ async def parse_all_regions_from_config() -> dict:
         'regions_processed': 0,
         'regions_failed': 0,
         'total_queries': 0,
+        'total_skipped': 0,  # ← НОВОЕ
         'total_target_cases': 0,
         'total_related_cases': 0,
         'total_cases_saved': 0
@@ -116,6 +117,7 @@ async def parse_all_regions_from_config() -> dict:
                     async with stats_lock:
                         total_stats['regions_processed'] += 1
                         total_stats['total_queries'] += region_stats['total_queries']
+                        total_stats['total_skipped'] += region_stats.get('total_skipped', 0)  # ← НОВОЕ
                         total_stats['total_target_cases'] += region_stats['total_target_cases']
                         total_stats['total_related_cases'] += region_stats['total_related_cases']
                         total_stats['total_cases_saved'] += region_stats['total_cases_saved']
@@ -166,14 +168,21 @@ async def parse_all_regions_from_config() -> dict:
     if total_stats['regions_failed'] > 0:
         logger.info(f"  Регионов с ошибками: {total_stats['regions_failed']}")
     logger.info(f"  Всего запросов к серверу: {total_stats['total_queries']}")
+    logger.info(f"  Пропущено (уже в БД): {total_stats['total_skipped']}")  # ← НОВОЕ
     logger.info(f"  Найдено целевых дел: {total_stats['total_target_cases']}")
     logger.info(f"  Найдено связанных дел: {total_stats['total_related_cases']}")
     logger.info(f"  Всего сохранено дел: {total_stats['total_cases_saved']}")
-    
+
     if total_stats['total_queries'] > 0:
         avg_per_query = total_stats['total_cases_saved'] / total_stats['total_queries']
         logger.info(f"  Среднее дел на запрос: {avg_per_query:.1f}")
-    
+
+    # ← НОВОЕ: Эффективность кеширования
+    total_processed = total_stats['total_queries'] + total_stats['total_skipped']
+    if total_processed > 0:
+        cache_efficiency = (total_stats['total_skipped'] / total_processed * 100)
+        logger.info(f"  Эффективность кеша: {cache_efficiency:.1f}%")
+
     logger.info("=" * 70)
     
     return total_stats
@@ -227,6 +236,7 @@ async def process_region_all_courts(
         'region_key': region_key,
         'courts_processed': 0,
         'total_queries': 0,
+        'total_skipped': 0,  # ← НОВОЕ
         'total_target_cases': 0,
         'total_related_cases': 0,
         'total_cases_saved': 0,
@@ -256,6 +266,7 @@ async def process_region_all_courts(
             # Обновление статистики региона
             region_stats['courts_processed'] += 1
             region_stats['total_queries'] += court_stats['queries_made']
+            region_stats['total_skipped'] += court_stats.get('skipped_existing', 0)  # ← НОВОЕ
             region_stats['total_target_cases'] += court_stats['target_cases_found']
             region_stats['total_related_cases'] += court_stats['related_cases_found']
             region_stats['total_cases_saved'] += court_stats['total_cases_saved']
@@ -271,14 +282,15 @@ async def process_region_all_courts(
     logger.info(f"ИТОГИ РЕГИОНА {region_config['name']}:")
     logger.info(f"  Обработано судов: {region_stats['courts_processed']}/{len(court_types)}")
     logger.info(f"  Запросов к серверу: {region_stats['total_queries']}")
+    logger.info(f"  Пропущено (уже в БД): {region_stats['total_skipped']}")  # ← НОВОЕ
     logger.info(f"  Найдено целевых дел: {region_stats['total_target_cases']}")
     logger.info(f"  Найдено связанных дел: {region_stats['total_related_cases']}")
     logger.info(f"  Всего сохранено дел: {region_stats['total_cases_saved']}")
-    
+
     if region_stats['total_queries'] > 0:
         target_rate = (region_stats['total_target_cases'] / region_stats['total_queries'] * 100)
         logger.info(f"  Процент целевых дел: {target_rate:.1f}%")
-    
+
     logger.info(f"{'-'*70}")
     
     return region_stats
@@ -322,13 +334,22 @@ async def parse_court(
     """
     logger = setup_logger('main', level='INFO')
     
+    court_config = settings.get_court(region_key, court_key)
+
     stats = {
         'queries_made': 0,
         'target_cases_found': 0,
         'related_cases_found': 0,
         'total_cases_saved': 0,
-        'consecutive_failures': 0
+        'consecutive_failures': 0,
+        'skipped_existing': 0
     }
+    
+    # ============================================================
+    # НОВОЕ: Загрузка кеша существующих дел
+    # ============================================================
+    logger.info(f"📥 Загружаю существующие дела из БД...")
+    await parser._load_existing_cases_cache(region_key, court_key, year)
     
     current_number = start_from
     
@@ -351,34 +372,65 @@ async def parse_court(
             year=year
         )
         
-        stats['queries_made'] += 1
-        
-        if result['success']:
-            # Успех
-            stats['total_cases_saved'] += result['total_saved']
-            
-            if result['target_found']:
-                stats['target_cases_found'] += 1
-            
-            stats['related_cases_found'] += result['related_saved']
-            stats['consecutive_failures'] = 0
+        # ============================================================
+        # НОВОЕ: Обработка пропущенных дел
+        # ============================================================
+        if result.get('skipped'):
+            # Дело уже в БД - не считаем как запрос к серверу
+            stats['skipped_existing'] += 1
+            stats['consecutive_failures'] = 0  # Сбрасываем счетчик неудач
         else:
-            # Неудача
-            stats['consecutive_failures'] += 1
+            # Реальный запрос к серверу
+            stats['queries_made'] += 1
+            
+            if result['success']:
+                # Успех
+                stats['total_cases_saved'] += result['total_saved']
+                
+                if result['target_found']:
+                    stats['target_cases_found'] += 1
+                
+                stats['related_cases_found'] += result['related_saved']
+                stats['consecutive_failures'] = 0
+            else:
+                # Неудача
+                stats['consecutive_failures'] += 1
         
         # Периодическая статистика
-        if stats['queries_made'] % 10 == 0:
+        total_processed = stats['queries_made'] + stats['skipped_existing']
+        if total_processed % 10 == 0:
             logger.info(
-                f"📊 Прогресс: запросов {stats['queries_made']}, "
+                f"📊 Прогресс: обработано {total_processed} "
+                f"(запросов {stats['queries_made']}, пропущено {stats['skipped_existing']}), "
                 f"найдено целевых {stats['target_cases_found']}, "
                 f"всего сохранено {stats['total_cases_saved']}"
             )
         
         current_number += 1
         
-        # Задержка между запросами
-        await asyncio.sleep(delay_between_requests)
+        # ============================================================
+        # ВАЖНО: Задержка только для реальных запросов
+        # ============================================================
+        if not result.get('skipped'):
+            await asyncio.sleep(delay_between_requests)
+        # Для пропущенных дел задержки нет - быстрая проверка кеша
     
+    # Итоги региона
+    logger.info(f"\n{'-'*70}")
+    logger.info(f"ИТОГИ СУДА {court_config['name']}:")
+    logger.info(f"  Обработано номеров: {stats['queries_made'] + stats['skipped_existing']}")
+    logger.info(f"  Запросов к серверу: {stats['queries_made']}")
+    logger.info(f"  Пропущено (уже в БД): {stats['skipped_existing']}")  # ← НОВОЕ
+    logger.info(f"  Найдено целевых дел: {stats['target_cases_found']}")
+    logger.info(f"  Найдено связанных дел: {stats['related_cases_found']}")
+    logger.info(f"  Всего сохранено дел: {stats['total_cases_saved']}")
+
+    if stats['queries_made'] > 0:
+        target_rate = (stats['target_cases_found'] / stats['queries_made'] * 100)
+        logger.info(f"  Процент целевых дел: {target_rate:.1f}%")
+
+    logger.info(f"{'-'*70}")
+
     return stats
 
 
