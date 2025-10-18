@@ -1,11 +1,14 @@
-playwright
-tenacity
-selectolax
-requests
-lxml
-aiohttp
-tqdm
-openpyxl
-httpx
-psycopg2
-aiofiles
+# Court Parser Dependencies
+# Generated: 2025-10-18 01:44:51
+
+# Core dependencies
+requests>=2.31.0
+beautifulsoup4>=4.12.0
+lxml>=4.9.0
+
+# Database
+sqlalchemy>=2.0.0
+
+# Optional
+selenium>=4.15.0  # For JavaScript-heavy pages
+pandas>=2.0.0  # For data export
