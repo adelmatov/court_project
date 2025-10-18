@@ -5,6 +5,7 @@ import asyncio
 import aiohttp
 from typing import Dict, Optional
 from selectolax.parser import HTMLParser
+from utils.retry import NonRetriableError
 
 from utils.logger import get_logger
 
@@ -20,26 +21,59 @@ class FormHandler:
         """
         Подготовка формы поиска
         
-        Возвращает: (viewstate, form_ids)
+        Raises:
+            aiohttp.ClientError: при HTTP 500, 502, 503, 504 (retriable)
+            NonRetriableError: при HTTP 400, 401, 403, 404 (non-retriable)
+        
+        Returns:
+            (viewstate, form_ids)
         """
         url = f"{self.base_url}/form/lawsuit/"
         headers = self._get_headers()
         
-        async with session.get(url, headers=headers) as response:
-            if response.status != 200:
-                raise Exception(f"HTTP {response.status} при загрузке формы поиска")
-            
-            html = await response.text()
-            viewstate = self._extract_viewstate(html)
-            form_ids = self._extract_form_ids(html)
-            
-            self.logger.debug("Форма поиска подготовлена")
-            return viewstate, form_ids
+        try:
+            async with session.get(url, headers=headers) as response:
+                # ОБРАБОТКА HTTP СТАТУСОВ
+                
+                # Постоянные ошибки
+                if response.status in [400, 401, 403, 404]:
+                    self.logger.error(f"HTTP {response.status} при загрузке формы")
+                    raise NonRetriableError(f"HTTP {response.status}: Постоянная ошибка")
+                
+                # Временные ошибки
+                if response.status in [500, 502, 503, 504]:
+                    self.logger.warning(f"HTTP {response.status}: Временная ошибка сервера")
+                    raise aiohttp.ClientError(f"HTTP {response.status}: Сервер недоступен")
+                
+                # Другие ошибки
+                if response.status != 200:
+                    self.logger.error(f"HTTP {response.status} при загрузке формы")
+                    raise aiohttp.ClientError(f"HTTP {response.status}: Неожиданная ошибка")
+                
+                html = await response.text()
+                viewstate = self._extract_viewstate(html)
+                form_ids = self._extract_form_ids(html)
+                
+                self.logger.debug("Форма поиска подготовлена")
+                return viewstate, form_ids
+        
+        except (aiohttp.ClientError, NonRetriableError):
+            raise
+        
+        except Exception as e:
+            self.logger.error(f"Неожиданная ошибка при подготовке формы: {e}")
+            raise aiohttp.ClientError(f"Ошибка подготовки формы: {e}")
     
     async def select_region(self, session: aiohttp.ClientSession, 
-                          viewstate: str, region_id: str, 
-                          form_ids: Dict[str, str]):
-        """Выбор региона в форме"""
+                      viewstate: str, region_id: str, 
+                      form_ids: Dict[str, str]):
+        """
+        Выбор региона в форме
+        
+        Raises:
+            aiohttp.ClientError: при retriable ошибках
+            NonRetriableError: при non-retriable ошибках
+        """
         url = f"{self.base_url}/form/lawsuit/index.xhtml"
         form_base = form_ids.get('form_base', 'j_idt45:j_idt46')
         
@@ -66,11 +100,33 @@ class FormHandler:
         
         headers = self._get_ajax_headers()
         
-        async with session.post(url, data=data, headers=headers) as response:
-            if response.status != 200:
-                raise Exception(f"HTTP {response.status} при выборе региона")
-            
-            self.logger.debug(f"Регион выбран: {region_id}")
+        try:
+            async with session.post(url, data=data, headers=headers) as response:
+                # ОБРАБОТКА HTTP СТАТУСОВ
+                
+                # Постоянные ошибки
+                if response.status in [400, 401, 403, 404]:
+                    self.logger.error(f"HTTP {response.status} при выборе региона")
+                    raise NonRetriableError(f"HTTP {response.status}: Постоянная ошибка")
+                
+                # Временные ошибки
+                if response.status in [500, 502, 503, 504]:
+                    self.logger.warning(f"HTTP {response.status}: Временная ошибка сервера")
+                    raise aiohttp.ClientError(f"HTTP {response.status}: Сервер недоступен")
+                
+                # Другие ошибки
+                if response.status != 200:
+                    self.logger.error(f"HTTP {response.status} при выборе региона")
+                    raise aiohttp.ClientError(f"HTTP {response.status}: Неожиданная ошибка")
+                
+                self.logger.debug(f"Регион выбран: {region_id}")
+        
+        except (aiohttp.ClientError, NonRetriableError):
+            raise
+        
+        except Exception as e:
+            self.logger.error(f"Неожиданная ошибка при выборе региона: {e}")
+            raise aiohttp.ClientError(f"Ошибка выбора региона: {e}")
     
     def _extract_viewstate(self, html: str) -> Optional[str]:
         """Извлечение ViewState"""

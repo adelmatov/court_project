@@ -4,8 +4,8 @@
 import asyncio
 import aiohttp
 from typing import Dict, Optional
-
 from utils.logger import get_logger
+from utils.retry import NonRetriableError
 
 
 class SearchEngine:
@@ -48,10 +48,10 @@ class SearchEngine:
         return results_html
     
     async def _send_search_request(self, session: aiohttp.ClientSession,
-                          viewstate: str, region_id: str, court_id: str,
-                          year: str, full_case_number: str,
-                          form_ids: Dict[str, str],
-                          extract_sequence: bool = False):  # ← ДОБАВЛЕН параметр
+                      viewstate: str, region_id: str, court_id: str,
+                      year: str, full_case_number: str,
+                      form_ids: Dict[str, str],
+                      extract_sequence: bool = False):
         """
         Отправка поискового запроса
         
@@ -59,6 +59,10 @@ class SearchEngine:
             extract_sequence: 
                 False - передать полный номер в FormData (Full Scan Mode)
                 True - передать только порядковый номер в FormData (Update Mode)
+        
+        Raises:
+            aiohttp.ClientError: при HTTP 500, 502, 503, 504 (retriable)
+            NonRetriableError: при HTTP 400, 401, 403, 404 (non-retriable)
         """
         url = f"{self.base_url}/form/lawsuit/index.xhtml"
         form_base = form_ids.get('form_base', 'j_idt45:j_idt46')
@@ -108,16 +112,79 @@ class SearchEngine:
         
         headers = self._get_ajax_headers()
         
-        async with session.post(url, data=data, headers=headers) as response:
-            if response.status != 200:
-                raise Exception(f"HTTP {response.status} при отправке поиска")
-            
-            await response.text()
+        try:
+            async with session.post(url, data=data, headers=headers) as response:
+                # ОБРАБОТКА HTTP СТАТУСОВ
+                
+                # Постоянные ошибки (non-retriable)
+                if response.status in [400, 401, 403, 404]:
+                    self.logger.error(f"HTTP {response.status} при отправке поиска")
+                    raise NonRetriableError(f"HTTP {response.status}: Постоянная ошибка")
+                
+                # Временные ошибки сервера (retriable)
+                if response.status in [500, 502, 503, 504]:
+                    self.logger.warning(f"HTTP {response.status}: Временная ошибка сервера")
+                    raise aiohttp.ClientError(f"HTTP {response.status}: Сервер недоступен")
+                
+                # Другие ошибки
+                if response.status != 200:
+                    self.logger.error(f"HTTP {response.status} при отправке поиска")
+                    raise aiohttp.ClientError(f"HTTP {response.status}: Неожиданная ошибка")
+                
+                await response.text()
+        
+        except (aiohttp.ClientError, NonRetriableError):
+            # Пробрасываем исключения для retry
+            raise
+        
+        except Exception as e:
+            # Неожиданная ошибка
+            self.logger.error(f"Неожиданная ошибка при поиске: {e}")
+            raise aiohttp.ClientError(f"Ошибка поиска: {e}")
     
     async def _get_results(self, session: aiohttp.ClientSession) -> str:
-        """Получение страницы с результатами"""
+        """
+        Получение страницы с результатами
+        
+        Raises:
+            aiohttp.ClientError: при HTTP 500, 502, 503, 504 (retriable)
+            NonRetriableError: при HTTP 400, 401, 403, 404 (non-retriable)
+        
+        Returns:
+            HTML страницы с результатами
+        """
         url = f"{self.base_url}/lawsuit/lawsuitList.xhtml"
         headers = self._get_headers()
+        
+        try:
+            async with session.get(url, headers=headers) as response:
+                # ОБРАБОТКА HTTP СТАТУСОВ
+                
+                # Постоянные ошибки (non-retriable)
+                if response.status in [400, 401, 403, 404]:
+                    self.logger.error(f"HTTP {response.status} при получении результатов")
+                    raise NonRetriableError(f"HTTP {response.status}: Постоянная ошибка")
+                
+                # Временные ошибки сервера (retriable)
+                if response.status in [500, 502, 503, 504]:
+                    self.logger.warning(f"HTTP {response.status}: Временная ошибка сервера")
+                    raise aiohttp.ClientError(f"HTTP {response.status}: Сервер недоступен")
+                
+                # Другие ошибки
+                if response.status != 200:
+                    self.logger.error(f"HTTP {response.status} при получении результатов")
+                    raise aiohttp.ClientError(f"HTTP {response.status}: Неожиданная ошибка")
+                
+                return await response.text()
+        
+        except (aiohttp.ClientError, NonRetriableError):
+            # Пробрасываем исключения для retry
+            raise
+        
+        except Exception as e:
+            # Неожиданная ошибка
+            self.logger.error(f"Неожиданная ошибка при получении результатов: {e}")
+            raise aiohttp.ClientError(f"Ошибка получения результатов: {e}")
         
         async with session.get(url, headers=headers) as response:
             if response.status != 200:
