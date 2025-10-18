@@ -2,7 +2,7 @@
 Менеджер базы данных
 """
 import asyncpg
-from typing import Dict, List, Optional, Any
+from typing import Dict, List, Optional, Any, Set
 
 from database.models import CaseData, EventData
 from utils.text_processor import TextProcessor
@@ -353,3 +353,72 @@ class DatabaseManager:
             """, case_number)
         
         self.logger.debug(f"Дело помечено как обновлённое: {case_number}")
+
+    async def get_existing_case_numbers(
+        self, 
+        region_key: str, 
+        court_key: str, 
+        year: str,
+        settings
+    ) -> Set[int]:
+        """
+        Получить множество существующих порядковых номеров дел для региона/суда/года
+        
+        Args:
+            region_key: ключ региона ('astana', 'almaty', ...)
+            court_key: ключ суда ('smas', 'appellate')
+            year: год ('2025')
+            settings: экземпляр Settings для получения конфигурации
+        
+        Returns:
+            {1, 2, 5, 10, 15, 23, 45, 67, 89, 100, ...}
+        
+        Example:
+            >>> existing = await db.get_existing_case_numbers('astana', 'smas', '2025', settings)
+            >>> 1075 in existing
+            True
+        """
+        # Получаем конфигурацию для формирования префикса номера
+        region_config = settings.get_region(region_key)
+        court_config = settings.get_court(region_key, court_key)
+        
+        # Формируем префикс номера дела
+        # Например: "6294-25-00-4/" для Астаны, SMAS, 2025
+        kato = region_config['kato_code']
+        instance = court_config['instance_code']
+        year_short = year[-2:]  # "2025" → "25"
+        case_type = court_config['case_type_code']
+        
+        prefix = f"{kato}{instance}-{year_short}-00-{case_type}/"
+        
+        # SQL запрос
+        query = """
+            SELECT case_number
+            FROM cases
+            WHERE case_number LIKE $1
+        """
+        
+        async with self.pool.acquire() as conn:
+            rows = await conn.fetch(query, f"{prefix}%")
+        
+        # Извлекаем порядковые номера
+        sequence_numbers = set()
+        
+        for row in rows:
+            case_number = row['case_number']
+            # Извлекаем порядковый номер из "6294-25-00-4/1075"
+            if '/' in case_number:
+                try:
+                    seq_str = case_number.split('/')[-1]
+                    seq_num = int(seq_str)
+                    sequence_numbers.add(seq_num)
+                except (ValueError, IndexError):
+                    # Некорректный формат - пропускаем
+                    self.logger.warning(f"Некорректный формат номера: {case_number}")
+                    continue
+        
+        self.logger.info(
+            f"Загружено существующих номеров для {region_key}/{court_key}/{year}: {len(sequence_numbers)}"
+        )
+        
+        return sequence_numbers

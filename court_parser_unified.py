@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 """
 Объединенный файл парсера суда
-Дата сборки: 2025-10-18 15:38:23
+Дата сборки: 2025-10-19 00:11:17
 Автор: Court Parser Team
 
 Этот файл содержит все модули проекта, объединенные в один файл.
@@ -755,41 +755,74 @@ class Authenticator:
             self.logger.debug("Логин и пароль отправлены")
     
     async def _verify_authentication(self, session: aiohttp.ClientSession) -> bool:
-        """Проверка успешности авторизации"""
+        """
+        Проверка успешности авторизации
+        
+        Raises:
+            aiohttp.ClientError: при HTTP 502, 503, 504 (retriable ошибки)
+            NonRetriableError: при HTTP 401, 403 (постоянные ошибки)
+        
+        Returns:
+            True если авторизация успешна
+            False если не удалось определить (будет обработано в _do_authenticate)
+        """
         url = f"{self.base_url}/form/proceedings/services.xhtml"
         
-        async with session.get(url, headers=self._get_base_headers()) as response:
-            if response.status != 200:
-                self.logger.error(f"HTTP {response.status} при проверке авторизации")
+        try:
+            async with session.get(url, headers=self._get_base_headers()) as response:
+                # КРИТИЧЕСКОЕ ИСПРАВЛЕНИЕ: обработка HTTP ошибок
+                
+                # Постоянные ошибки (не авторизован)
+                if response.status in [401, 403]:
+                    self.logger.error(f"HTTP {response.status}: Неверные учетные данные")
+                    raise NonRetriableError(f"HTTP {response.status}: Авторизация отклонена сервером")
+                
+                # Временные ошибки сервера (retry)
+                if response.status in [500, 502, 503, 504]:
+                    self.logger.warning(f"HTTP {response.status}: Временная ошибка сервера")
+                    raise aiohttp.ClientError(f"HTTP {response.status}: Сервер недоступен")
+                
+                # Успешный ответ
+                if response.status != 200:
+                    self.logger.error(f"HTTP {response.status} при проверке авторизации")
+                    return False
+                
+                html = await response.text()
+                
+                # Проверяем наличие элементов авторизованной страницы
+                checks = {
+                    'profile-context-menu': 'profile-context-menu' in html,
+                    'Выйти': 'Выйти' in html,
+                    'logout()': 'logout()' in html,
+                    'userInfo.xhtml': 'userInfo.xhtml' in html
+                }
+                
+                passed = sum(checks.values())
+                
+                if passed >= 3:  # Минимум 3 признака из 4
+                    self.logger.info(f"✅ Авторизация подтверждена ({passed}/4 проверок)")
+                    return True
+                
+                self.logger.error(f"❌ Авторизация не подтверждена ({passed}/4 проверок)")
+                
+                # Сохраняем HTML для отладки
+                try:
+                    with open('failed_auth_debug.html', 'w', encoding='utf-8') as f:
+                        f.write(html)
+                    self.logger.info("HTML сохранён в failed_auth_debug.html")
+                except:
+                    pass
+                
                 return False
-            
-            html = await response.text()
-            
-            # Проверяем наличие элементов авторизованной страницы
-            checks = {
-                'profile-context-menu': 'profile-context-menu' in html,
-                'Выйти': 'Выйти' in html,
-                'logout()': 'logout()' in html,
-                'userInfo.xhtml': 'userInfo.xhtml' in html
-            }
-            
-            passed = sum(checks.values())
-            
-            if passed >= 3:  # Минимум 3 признака из 4
-                self.logger.info(f"✅ Авторизация подтверждена ({passed}/4 проверок)")
-                return True
-            
-            self.logger.error(f"❌ Авторизация не подтверждена ({passed}/4 проверок)")
-            
-            # Сохраняем HTML для отладки
-            try:
-                with open('failed_auth_debug.html', 'w', encoding='utf-8') as f:
-                    f.write(html)
-                self.logger.info("HTML сохранён в failed_auth_debug.html")
-            except:
-                pass
-            
-            return False
+        
+        except (aiohttp.ClientError, NonRetriableError):
+            # Пробрасываем исключения дальше (для retry логики)
+            raise
+        
+        except Exception as e:
+            # Неожиданная ошибка
+            self.logger.error(f"Неожиданная ошибка при проверке авторизации: {e}")
+            raise aiohttp.ClientError(f"Ошибка проверки авторизации: {e}")
     
     def _extract_viewstate(self, html: str) -> Optional[str]:
         """Извлечение ViewState из HTML"""
@@ -1531,6 +1564,7 @@ class DataExtractor:
 """
 Работа с поисковой формой
 """
+# REMOVED IMPORT: from utils.retry import NonRetriableError
 
 # REMOVED IMPORT: from utils.logger import get_logger
 
@@ -1546,26 +1580,59 @@ class FormHandler:
         """
         Подготовка формы поиска
         
-        Возвращает: (viewstate, form_ids)
+        Raises:
+            aiohttp.ClientError: при HTTP 500, 502, 503, 504 (retriable)
+            NonRetriableError: при HTTP 400, 401, 403, 404 (non-retriable)
+        
+        Returns:
+            (viewstate, form_ids)
         """
         url = f"{self.base_url}/form/lawsuit/"
         headers = self._get_headers()
         
-        async with session.get(url, headers=headers) as response:
-            if response.status != 200:
-                raise Exception(f"HTTP {response.status} при загрузке формы поиска")
-            
-            html = await response.text()
-            viewstate = self._extract_viewstate(html)
-            form_ids = self._extract_form_ids(html)
-            
-            self.logger.debug("Форма поиска подготовлена")
-            return viewstate, form_ids
+        try:
+            async with session.get(url, headers=headers) as response:
+                # ОБРАБОТКА HTTP СТАТУСОВ
+                
+                # Постоянные ошибки
+                if response.status in [400, 401, 403, 404]:
+                    self.logger.error(f"HTTP {response.status} при загрузке формы")
+                    raise NonRetriableError(f"HTTP {response.status}: Постоянная ошибка")
+                
+                # Временные ошибки
+                if response.status in [500, 502, 503, 504]:
+                    self.logger.warning(f"HTTP {response.status}: Временная ошибка сервера")
+                    raise aiohttp.ClientError(f"HTTP {response.status}: Сервер недоступен")
+                
+                # Другие ошибки
+                if response.status != 200:
+                    self.logger.error(f"HTTP {response.status} при загрузке формы")
+                    raise aiohttp.ClientError(f"HTTP {response.status}: Неожиданная ошибка")
+                
+                html = await response.text()
+                viewstate = self._extract_viewstate(html)
+                form_ids = self._extract_form_ids(html)
+                
+                self.logger.debug("Форма поиска подготовлена")
+                return viewstate, form_ids
+        
+        except (aiohttp.ClientError, NonRetriableError):
+            raise
+        
+        except Exception as e:
+            self.logger.error(f"Неожиданная ошибка при подготовке формы: {e}")
+            raise aiohttp.ClientError(f"Ошибка подготовки формы: {e}")
     
     async def select_region(self, session: aiohttp.ClientSession, 
-                          viewstate: str, region_id: str, 
-                          form_ids: Dict[str, str]):
-        """Выбор региона в форме"""
+                      viewstate: str, region_id: str, 
+                      form_ids: Dict[str, str]):
+        """
+        Выбор региона в форме
+        
+        Raises:
+            aiohttp.ClientError: при retriable ошибках
+            NonRetriableError: при non-retriable ошибках
+        """
         url = f"{self.base_url}/form/lawsuit/index.xhtml"
         form_base = form_ids.get('form_base', 'j_idt45:j_idt46')
         
@@ -1592,11 +1659,33 @@ class FormHandler:
         
         headers = self._get_ajax_headers()
         
-        async with session.post(url, data=data, headers=headers) as response:
-            if response.status != 200:
-                raise Exception(f"HTTP {response.status} при выборе региона")
-            
-            self.logger.debug(f"Регион выбран: {region_id}")
+        try:
+            async with session.post(url, data=data, headers=headers) as response:
+                # ОБРАБОТКА HTTP СТАТУСОВ
+                
+                # Постоянные ошибки
+                if response.status in [400, 401, 403, 404]:
+                    self.logger.error(f"HTTP {response.status} при выборе региона")
+                    raise NonRetriableError(f"HTTP {response.status}: Постоянная ошибка")
+                
+                # Временные ошибки
+                if response.status in [500, 502, 503, 504]:
+                    self.logger.warning(f"HTTP {response.status}: Временная ошибка сервера")
+                    raise aiohttp.ClientError(f"HTTP {response.status}: Сервер недоступен")
+                
+                # Другие ошибки
+                if response.status != 200:
+                    self.logger.error(f"HTTP {response.status} при выборе региона")
+                    raise aiohttp.ClientError(f"HTTP {response.status}: Неожиданная ошибка")
+                
+                self.logger.debug(f"Регион выбран: {region_id}")
+        
+        except (aiohttp.ClientError, NonRetriableError):
+            raise
+        
+        except Exception as e:
+            self.logger.error(f"Неожиданная ошибка при выборе региона: {e}")
+            raise aiohttp.ClientError(f"Ошибка выбора региона: {e}")
     
     def _extract_viewstate(self, html: str) -> Optional[str]:
         """Извлечение ViewState"""
@@ -1658,8 +1747,8 @@ class FormHandler:
 """
 Поисковый движок
 """
-
 # REMOVED IMPORT: from utils.logger import get_logger
+# REMOVED IMPORT: from utils.retry import NonRetriableError
 
 
 class SearchEngine:
@@ -1702,10 +1791,10 @@ class SearchEngine:
         return results_html
     
     async def _send_search_request(self, session: aiohttp.ClientSession,
-                          viewstate: str, region_id: str, court_id: str,
-                          year: str, full_case_number: str,
-                          form_ids: Dict[str, str],
-                          extract_sequence: bool = False):  # ← ДОБАВЛЕН параметр
+                      viewstate: str, region_id: str, court_id: str,
+                      year: str, full_case_number: str,
+                      form_ids: Dict[str, str],
+                      extract_sequence: bool = False):
         """
         Отправка поискового запроса
         
@@ -1713,6 +1802,10 @@ class SearchEngine:
             extract_sequence: 
                 False - передать полный номер в FormData (Full Scan Mode)
                 True - передать только порядковый номер в FormData (Update Mode)
+        
+        Raises:
+            aiohttp.ClientError: при HTTP 500, 502, 503, 504 (retriable)
+            NonRetriableError: при HTTP 400, 401, 403, 404 (non-retriable)
         """
         url = f"{self.base_url}/form/lawsuit/index.xhtml"
         form_base = form_ids.get('form_base', 'j_idt45:j_idt46')
@@ -1762,16 +1855,79 @@ class SearchEngine:
         
         headers = self._get_ajax_headers()
         
-        async with session.post(url, data=data, headers=headers) as response:
-            if response.status != 200:
-                raise Exception(f"HTTP {response.status} при отправке поиска")
-            
-            await response.text()
+        try:
+            async with session.post(url, data=data, headers=headers) as response:
+                # ОБРАБОТКА HTTP СТАТУСОВ
+                
+                # Постоянные ошибки (non-retriable)
+                if response.status in [400, 401, 403, 404]:
+                    self.logger.error(f"HTTP {response.status} при отправке поиска")
+                    raise NonRetriableError(f"HTTP {response.status}: Постоянная ошибка")
+                
+                # Временные ошибки сервера (retriable)
+                if response.status in [500, 502, 503, 504]:
+                    self.logger.warning(f"HTTP {response.status}: Временная ошибка сервера")
+                    raise aiohttp.ClientError(f"HTTP {response.status}: Сервер недоступен")
+                
+                # Другие ошибки
+                if response.status != 200:
+                    self.logger.error(f"HTTP {response.status} при отправке поиска")
+                    raise aiohttp.ClientError(f"HTTP {response.status}: Неожиданная ошибка")
+                
+                await response.text()
+        
+        except (aiohttp.ClientError, NonRetriableError):
+            # Пробрасываем исключения для retry
+            raise
+        
+        except Exception as e:
+            # Неожиданная ошибка
+            self.logger.error(f"Неожиданная ошибка при поиске: {e}")
+            raise aiohttp.ClientError(f"Ошибка поиска: {e}")
     
     async def _get_results(self, session: aiohttp.ClientSession) -> str:
-        """Получение страницы с результатами"""
+        """
+        Получение страницы с результатами
+        
+        Raises:
+            aiohttp.ClientError: при HTTP 500, 502, 503, 504 (retriable)
+            NonRetriableError: при HTTP 400, 401, 403, 404 (non-retriable)
+        
+        Returns:
+            HTML страницы с результатами
+        """
         url = f"{self.base_url}/lawsuit/lawsuitList.xhtml"
         headers = self._get_headers()
+        
+        try:
+            async with session.get(url, headers=headers) as response:
+                # ОБРАБОТКА HTTP СТАТУСОВ
+                
+                # Постоянные ошибки (non-retriable)
+                if response.status in [400, 401, 403, 404]:
+                    self.logger.error(f"HTTP {response.status} при получении результатов")
+                    raise NonRetriableError(f"HTTP {response.status}: Постоянная ошибка")
+                
+                # Временные ошибки сервера (retriable)
+                if response.status in [500, 502, 503, 504]:
+                    self.logger.warning(f"HTTP {response.status}: Временная ошибка сервера")
+                    raise aiohttp.ClientError(f"HTTP {response.status}: Сервер недоступен")
+                
+                # Другие ошибки
+                if response.status != 200:
+                    self.logger.error(f"HTTP {response.status} при получении результатов")
+                    raise aiohttp.ClientError(f"HTTP {response.status}: Неожиданная ошибка")
+                
+                return await response.text()
+        
+        except (aiohttp.ClientError, NonRetriableError):
+            # Пробрасываем исключения для retry
+            raise
+        
+        except Exception as e:
+            # Неожиданная ошибка
+            self.logger.error(f"Неожиданная ошибка при получении результатов: {e}")
+            raise aiohttp.ClientError(f"Ошибка получения результатов: {e}")
         
         async with session.get(url, headers=headers) as response:
             if response.status != 200:
@@ -1944,12 +2100,12 @@ class SessionManager:
 class CourtParser:
     """Главный класс парсера с retry и восстановлением"""
     
-    def __init__(self, config_path: Optional[str] = None, update_mode: bool = False):  # ← ДОБАВЛЕН параметр
+    def __init__(self, config_path: Optional[str] = None, update_mode: bool = False):
         # Загрузка конфигурации
         self.settings = Settings(config_path)
         
-        # РЕЖИМ РАБОТЫ (НОВОЕ)
-        self.update_mode = update_mode  # ← ДОБАВЛЕНО
+        # РЕЖИМ РАБОТЫ
+        self.update_mode = update_mode
         
         # Retry конфигурация
         self.retry_config = self.settings.config.get('retry_settings', {})
@@ -1972,6 +2128,9 @@ class CourtParser:
         self.db_manager = DatabaseManager(self.settings.database)
         self.text_processor = TextProcessor()
         
+        # НОВОЕ: Lock для stateful операций с формой
+        self.form_lock = asyncio.Lock()
+        
         # Счетчик ошибок для переавторизации
         self.session_error_count = 0
         self.max_session_errors = 10
@@ -1984,20 +2143,34 @@ class CourtParser:
         
         self.logger = get_logger('court_parser')
         
-        # ДОБАВЛЕНО: логирование режима
+        # Логирование режима
         mode_name = "Update Mode" if self.update_mode else "Full Scan Mode"
         self.logger.info(f"🚀 Парсер инициализирован в режиме: {mode_name}")
     
     async def initialize(self):
         """Инициализация (подключение к БД, авторизация)"""
-        await self.db_manager.connect()
-        await self.authenticator.authenticate(self.session_manager)
-        self.logger.info("✅ Парсер готов к работе")
+        try:
+            await self.db_manager.connect()
+            await self.authenticator.authenticate(self.session_manager)
+            self.logger.info("✅ Парсер готов к работе")
+        except Exception as e:
+            # При ошибке инициализации закрываем ресурсы
+            self.logger.error(f"❌ Ошибка инициализации: {e}")
+            await self.cleanup()
+            raise
     
     async def cleanup(self):
         """Очистка ресурсов"""
-        await self.db_manager.disconnect()
-        await self.session_manager.close()
+        try:
+            await self.db_manager.disconnect()
+        except Exception as e:
+            self.logger.error(f"Ошибка закрытия БД: {e}")
+        
+        try:
+            await self.session_manager.close()
+        except Exception as e:
+            self.logger.error(f"Ошибка закрытия сессии: {e}")
+        
         self.logger.info("Ресурсы очищены")
     
     async def _handle_session_recovery(self, error: Exception) -> bool:
@@ -2159,9 +2332,13 @@ class CourtParser:
         return await self.search_and_save_with_retry(*args, **kwargs)
     
     async def _do_search_and_save(self, region_key: str, court_key: str,
-                            case_number: str, year: str) -> Dict[str, Any]:
+                        case_number: str, year: str) -> Dict[str, Any]:
         """
-        Один цикл поиска и сохранения
+        Один цикл поиска и сохранения с Lock на stateful операции
+        
+        Архитектура:
+        1. [LOCK] Подготовка формы + выбор региона + поиск (stateful)
+        2. [БЕЗ LOCK] Парсинг HTML + сохранение в БД (stateless)
         
         Returns:
             {
@@ -2169,7 +2346,8 @@ class CourtParser:
                 'target_found': True/False,
                 'total_saved': 5,
                 'related_saved': 4,
-                'target_case_number': '6294-25-00-4/1'
+                'target_case_number': '6294-25-00-4/1',
+                'error': None или строка с ошибкой
             }
         """
         # Получение конфигурации
@@ -2183,32 +2361,51 @@ class CourtParser:
         
         self.logger.info(f"🔍 Ищу дело: {full_case_number}")
         
-        # Получение сессии
-        session = await self.session_manager.get_session()
+        # ============================================================
+        # КРИТИЧЕСКАЯ СЕКЦИЯ: Stateful операции (под Lock)
+        # ============================================================
+        async with self.form_lock:
+            self.logger.debug(f"[{region_key}] Захватил form_lock")
+            
+            # Получение сессии
+            session = await self.session_manager.get_session()
+            
+            # Подготовка формы
+            viewstate, form_ids = await self.form_handler.prepare_search_form(session)
+            
+            # Выбор региона
+            await self.form_handler.select_region(
+                session, viewstate, region_config['id'], form_ids
+            )
+            
+            await asyncio.sleep(1)
+            
+            # Поиск
+            results_html = await self.search_engine.search_case(
+                session, viewstate, region_config['id'], court_config['id'],
+                year, full_case_number, form_ids,
+                extract_sequence=self.update_mode
+            )
+            
+            self.logger.debug(f"[{region_key}] Освободил form_lock")
         
-        # Подготовка формы
-        viewstate, form_ids = await self.form_handler.prepare_search_form(session)
-        
-        # Выбор региона
-        await self.form_handler.select_region(
-            session, viewstate, region_config['id'], form_ids
-        )
-        
-        await asyncio.sleep(1)
-        
-        # Поиск (ИЗМЕНЕНО: добавлен параметр extract_sequence)
-        results_html = await self.search_engine.search_case(
-            session, viewstate, region_config['id'], court_config['id'],
-            year, full_case_number, form_ids,
-            extract_sequence=self.update_mode  # ← ИЗМЕНЕНО: используем флаг парсера
-        )
+        # ============================================================
+        # Stateless операции (БЕЗ Lock — параллельно для всех)
+        # ============================================================
         
         # Парсинг
         cases = self.results_parser.parse(results_html)
         
         if not cases:
             self.logger.info(f"❌ Ничего не найдено: {full_case_number}")
-            raise NonRetriableError("Дело не найдено")
+            return {
+                'success': False,
+                'target_found': False,
+                'total_saved': 0,
+                'related_saved': 0,
+                'target_case_number': full_case_number,
+                'error': 'no_results'
+            }
         
         # Сохранение всех найденных дел
         saved_count = 0
@@ -2268,7 +2465,16 @@ class CourtParser:
                 'target_case_number': full_case_number
             }
         else:
-            raise NonRetriableError("Не удалось сохранить дела")
+            self.logger.info(f"❌ Ничего не сохранено для дела {full_case_number}")
+            
+            return {
+                'success': False,
+                'target_found': False,
+                'total_saved': 0,
+                'related_saved': 0,
+                'target_case_number': full_case_number,
+                'error': 'nothing_saved'
+            }
     
     # Алиас для обратной совместимости
     async def search_and_save(self, *args, **kwargs):
@@ -2280,6 +2486,8 @@ class CourtParser:
     
     async def __aexit__(self, exc_type, exc_val, exc_tb):
         await self.cleanup()
+        # Не подавляем исключения
+        return False
 
 
 # ============================================================================
@@ -2296,7 +2504,6 @@ class CourtParser:
 # REMOVED IMPORT: from utils import TextProcessor
 
 
-
 async def parse_all_regions_from_config() -> dict:
     """Парсинг всех регионов согласно настройкам из config.json"""
     logger = setup_logger('main', level='INFO')
@@ -2306,27 +2513,32 @@ async def parse_all_regions_from_config() -> dict:
     ps = settings.parsing_settings
     
     year = ps.get('year', '2025')
-    court_type = ps.get('court_type', 'smas')
+    court_types = ps.get('court_types', ['smas'])
     start_from = ps.get('start_from', 1)
     max_number = ps.get('max_number', 9999)
     max_consecutive_failures = ps.get('max_consecutive_failures', 50)
     delay_between_requests = ps.get('delay_between_requests', 2)
-    delay_between_regions = ps.get('delay_between_regions', 5)
+    max_parallel_regions = ps.get('max_parallel_regions', 1)
+    
+    # Настройки retry на уровне региона
+    region_retry_max_attempts = ps.get('region_retry_max_attempts', 3)
+    region_retry_delay = ps.get('region_retry_delay_seconds', 5)
     
     # ЛИМИТЫ ДЛЯ ТЕСТИРОВАНИЯ
     limit_regions = settings.get_limit_regions()
     limit_cases_per_region = settings.get_limit_cases_per_region()
     
     logger.info("=" * 70)
-    logger.info(f"МАССОВЫЙ ПАРСИНГ: {court_type} ({year})")
+    logger.info(f"МАССОВЫЙ ПАРСИНГ: {', '.join(court_types)} ({year})")
     logger.info("=" * 70)
     logger.info(f"Настройки из config.json:")
     logger.info(f"  Год: {year}")
-    logger.info(f"  Тип суда: {court_type}")
+    logger.info(f"  Типы судов: {', '.join(court_types)}")
     logger.info(f"  Диапазон номеров: {start_from}-{max_number}")
     logger.info(f"  Макс. неудач подряд: {max_consecutive_failures}")
     logger.info(f"  Задержка между запросами: {delay_between_requests} сек")
-    logger.info(f"  Задержка между регионами: {delay_between_regions} сек")
+    logger.info(f"  Параллельных регионов: {max_parallel_regions}")
+    logger.info(f"  Retry на регион: {region_retry_max_attempts} попыток, задержка {region_retry_delay} сек")
     
     if limit_regions:
         logger.info(f"  🔒 ЛИМИТ РЕГИОНОВ: {limit_regions}")
@@ -2346,53 +2558,105 @@ async def parse_all_regions_from_config() -> dict:
         regions_to_process = all_regions
         logger.info(f"Обрабатываю все {len(regions_to_process)} регионов")
     
+    # Общая статистика (thread-safe)
     total_stats = {
         'regions_processed': 0,
+        'regions_failed': 0,
         'total_queries': 0,
         'total_target_cases': 0,
         'total_related_cases': 0,
         'total_cases_saved': 0
     }
+    stats_lock = asyncio.Lock()
     
-    # ИЗМЕНЕНО: создаём парсер БЕЗ флага (Full Scan Mode)
-    async with CourtParser() as parser:  # ← update_mode=False (default)
-        for region_key in regions_to_process:
-            logger.info(f"\n{'='*70}")
-            logger.info(f"Регион: {settings.get_region(region_key)['name']}")
-            logger.info(f"{'='*70}")
+    # Семафор для контроля параллельности
+    semaphore = asyncio.Semaphore(max_parallel_regions)
+    
+    async def process_region_with_retry_and_semaphore(region_key: str):
+        """
+        Обработка региона с retry и пересозданием сессии
+        
+        Семафор держится на всё время retry (не занимает дополнительный слот)
+        """
+        async with semaphore:
+            region_config = settings.get_region(region_key)
             
-            try:
-                # Парсинг региона
-                stats = await parse_region_with_limits(
-                    parser=parser,
-                    region_key=region_key,
-                    court_key=court_type,
-                    year=year,
-                    start_from=start_from,
-                    max_number=max_number,
-                    max_consecutive_failures=max_consecutive_failures,
-                    delay_between_requests=delay_between_requests,
-                    limit_cases=limit_cases_per_region
-                )
+            for attempt in range(1, region_retry_max_attempts + 1):
+                try:
+                    logger.info(f"\n{'='*70}")
+                    if attempt > 1:
+                        logger.info(f"🔄 Регион: {region_config['name']} (повторная попытка {attempt}/{region_retry_max_attempts})")
+                    else:
+                        logger.info(f"Регион: {region_config['name']}")
+                    logger.info(f"{'='*70}")
+                    
+                    # Парсинг всех судов региона
+                    region_stats = await process_region_all_courts(
+                        parser=parser,
+                        settings=settings,
+                        region_key=region_key,
+                        court_types=court_types,
+                        year=year,
+                        start_from=start_from,
+                        max_number=max_number,
+                        max_consecutive_failures=max_consecutive_failures,
+                        delay_between_requests=delay_between_requests,
+                        limit_cases=limit_cases_per_region
+                    )
+                    
+                    # Успех → обновляем статистику
+                    async with stats_lock:
+                        total_stats['regions_processed'] += 1
+                        total_stats['total_queries'] += region_stats['total_queries']
+                        total_stats['total_target_cases'] += region_stats['total_target_cases']
+                        total_stats['total_related_cases'] += region_stats['total_related_cases']
+                        total_stats['total_cases_saved'] += region_stats['total_cases_saved']
+                    
+                    return region_stats
                 
-                total_stats['regions_processed'] += 1
-                total_stats['total_queries'] += stats['queries_made']
-                total_stats['total_target_cases'] += stats['target_cases_found']
-                total_stats['total_related_cases'] += stats['related_cases_found']
-                total_stats['total_cases_saved'] += stats['total_cases_saved']
-                
-            except Exception as e:
-                logger.error(f"Ошибка парсинга региона {region_key}: {e}")
-                continue
-            
-            # Задержка между регионами
-            if total_stats['regions_processed'] < len(regions_to_process):
-                await asyncio.sleep(delay_between_regions)
+                except Exception as e:
+                    if attempt < region_retry_max_attempts:
+                        logger.warning(
+                            f"⚠️ Регион {region_config['name']} завершился с ошибкой "
+                            f"(попытка {attempt}/{region_retry_max_attempts})"
+                        )
+                        logger.warning(f"   Ошибка: {e}")
+                        logger.info(f"   Пересоздаю HTTP сессию и повторяю через {region_retry_delay} сек...")
+                        
+                        # Пересоздание сессии
+                        await parser.session_manager.create_session()
+                        await asyncio.sleep(region_retry_delay)
+                    else:
+                        # Последняя попытка failed
+                        logger.error(
+                            f"❌ Регион {region_config['name']} failed после "
+                            f"{region_retry_max_attempts} попыток"
+                        )
+                        logger.error(f"   Финальная ошибка: {e}")
+                        logger.error(traceback.format_exc())
+                        
+                        async with stats_lock:
+                            total_stats['regions_failed'] += 1
+                        
+                        return None
+    
+    # Создаём парсер один раз
+    async with CourtParser() as parser:
+        # Создаём задачи для всех регионов
+        tasks = [
+            process_region_with_retry_and_semaphore(region_key)
+            for region_key in regions_to_process
+        ]
+        
+        # Запускаем все задачи (семафор ограничит параллельность)
+        results = await asyncio.gather(*tasks, return_exceptions=True)
     
     # Общая статистика
     logger.info("\n" + "=" * 70)
     logger.info("ОБЩАЯ СТАТИСТИКА:")
     logger.info(f"  Обработано регионов: {total_stats['regions_processed']}")
+    if total_stats['regions_failed'] > 0:
+        logger.info(f"  Регионов с ошибками: {total_stats['regions_failed']}")
     logger.info(f"  Всего запросов к серверу: {total_stats['total_queries']}")
     logger.info(f"  Найдено целевых дел: {total_stats['total_target_cases']}")
     logger.info(f"  Найдено связанных дел: {total_stats['total_related_cases']}")
@@ -2407,24 +2671,154 @@ async def parse_all_regions_from_config() -> dict:
     return total_stats
 
 
-async def parse_region_with_limits(parser, region_key: str, court_key: str,
-                                   year: str, start_from: int, max_number: int,
-                                   max_consecutive_failures: int,
-                                   delay_between_requests: float,
-                                   limit_cases: Optional[int] = None) -> dict:
+async def process_region_all_courts(
+    parser,
+    settings,
+    region_key: str,
+    court_types: List[str],
+    year: str,
+    start_from: int,
+    max_number: int,
+    max_consecutive_failures: int,
+    delay_between_requests: float,
+    limit_cases: Optional[int] = None
+) -> dict:
     """
-    Парсинг региона с учетом лимита дел
+    Обработка всех судов региона ПОСЛЕДОВАТЕЛЬНО
     
     Args:
-        limit_cases: максимальное количество дел для проверки (для тестирования)
+        parser: экземпляр CourtParser
+        settings: экземпляр Settings
+        region_key: ключ региона ('astana', 'almaty', ...)
+        court_types: список типов судов (['smas', 'appellate'])
+        year: год ('2025')
+        start_from: начальный номер дела (1)
+        max_number: конечный номер дела (9999)
+        max_consecutive_failures: лимит неудач подряд (50)
+        delay_between_requests: задержка между запросами (2.0)
+        limit_cases: лимит дел для тестирования (None = без лимита)
+    
+    Returns:
+        {
+            'region_key': 'astana',
+            'courts_processed': 2,
+            'total_queries': 100,
+            'total_target_cases': 10,
+            'total_related_cases': 90,
+            'total_cases_saved': 100,
+            'courts_stats': {
+                'smas': {...},
+                'appellate': {...}
+            }
+        }
+    """
+    logger = setup_logger('main', level='INFO')
+    region_config = settings.get_region(region_key)
+    
+    region_stats = {
+        'region_key': region_key,
+        'courts_processed': 0,
+        'total_queries': 0,
+        'total_target_cases': 0,
+        'total_related_cases': 0,
+        'total_cases_saved': 0,
+        'courts_stats': {}
+    }
+    
+    # ПОСЛЕДОВАТЕЛЬНАЯ обработка судов
+    for court_key in court_types:
+        court_config = region_config['courts'][court_key]
+        logger.info(f"\n📍 Суд: {court_config['name']}")
+        
+        try:
+            # Парсинг одного суда
+            court_stats = await parse_court(
+                parser=parser,
+                settings=settings,
+                region_key=region_key,
+                court_key=court_key,
+                year=year,
+                start_from=start_from,
+                max_number=max_number,
+                max_consecutive_failures=max_consecutive_failures,
+                delay_between_requests=delay_between_requests,
+                limit_cases=limit_cases
+            )
+            
+            # Обновление статистики региона
+            region_stats['courts_processed'] += 1
+            region_stats['total_queries'] += court_stats['queries_made']
+            region_stats['total_target_cases'] += court_stats['target_cases_found']
+            region_stats['total_related_cases'] += court_stats['related_cases_found']
+            region_stats['total_cases_saved'] += court_stats['total_cases_saved']
+            region_stats['courts_stats'][court_key] = court_stats
+            
+        except Exception as e:
+            logger.error(f"❌ Ошибка парсинга суда {court_key}: {e}")
+            logger.error(traceback.format_exc())
+            continue
+    
+    # Итоги региона
+    logger.info(f"\n{'-'*70}")
+    logger.info(f"ИТОГИ РЕГИОНА {region_config['name']}:")
+    logger.info(f"  Обработано судов: {region_stats['courts_processed']}/{len(court_types)}")
+    logger.info(f"  Запросов к серверу: {region_stats['total_queries']}")
+    logger.info(f"  Найдено целевых дел: {region_stats['total_target_cases']}")
+    logger.info(f"  Найдено связанных дел: {region_stats['total_related_cases']}")
+    logger.info(f"  Всего сохранено дел: {region_stats['total_cases_saved']}")
+    
+    if region_stats['total_queries'] > 0:
+        target_rate = (region_stats['total_target_cases'] / region_stats['total_queries'] * 100)
+        logger.info(f"  Процент целевых дел: {target_rate:.1f}%")
+    
+    logger.info(f"{'-'*70}")
+    
+    return region_stats
+
+
+async def parse_court(
+    parser,
+    settings,
+    region_key: str,
+    court_key: str,
+    year: str,
+    start_from: int,
+    max_number: int,
+    max_consecutive_failures: int,
+    delay_between_requests: float,
+    limit_cases: Optional[int] = None
+) -> dict:
+    """
+    Парсинг одного суда (последовательно по делам)
+    
+    Args:
+        parser: экземпляр CourtParser
+        settings: экземпляр Settings
+        region_key: ключ региона ('astana')
+        court_key: ключ суда ('smas')
+        year: год ('2025')
+        start_from: начальный номер дела (1)
+        max_number: конечный номер дела (9999)
+        max_consecutive_failures: лимит неудач подряд (50)
+        delay_between_requests: задержка между запросами (2.0)
+        limit_cases: лимит дел для тестирования (None = без лимита)
+    
+    Returns:
+        {
+            'queries_made': 100,
+            'target_cases_found': 10,
+            'related_cases_found': 90,
+            'total_cases_saved': 100,
+            'consecutive_failures': 0
+        }
     """
     logger = setup_logger('main', level='INFO')
     
     stats = {
-        'queries_made': 0,              # Количество запросов к серверу
-        'target_cases_found': 0,        # Найдено целевых дел
-        'related_cases_found': 0,       # Найдено связанных дел
-        'total_cases_saved': 0,         # Всего дел сохранено
+        'queries_made': 0,
+        'target_cases_found': 0,
+        'related_cases_found': 0,
+        'total_cases_saved': 0,
         'consecutive_failures': 0
     }
     
@@ -2433,12 +2827,12 @@ async def parse_region_with_limits(parser, region_key: str, court_key: str,
     while current_number <= max_number:
         # Проверка лимита дел
         if limit_cases and stats['queries_made'] >= limit_cases:
-            logger.info(f"🔒 Достигнут лимит дел ({limit_cases}), завершаю регион")
+            logger.info(f"🔒 Достигнут лимит дел ({limit_cases}), завершаю суд")
             break
         
         # Проверка лимита неудач
         if stats['consecutive_failures'] >= max_consecutive_failures:
-            logger.info(f"Достигнут лимит неудач ({max_consecutive_failures}), завершаю регион")
+            logger.info(f"Достигнут лимит неудач ({max_consecutive_failures}), завершаю суд")
             break
         
         # Поиск дела
@@ -2477,22 +2871,6 @@ async def parse_region_with_limits(parser, region_key: str, court_key: str,
         # Задержка между запросами
         await asyncio.sleep(delay_between_requests)
     
-    # Итоговая статистика региона
-    logger.info("-" * 70)
-    logger.info(f"ИТОГИ РЕГИОНА:")
-    logger.info(f"  Запросов к серверу: {stats['queries_made']}")
-    logger.info(f"  Найдено целевых дел: {stats['target_cases_found']}")
-    logger.info(f"  Найдено связанных дел: {stats['related_cases_found']}")
-    logger.info(f"  Всего сохранено дел: {stats['total_cases_saved']}")
-    
-    if stats['queries_made'] > 0:
-        target_rate = (stats['target_cases_found'] / stats['queries_made'] * 100)
-        total_rate = (stats['total_cases_saved'] / stats['queries_made'] * 100)
-        logger.info(f"  Процент целевых дел: {target_rate:.1f}%")
-        logger.info(f"  Среднее дел на запрос: {stats['total_cases_saved'] / stats['queries_made']:.1f}")
-    
-    logger.info("-" * 70)
-    
     return stats
 
 
@@ -2526,7 +2904,7 @@ async def update_cases_history():
     }
     
     # ИЗМЕНЕНО: создаём парсер С ФЛАГОМ Update Mode
-    async with CourtParser(update_mode=True) as parser:  # ← ФЛАГ!
+    async with CourtParser(update_mode=True) as parser:
         # Получение списка дел для обновления
         cases_to_update = await parser.db_manager.get_cases_for_update({
             'defendant_keywords': update_config['filters']['defendant_keywords'],
@@ -2556,13 +2934,12 @@ async def update_cases_history():
                     stats['errors'] += 1
                     continue
                 
-                # ИЗМЕНЕНО: вызов БЕЗ параметра update_mode (автоматически используется self.update_mode)
+                # Вызов БЕЗ параметра update_mode (автоматически используется self.update_mode)
                 result = await parser.search_and_save(
                     region_key=case_info['region_key'],
                     court_key=case_info['court_key'],
                     case_number=case_info['sequence'],
                     year=case_info['year']
-                    # ← НЕТ параметра update_mode!
                 )
                 
                 stats['checked'] += 1
