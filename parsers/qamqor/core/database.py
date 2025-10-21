@@ -505,15 +505,22 @@ class DatabaseManager:
         self,
         statuses: Optional[List[str]] = None,
         min_age_days: Optional[int] = None,
+        max_age_days: Optional[int] = None,          # ⬅️ НОВОЕ
         cooldown_days: Optional[int] = None,
         force: bool = False
     ) -> Dict[str, List[str]]:
         """
         Получить registration_numbers для обновления.
         
+        Стратегия обновления:
+        - 0-7 дней: Не обновляем (период "созревания")
+        - 7-180 дней: Активно обновляем (каждые 3 дня)
+        - >180 дней: Не обновляем (архивные/зависшие)
+        
         Args:
             statuses: Список статусов для фильтрации
             min_age_days: Минимальный возраст записи от reg_date
+            max_age_days: Максимальный возраст (прекращаем обновлять)  # ⬅️ НОВОЕ
             cooldown_days: Минимальный интервал между обновлениями
             force: Игнорировать фильтры по возрасту
             
@@ -525,6 +532,9 @@ class DatabaseManager:
         
         if min_age_days is None:
             min_age_days = self.config.UPDATE_MIN_AGE_DAYS
+        
+        if max_age_days is None:                                       # ⬅️ НОВОЕ
+            max_age_days = self.config.UPDATE_MAX_AGE_DAYS             # ⬅️ НОВОЕ
         
         if cooldown_days is None:
             cooldown_days = self.config.UPDATE_COOLDOWN_DAYS
@@ -545,10 +555,13 @@ class DatabaseManager:
                 params = [statuses]
                 
                 if not force:
-                    # Фильтр по возрасту от reg_date
+                    # КРИТЕРИЙ 2: Минимальный возраст (начинаем обновлять)
                     sql += f" AND reg_date < CURRENT_DATE - INTERVAL '{min_age_days} days'"
                     
-                    # Не обновлялись дольше cooldown_days
+                    # ⬅️ НОВОЕ: Максимальный возраст (прекращаем обновлять)
+                    sql += f" AND reg_date >= CURRENT_DATE - INTERVAL '{max_age_days} days'"
+                    
+                    # КРИТЕРИЙ 3: Cooldown (не обновлялись недавно)
                     sql += f"""
                         AND (
                             updated_at IS NULL 
@@ -557,7 +570,7 @@ class DatabaseManager:
                         )
                     """
                 
-                sql += " ORDER BY reg_date ASC"
+                sql += " ORDER BY reg_date DESC"  # ⬅️ Изменено: DESC (сначала свежие)
                 
                 cursor.execute(sql, params)
                 result[key] = [row[0] for row in cursor.fetchall()]
