@@ -1,0 +1,3590 @@
+================================================================================
+QAMQOR PARSER - COMPLETE CODE
+================================================================================
+Project: court_project
+Module: parsers/qamqor
+Generated: 2025-10-20 20:19:57
+================================================================================
+
+STRUCTURE:
+parsers/qamqor/
+├── qamqor_parser.py
+├── qamqor_updater.py
+└── core/
+    ├── __init__.py
+    ├── api_validator.py
+    ├── config.py
+    ├── database.py
+    ├── data_processor.py
+    ├── log_manager.py
+    ├── tab_manager.py
+    └── web_client.py
+================================================================================
+
+
+================================================================================
+FILE: core\__init__.py
+================================================================================
+
+"""
+QAMQOR Parser - Общие компоненты.
+"""
+
+from .api_validator import APIValidator
+from .config import Config
+from .data_processor import DataProcessor
+from .database import DatabaseManager
+from .enums import (
+    APIResponseCode,
+    APIResponseStatus,
+    CheckStatus,
+    ParserMode,
+    TableName,
+)
+from .log_manager import LogManager
+from .stealth import StealthTabManager, apply_stealth
+from .tab_manager import TabManager
+from .web_client import WebClient
+
+__all__ = [
+    'APIValidator',
+    'APIResponseCode',
+    'APIResponseStatus',
+    'CheckStatus',
+    'Config',
+    'DataProcessor',
+    'DatabaseManager',
+    'LogManager',
+    'ParserMode',
+    'StealthTabManager',
+    'TableName',
+    'TabManager',
+    'WebClient',
+    'apply_stealth',
+]
+
+================================================================================
+FILE: core\api_validator.py
+================================================================================
+
+"""Валидатор ответов от API."""
+
+import logging
+from typing import Dict, Optional, Tuple
+
+from .enums import APIResponseCode, APIResponseStatus
+
+
+class APIValidator:
+    """
+    Валидатор ответов от API QAMQOR.
+    
+    Проверяет корректность структуры ответа, коды состояния
+    и определяет критичность ошибок.
+    """
+    
+    def __init__(self, logger: logging.Logger):
+        """
+        Инициализация валидатора.
+        
+        Args:
+            logger: Логгер для вывода сообщений
+        """
+        self.logger = logger
+    
+    def validate_response(
+        self,
+        response_data: Optional[Dict],
+        context: str = ""
+    ) -> Tuple[bool, Optional[str]]:
+        """
+        Проверка корректности ответа API.
+        
+        Args:
+            response_data: Данные ответа от API
+            context: Контекст для логирования (например, номер записи)
+            
+        Returns:
+            Кортеж (is_valid, error_message):
+                - is_valid: True если ответ корректен
+                - error_message: Описание ошибки или None
+        """
+        if not response_data:
+            return False, "Пустой ответ"
+        
+        # Проверка code
+        code = response_data.get('code', '').upper()
+        
+        # ИГНОРИРУЕМ CONTROLLER::RECAPTCHA (ложная защита)
+        if code == APIResponseCode.RECAPTCHA.value:
+            self.logger.warning(
+                "⚠️ %s | API вернул CAPTCHA, игнорируем",
+                context
+            )
+            
+            # Проверяем наличие данных
+            data_obj = response_data.get('data')
+            
+            if data_obj is not None and isinstance(data_obj, dict):
+                items = data_obj.get('items', [])
+                if items and len(items) > 0:
+                    # Данные есть - считаем успешным
+                    self.logger.info(
+                        "✅ %s | Данные получены несмотря на CAPTCHA",
+                        context
+                    )
+                    return True, None
+            
+            # Данных нет - это пустая запись (не ошибка)
+            self.logger.debug(
+                "ℹ️ %s | CAPTCHA без данных - пустая запись",
+                context
+            )
+            return True, None
+        
+        # Проверка на корректный code
+        if code != APIResponseCode.OK.value:
+            error_msg = f"Неверный code: {code}"
+            if context:
+                error_msg = f"{context} | {error_msg}"
+            return False, error_msg
+        
+        # Проверка status
+        status = response_data.get('status', '').lower()
+        if status != APIResponseStatus.SUCCESS.value:
+            error_msg = f"Неверный status: {status}"
+            if context:
+                error_msg = f"{context} | {error_msg}"
+            return False, error_msg
+        
+        # Проверка структуры data
+        if 'data' not in response_data:
+            return False, f"{context} | Отсутствует поле 'data'"
+        
+        return True, None
+    
+    def is_critical_error(self, response_data: Optional[Dict]) -> bool:
+        """
+        Определяет, является ли ошибка критической.
+        
+        Критические ошибки требуют остановки парсера:
+        - MAINTENANCE (техобслуживание)
+        - SERVER_ERROR (серверная ошибка)
+        - INTERNAL_ERROR (внутренняя ошибка)
+        - SERVICE_UNAVAILABLE (сервис недоступен)
+        
+        CONTROLLER::RECAPTCHA НЕ является критической ошибкой.
+        
+        Args:
+            response_data: Данные ответа от API
+            
+        Returns:
+            True если ошибка критическая
+        """
+        if not response_data:
+            return False
+        
+        code = response_data.get('code', '').upper()
+        
+        # CAPTCHA - НЕ критическая ошибка
+        if code == APIResponseCode.RECAPTCHA.value:
+            return False
+        
+        # Используем свойство enum
+        try:
+            api_code = APIResponseCode(code)
+            return api_code.is_critical
+        except ValueError:
+            # Неизвестный код - не считаем критическим
+            return False
+
+================================================================================
+FILE: core\config.py
+================================================================================
+
+"""Централизованная конфигурация парсера."""
+
+import os
+from dataclasses import dataclass, field
+from pathlib import Path
+from typing import Dict, List, Set
+
+
+@dataclass
+class Config:
+    """
+    Централизованная конфигурация парсера QAMQOR.
+    
+    Содержит все настройки для работы парсера: API endpoints,
+    параметры производительности, таймауты, настройки БД,
+    маппинг полей и список регионов.
+    """
+    
+    # API настройки
+    BASE_URL: str = "https://qamqor.gov.kz"
+    SEARCH_URL: str = "https://qamqor.gov.kz/check"
+    API_ENDPOINT: str = "/api/public/check_status"
+    
+    # Производительность
+    MAX_CONCURRENT_TABS: int = 3
+    MAX_EMPTY_SEQUENCE: int = 5
+    BATCH_SIZE: int = 50
+    
+    # Таймауты (миллисекунды для PAGE_TIMEOUT, секунды для остальных)
+    PAGE_TIMEOUT: int = 90_000
+    RESPONSE_TIMEOUT: int = 25
+    
+    # Retry логика
+    MAX_RETRIES: int = 3
+    RETRY_DELAY: float = 3.0
+    REGION_RETRY_LIMIT: int = 3
+    
+    # Задержки (секунды) для имитации человека
+    NATURAL_DELAY_MIN: float = 0.3
+    NATURAL_DELAY_MAX: float = 0.8
+    TYPING_DELAY_MIN: float = 0.2
+    TYPING_DELAY_MAX: float = 0.5
+    
+    # Парсинг
+    START_NUMBER: int = 1
+    MAX_NUMBER: int = 99_999
+    NUMBER_PADDING: int = 5
+    
+    # Пороги для батчей
+    BULK_COPY_THRESHOLD: int = 1_000
+    EXECUTE_VALUES_PAGE_SIZE: int = 500
+    
+    # Exponential backoff
+    RETRY_BACKOFF_BASE: int = 2
+    
+    # Логирование
+    LOG_DIR: Path = field(default_factory=lambda: Path("logs"))
+    LOG_LEVEL: str = "INFO"
+    SCREENSHOT_DIR: Path = field(default_factory=lambda: Path("screenshots"))
+    
+    # База данных
+    DB_HOST: str = field(
+        default_factory=lambda: os.getenv("QAMQOR_DB_HOST", "localhost")
+    )
+    DB_PORT: str = field(
+        default_factory=lambda: os.getenv("QAMQOR_DB_PORT", "5432")
+    )
+    DB_NAME: str = field(
+        default_factory=lambda: os.getenv("QAMQOR_DB_NAME", "qamqor")
+    )
+    DB_USER: str = field(
+        default_factory=lambda: os.getenv("QAMQOR_DB_USER", "postgres")
+    )
+    DB_PASSWORD: str = field(
+        default_factory=lambda: os.getenv("QAMQOR_DB_PASSWORD", "admin")
+    )
+    
+    # Режимы работы
+    MODE: str = "full"  # full | missing_only | update
+    
+    # Настройки апдейтера
+    UPDATE_BATCH_SIZE: int = 100
+    UPDATE_MIN_AGE_DAYS: int = 7              # ⬅️ Изменено: было 60
+    UPDATE_MAX_AGE_DAYS: int = 180            # ⬅️ НОВОЕ: добавлен лимит
+    UPDATE_COOLDOWN_DAYS: int = 3             # ⬅️ Изменено: было 7
+    UPDATE_STATUSES: List[str] = field(default_factory=lambda: ["1"])
+    UPDATE_TRACK_CHANGES: bool = True
+    
+    # Регионы
+    REGIONS: Dict[int, str] = field(default_factory=lambda: {
+        1000000: "Abay",
+        1100000: "Akmolinsk",
+        1500000: "Aktobe",
+        1900000: "Almaty_region",
+        2300000: "Atyrau",
+        2700000: "ZKO",
+        3100000: "Zhambyl",
+        3300000: "Zhetisu",
+        3500000: "Karaganda",
+        3900000: "Kostanay",
+        4300000: "Kyzylorda",
+        4700000: "Mangistau",
+        5500000: "Pavlodar",
+        5900000: "SKO",
+        6100000: "Turkestan",
+        6200000: "Ulytau",
+        6300000: "VKO",
+        7100000: "Astana",
+        7500000: "Almaty",
+        7900000: "Shymkent"
+    })
+    
+    # Маппинг полей API → БД
+    FIELD_MAPPING: Dict[str, str] = field(default_factory=lambda: {
+        "registrationNum": "registration_number",
+        "regDate": "reg_date",
+        "checkDate": "act_date",
+        "beginDate": "start_date",
+        "endDate": "end_date",
+        "tlnSuspendDate": "suspend_date",
+        "tlnResumeDate": "resume_date",
+        "tlnProlongBegin": "prolong_start",
+        "tlnProlongEnd": "prolong_end"
+    })
+    
+    # Поля с датами (требуют нормализации)
+    DATE_FIELDS: Set[str] = field(default_factory=lambda: {
+        "reg_date", "act_date", "start_date", "end_date",
+        "suspend_date", "resume_date", "prolong_start", "prolong_end"
+    })
+    
+    # Исключенные пропущенные номера (известные отсутствующие данные)
+    EXCLUDED_MISSING_NUMBERS: Dict[int, List[int]] = field(
+        default_factory=lambda: {
+            5900000: [1],
+        }
+    )
+    
+    # Тестовый номер для health check
+    TEST_NUMBER: str = "2559000001701011/00002"
+    
+    def __post_init__(self) -> None:
+        """
+        Постинициализация: создание директорий и валидация параметров.
+        
+        Raises:
+            ValueError: При некорректных значениях параметров
+        """
+        # Создание директорий
+        self.LOG_DIR.mkdir(parents=True, exist_ok=True)
+        self.SCREENSHOT_DIR.mkdir(parents=True, exist_ok=True)
+        
+        # Валидация параметров
+        self._validate_parameters()
+    
+    def _validate_parameters(self) -> None:
+        """
+        Валидация конфигурационных параметров.
+        
+        Raises:
+            ValueError: При некорректных значениях
+        """
+        if self.MAX_CONCURRENT_TABS < 1:
+            raise ValueError("MAX_CONCURRENT_TABS должно быть >= 1")
+        
+        if self.BATCH_SIZE < 1:
+            raise ValueError("BATCH_SIZE должно быть >= 1")
+        
+        if self.MAX_RETRIES < 1:
+            raise ValueError("MAX_RETRIES должно быть >= 1")
+        
+        if self.PAGE_TIMEOUT < 1000:
+            raise ValueError("PAGE_TIMEOUT должен быть >= 1000ms")
+        
+        if self.RESPONSE_TIMEOUT < 1:
+            raise ValueError("RESPONSE_TIMEOUT должен быть >= 1s")
+        
+        if self.NATURAL_DELAY_MIN < 0 or self.NATURAL_DELAY_MAX < 0:
+            raise ValueError("Задержки должны быть >= 0")
+        
+        if self.NATURAL_DELAY_MIN > self.NATURAL_DELAY_MAX:
+            raise ValueError("MIN delay не может быть больше MAX")
+
+================================================================================
+FILE: core\data_processor.py
+================================================================================
+
+"""Обработчик данных от API."""
+
+import logging
+from datetime import datetime
+from typing import Dict, Optional
+
+from .config import Config
+
+
+class DataProcessor:
+    """Обработчик ответов от API."""
+    
+    def __init__(self, config: Config, logger: logging.Logger):
+        self.config = config
+        self.logger = logger
+    
+    def process_api_response(self, response_data: Dict) -> Optional[Dict]:
+        """
+        Обработка ответа от API.
+        
+        Args:
+            response_data: Данные ответа от API
+            
+        Returns:
+            Обработанные данные или None при ошибке
+        """
+        try:
+            data_obj = response_data.get('data')
+            if not data_obj:
+                return None
+            
+            items = data_obj.get('items', [])
+            if not items:
+                return None
+            
+            item = items[0]
+            
+            result = {}
+            
+            # Маппинг основных полей
+            for api_field, db_field in self.config.FIELD_MAPPING.items():
+                value = item.get(api_field)
+                if db_field in self.config.DATE_FIELDS and value:
+                    value = self._normalize_date(value)
+                result[db_field] = value
+            
+            # Извлечение дополнительной информации
+            self._extract_organization_info(item, result)
+            self._extract_subject_info(item, result)
+            self._extract_audit_info(item, result)
+            
+            # Проверка обязательного поля
+            if not result.get('registration_number'):
+                self.logger.warning("⚠️ Отсутствует registration_number")
+                return None
+            
+            return result
+            
+        except Exception as e:
+            self.logger.error(f"❌ Ошибка обработки данных: {e}", exc_info=True)
+            return None
+    
+    def _extract_organization_info(self, item: Dict, result: Dict):
+        """Извлечение информации об организации."""
+        org = item.get('org', {})
+        result['revenue_name'] = org.get('nameRu')
+        
+        org_kpssu = item.get('orgKpssu', {})
+        result['kpssu_name'] = org_kpssu.get('nameRu')
+        
+        check_type = item.get('checkType', {})
+        result['check_type'] = check_type.get('nameRu')
+        
+        status = item.get('status', {})
+        result['status_id'] = str(status.get('id')) if status.get('id') is not None else None
+        result['status'] = status.get('nameRu')
+    
+    def _extract_subject_info(self, item: Dict, result: Dict):
+        """Извлечение информации о субъекте."""
+        subjects = item.get('subjects', [])
+        if subjects:
+            subject = subjects[0]
+            result['subject_bin'] = subject.get('bin')
+            result['subject_name'] = subject.get('nameRu')
+            result['subject_address'] = subject.get('address')
+    
+    def _extract_audit_info(self, item: Dict, result: Dict):
+        """Извлечение информации об аудите."""
+        queries = item.get('queries', [])
+        for i, query in enumerate(queries[:2]):
+            suffix = "" if i == 0 else "_1"
+            query_check = query.get('queryCheck', {})
+            theme_check = query.get('themeCheck', {})
+            result[f'audit_theme{suffix}'] = query_check.get('nameRu')
+            result[f'theme_check{suffix}'] = theme_check.get('nameRu')
+    
+    def _normalize_date(self, date_str: str) -> Optional[str]:
+        """
+        Нормализация даты в формат PostgreSQL (YYYY-MM-DD).
+        
+        Args:
+            date_str: Строка с датой
+            
+        Returns:
+            Нормализованная дата или None
+        """
+        if not date_str:
+            return None
+        
+        # Проверяем, что дата уже в правильном формате
+        if len(date_str) == 10 and date_str[4] == '-' and date_str[7] == '-':
+            try:
+                datetime.strptime(date_str, "%Y-%m-%d")
+                return date_str
+            except ValueError:
+                pass
+        
+        # Пробуем распарсить другие форматы
+        for fmt in ("%d/%m/%Y", "%Y-%m-%d", "%d.%m.%Y"):
+            try:
+                return datetime.strptime(date_str, fmt).strftime("%Y-%m-%d")
+            except ValueError:
+                continue
+        
+        self.logger.warning(f"⚠️ Не удалось распарсить дату: {date_str}")
+        return None
+
+================================================================================
+FILE: core\database.py
+================================================================================
+
+"""Менеджер работы с базой данных."""
+
+import asyncio
+import logging
+import psycopg2
+import psycopg2.extras
+from contextlib import asynccontextmanager
+from datetime import datetime
+from typing import Dict, List, Optional, Tuple
+
+from .config import Config
+
+
+class DatabaseManager:
+    """Менеджер работы с PostgreSQL."""
+    
+    def __init__(self, config: Config, logger: logging.Logger):
+        self.config = config
+        self.logger = logger
+        self._connection_retry_count = 3
+        self._connection_retry_delay = 5.0
+        
+    def _get_connection_params(self) -> dict:
+        """Получить параметры подключения к БД."""
+        return {
+            'host': self.config.DB_HOST,
+            'port': self.config.DB_PORT,
+            'database': self.config.DB_NAME,
+            'user': self.config.DB_USER,
+            'password': self.config.DB_PASSWORD,
+            'connect_timeout': 10
+        }
+    
+    @asynccontextmanager
+    async def get_connection(self):
+        """
+        Подключение к БД с ретраями при сетевых ошибках.
+        
+        Yields:
+            psycopg2.connection
+        """
+        conn = None
+        
+        for attempt in range(1, self._connection_retry_count + 1):
+            try:
+                conn = psycopg2.connect(**self._get_connection_params())
+                conn.autocommit = False
+                
+                yield conn
+                
+                # Коммит только если не было исключений
+                if conn and not conn.closed:
+                    conn.commit()
+                break
+                
+            except (psycopg2.OperationalError, psycopg2.InterfaceError) as e:
+                # Сетевые ошибки - retry
+                if conn:
+                    try:
+                        conn.rollback()
+                        conn.close()
+                    except Exception:
+                        pass
+                    conn = None
+                
+                if attempt < self._connection_retry_count:
+                    delay = self._connection_retry_delay * attempt
+                    self.logger.warning(
+                        f"⚠️ БД недоступна (попытка {attempt}/{self._connection_retry_count}). "
+                        f"Повтор через {delay}с..."
+                    )
+                    await asyncio.sleep(delay)
+                else:
+                    self.logger.error(
+                        f"❌ БД недоступна после {self._connection_retry_count} попыток"
+                    )
+                    raise
+                    
+            except Exception as e:
+                # Другие ошибки - rollback и raise
+                if conn:
+                    try:
+                        conn.rollback()
+                    except Exception:
+                        pass
+                self.logger.error(f"❌ Ошибка БД: {e}", exc_info=True)
+                raise
+                
+            finally:
+                # Закрываем соединение
+                if conn and not conn.closed:
+                    try:
+                        conn.close()
+                    except Exception as e:
+                        self.logger.debug(f"Ошибка закрытия соединения: {e}")
+    
+    async def initialize_tables(self):
+        """Создание таблиц с правильной структурой."""
+        create_table_sql = """
+        CREATE TABLE IF NOT EXISTS {table_name} (
+            registration_number TEXT PRIMARY KEY,
+            reg_date DATE,
+            act_date DATE,
+            start_date DATE,
+            end_date DATE,
+            suspend_date DATE,
+            resume_date DATE,
+            prolong_start DATE,
+            prolong_end DATE,
+            revenue_name TEXT,
+            kpssu_name TEXT,
+            check_type TEXT,
+            subject_bin TEXT,
+            subject_name TEXT,
+            subject_address TEXT,
+            status_id TEXT,
+            status TEXT,
+            audit_theme TEXT,
+            audit_theme_1 TEXT,
+            theme_check TEXT,
+            theme_check_1 TEXT,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        );
+        
+        CREATE INDEX IF NOT EXISTS idx_{table_name}_reg_date ON {table_name}(reg_date);
+        CREATE INDEX IF NOT EXISTS idx_{table_name}_bin ON {table_name}(subject_bin);
+        CREATE INDEX IF NOT EXISTS idx_{table_name}_status ON {table_name}(status_id);
+        CREATE INDEX IF NOT EXISTS idx_{table_name}_updated ON {table_name}(updated_at);
+        CREATE INDEX IF NOT EXISTS idx_{table_name}_region_seq ON {table_name}(
+            CAST(SUBSTRING(registration_number, 3, 7) AS INTEGER),
+            CAST(SPLIT_PART(registration_number, '/', 2) AS INTEGER)
+        );
+        
+        CREATE OR REPLACE FUNCTION update_{table_name}_timestamp()
+        RETURNS TRIGGER AS $$
+        BEGIN
+            NEW.updated_at = NOW();
+            RETURN NEW;
+        END;
+        $$ LANGUAGE plpgsql;
+        
+        DROP TRIGGER IF EXISTS trigger_update_{table_name}_timestamp ON {table_name};
+        CREATE TRIGGER trigger_update_{table_name}_timestamp
+        BEFORE UPDATE ON {table_name}
+        FOR EACH ROW
+        EXECUTE FUNCTION update_{table_name}_timestamp();
+        """
+        
+        create_audit_log_sql = """
+        CREATE TABLE IF NOT EXISTS audit_log (
+            id SERIAL PRIMARY KEY,
+            registration_number TEXT NOT NULL,
+            table_name TEXT NOT NULL,
+            changed_fields TEXT[],
+            old_values JSONB,
+            new_values JSONB,
+            changed_at TIMESTAMP DEFAULT NOW()
+        );
+        
+        CREATE INDEX IF NOT EXISTS idx_audit_log_reg_num ON audit_log(registration_number);
+        CREATE INDEX IF NOT EXISTS idx_audit_log_changed_at ON audit_log(changed_at);
+        CREATE INDEX IF NOT EXISTS idx_audit_log_table ON audit_log(table_name);
+        """
+        
+        add_updated_at_sql = """
+        DO $$ 
+        BEGIN
+            IF NOT EXISTS (
+                SELECT 1 FROM information_schema.columns 
+                WHERE table_name=%s AND column_name='updated_at'
+            ) THEN
+                EXECUTE 'ALTER TABLE ' || %s || ' ADD COLUMN updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP';
+            END IF;
+        END $$;
+        """
+        
+        async with self.get_connection() as conn:
+            cursor = conn.cursor()
+            
+            # Создание таблиц
+            cursor.execute(create_table_sql.format(table_name="qamqor_tax"))
+            cursor.execute(create_table_sql.format(table_name="qamqor_customs"))
+            cursor.execute(create_audit_log_sql)
+            
+            # Добавление updated_at к существующим таблицам
+            for table in ['qamqor_tax', 'qamqor_customs']:
+                cursor.execute(add_updated_at_sql, (table, table))
+            
+            self.logger.debug("✅ Таблицы инициализированы")
+    
+    async def get_region_state(self) -> Dict[int, int]:
+        """
+        Получение последних обработанных номеров из БД.
+        
+        Returns:
+            Словарь {region_code: next_number}
+        """
+        region_state = {}
+        
+        async with self.get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("""
+                SELECT region_code, COALESCE(MAX(seq_number), 0) + 1 as next_number
+                FROM (
+                    SELECT 
+                        CAST(SUBSTRING(registration_number, 3, 7) AS INTEGER) as region_code,
+                        CAST(SPLIT_PART(registration_number, '/', 2) AS INTEGER) as seq_number
+                    FROM qamqor_tax 
+                    WHERE registration_number ~ '^25[0-9]{7}170101[12]/[0-9]{5}$'
+                    UNION ALL
+                    SELECT 
+                        CAST(SUBSTRING(registration_number, 3, 7) AS INTEGER) as region_code,
+                        CAST(SPLIT_PART(registration_number, '/', 2) AS INTEGER) as seq_number
+                    FROM qamqor_customs 
+                    WHERE registration_number ~ '^25[0-9]{7}170101[12]/[0-9]{5}$'
+                ) combined 
+                GROUP BY region_code
+            """)
+            
+            for region_code, next_number in cursor.fetchall():
+                region_state[region_code] = next_number
+        
+        # Устанавливаем стартовое значение для регионов без данных
+        for region_code in self.config.REGIONS.keys():
+            region_state.setdefault(region_code, self.config.START_NUMBER)
+        
+        return region_state
+    
+    async def get_region_stats(self) -> Dict[int, Dict]:
+        """
+        Получение статистики по регионам.
+        
+        Returns:
+            Словарь со статистикой по каждому региону
+        """
+        stats = {}
+        
+        async with self.get_connection() as conn:
+            cursor = conn.cursor()
+            
+            for region_code in self.config.REGIONS.keys():
+                pattern = f'^25{region_code}170101[12]/[0-9]{{5}}$'
+                
+                # Подсчет записей
+                cursor.execute("""
+                    SELECT COUNT(*) FROM (
+                        SELECT registration_number FROM qamqor_tax WHERE registration_number ~ %s
+                        UNION ALL
+                        SELECT registration_number FROM qamqor_customs WHERE registration_number ~ %s
+                    ) combined
+                """, (pattern, pattern))
+                total_count = cursor.fetchone()[0]
+                
+                # Следующий номер
+                cursor.execute("""
+                    SELECT COALESCE(MAX(seq_number), 0) + 1
+                    FROM (
+                        SELECT CAST(SPLIT_PART(registration_number, '/', 2) AS INTEGER) as seq_number
+                        FROM qamqor_tax WHERE registration_number ~ %s
+                        UNION ALL
+                        SELECT CAST(SPLIT_PART(registration_number, '/', 2) AS INTEGER) as seq_number
+                        FROM qamqor_customs WHERE registration_number ~ %s
+                    ) combined
+                """, (pattern, pattern))
+                next_number = cursor.fetchone()[0]
+                
+                # Пропущенные номера
+                cursor.execute("""
+                    SELECT CAST(SPLIT_PART(registration_number, '/', 2) AS INTEGER) as seq_num
+                    FROM (
+                        SELECT registration_number FROM qamqor_tax WHERE registration_number ~ %s
+                        UNION 
+                        SELECT registration_number FROM qamqor_customs WHERE registration_number ~ %s
+                    ) combined 
+                    ORDER BY seq_num
+                """, (pattern, pattern))
+                
+                existing_numbers = {row[0] for row in cursor.fetchall()}
+                missing_count = 0
+                
+                if existing_numbers:
+                    max_num = max(existing_numbers)
+                    expected_numbers = set(range(1, max_num + 1))
+                    missing_count = len(expected_numbers - existing_numbers)
+                
+                stats[region_code] = {
+                    'total_records': total_count,
+                    'next_number': max(next_number, 1),
+                    'missing_count': missing_count,
+                    'found_new': 0  # Будет обновляться во время парсинга
+                }
+        
+        return stats
+    
+    async def find_missing_numbers(self) -> Dict[int, List[int]]:
+        """
+        Поиск пропущенных номеров в БД.
+        
+        Returns:
+            Словарь {region_code: [missing_numbers]}
+        """
+        missing_numbers = {}
+        
+        async with self.get_connection() as conn:
+            cursor = conn.cursor()
+            
+            for region_code in self.config.REGIONS.keys():
+                pattern = f'^25{region_code}170101[12]/[0-9]{{5}}$'
+                
+                cursor.execute("""
+                    SELECT CAST(SPLIT_PART(registration_number, '/', 2) AS INTEGER) as seq_num
+                    FROM (
+                        SELECT registration_number FROM qamqor_tax WHERE registration_number ~ %s
+                        UNION 
+                        SELECT registration_number FROM qamqor_customs WHERE registration_number ~ %s
+                    ) combined 
+                    ORDER BY seq_num
+                """, (pattern, pattern))
+                
+                existing_numbers = {row[0] for row in cursor.fetchall()}
+                
+                if existing_numbers:
+                    max_num = max(existing_numbers)
+                    expected_numbers = set(range(1, max_num + 1))
+                    region_missing = sorted(list(expected_numbers - existing_numbers))
+                    
+                    # Исключаем номера из конфигурации
+                    if region_code in self.config.EXCLUDED_MISSING_NUMBERS:
+                        excluded = set(self.config.EXCLUDED_MISSING_NUMBERS[region_code])
+                        region_missing = [num for num in region_missing if num not in excluded]
+                    
+                    if region_missing:
+                        missing_numbers[region_code] = region_missing
+        
+        return missing_numbers
+    
+    async def bulk_insert_data(
+        self, 
+        data_batch: List[Dict], 
+        silent: bool = False
+    ) -> Tuple[int, int]:
+        """Массовая вставка с оптимизацией."""
+        if not data_batch:
+            return 0, 0
+        
+        # ✅ Предобработка данных ВНЕ транзакции
+        tax_data = []
+        customs_data = []
+        
+        for item in data_batch:
+            reg_num = item.get('registration_number', '')
+            if not reg_num or '/' not in reg_num:
+                continue
+            
+            try:
+                prefix, _ = reg_num.split('/')
+                check_type = int(prefix[-1])
+                values = self._prepare_db_values(item)
+                
+                if check_type == 1:
+                    tax_data.append(values)
+                elif check_type == 2:
+                    customs_data.append(values)
+            except (ValueError, IndexError):
+                continue
+        
+        if not tax_data and not customs_data:
+            return 0, 0
+        
+        # ✅ Retry с экспоненциальной задержкой
+        for attempt in range(1, 4):
+            try:
+                async with self.get_connection() as conn:
+                    cursor = conn.cursor()
+                    tax_inserted = customs_inserted = 0
+                    
+                    # Используем COPY для больших батчей
+                    if len(tax_data) > self.config.BULK_COPY_THRESHOLD:
+                        tax_inserted = await self._bulk_copy(cursor, "qamqor_tax", tax_data)
+                    elif tax_data:
+                        tax_inserted = await self._bulk_execute_values(
+                            cursor, "qamqor_tax", tax_data
+                        )
+
+                    if len(customs_data) > self.config.BULK_COPY_THRESHOLD:
+                        customs_inserted = await self._bulk_copy(
+                            cursor, "qamqor_customs", customs_data
+                        )
+                    elif customs_data:
+                        customs_inserted = await self._bulk_execute_values(
+                            cursor, "qamqor_customs", customs_data
+                        )
+                    
+                    if not silent and (tax_inserted > 0 or customs_inserted > 0):
+                        self.logger.info(f"💾 TAX: +{tax_inserted}, CUSTOMS: +{customs_inserted}")
+                    
+                    return tax_inserted, customs_inserted
+                
+            except (psycopg2.OperationalError, psycopg2.InterfaceError) as e:
+                if attempt < 3:
+                    delay = self.config.RETRY_BACKOFF_BASE ** attempt
+                    self.logger.warning(f"⚠️ DB retry {attempt}/3 через {delay}s")
+                    await asyncio.sleep(delay)
+                else:
+                    self.logger.error(f"❌ DB недоступна после 3 попыток")
+                    raise
+            
+            except Exception as e:
+                self.logger.error(f"❌ Ошибка вставки: {e}", exc_info=True)
+                raise
+        
+        return 0, 0
+
+    async def _bulk_execute_values(self, cursor, table_name: str, data: List[Tuple]) -> int:
+        """Вставка через execute_values."""
+        insert_sql = f"""
+            INSERT INTO {table_name} (
+                registration_number, reg_date, act_date, start_date, end_date,
+                suspend_date, resume_date, prolong_start, prolong_end,
+                revenue_name, kpssu_name, check_type, subject_bin, subject_name,
+                subject_address, status_id, status, audit_theme, audit_theme_1,
+                theme_check, theme_check_1
+            ) VALUES %s 
+            ON CONFLICT (registration_number) DO NOTHING
+        """
+        
+        psycopg2.extras.execute_values(
+            cursor, insert_sql, data, page_size=self.config.EXECUTE_VALUES_PAGE_SIZE
+        )
+        return cursor.rowcount
+    
+    def _prepare_db_values(self, item: Dict) -> Tuple:
+        """Подготовка данных для вставки."""
+        return (
+            item.get('registration_number'),
+            self._parse_date(item.get('reg_date')),
+            self._parse_date(item.get('act_date')),
+            self._parse_date(item.get('start_date')),
+            self._parse_date(item.get('end_date')),
+            self._parse_date(item.get('suspend_date')),
+            self._parse_date(item.get('resume_date')),
+            self._parse_date(item.get('prolong_start')),
+            self._parse_date(item.get('prolong_end')),
+            item.get('revenue_name'),
+            item.get('kpssu_name'),
+            item.get('check_type'),
+            item.get('subject_bin'),
+            item.get('subject_name'),
+            item.get('subject_address'),
+            item.get('status_id'),
+            item.get('status'),
+            item.get('audit_theme'),
+            item.get('audit_theme_1'),
+            item.get('theme_check'),
+            item.get('theme_check_1')
+        )
+    
+    def _parse_date(self, date_str: Optional[str]) -> Optional[str]:
+        """Парсинг даты в формат PostgreSQL."""
+        if not date_str:
+            return None
+        
+        # Проверяем, что уже в формате YYYY-MM-DD
+        if len(date_str) == 10 and date_str[4] == '-' and date_str[7] == '-':
+            try:
+                datetime.strptime(date_str, "%Y-%m-%d")
+                return date_str
+            except ValueError:
+                pass
+        
+        # Парсим другие форматы
+        for fmt in ("%d/%m/%Y", "%d.%m.%Y", "%Y-%m-%d"):
+            try:
+                return datetime.strptime(date_str, fmt).strftime("%Y-%m-%d")
+            except ValueError:
+                continue
+        
+        return None
+    
+    async def get_summary_stats(self) -> Dict:
+        """Получение сводной статистики из БД."""
+        async with self.get_connection() as conn:
+            cursor = conn.cursor()
+            stats = {}
+            
+            for table in ['qamqor_tax', 'qamqor_customs']:
+                cursor.execute(f"""
+                    SELECT 
+                        COUNT(*) as total,
+                        MIN(reg_date) as earliest,
+                        MAX(reg_date) as latest
+                    FROM {table}
+                """)
+                row = cursor.fetchone()
+                stats[table] = {
+                    'total': row[0],
+                    'earliest': row[1],
+                    'latest': row[2]
+                }
+            
+            return stats
+    
+    async def get_records_to_update(
+        self,
+        statuses: Optional[List[str]] = None,
+        min_age_days: Optional[int] = None,
+        max_age_days: Optional[int] = None,          # ⬅️ НОВОЕ
+        cooldown_days: Optional[int] = None,
+        force: bool = False
+    ) -> Dict[str, List[str]]:
+        """
+        Получить registration_numbers для обновления.
+        
+        Стратегия обновления:
+        - 0-7 дней: Не обновляем (период "созревания")
+        - 7-180 дней: Активно обновляем (каждые 3 дня)
+        - >180 дней: Не обновляем (архивные/зависшие)
+        
+        Args:
+            statuses: Список статусов для фильтрации
+            min_age_days: Минимальный возраст записи от reg_date
+            max_age_days: Максимальный возраст (прекращаем обновлять)  # ⬅️ НОВОЕ
+            cooldown_days: Минимальный интервал между обновлениями
+            force: Игнорировать фильтры по возрасту
+            
+        Returns:
+            {"tax": [...], "customs": [...]}
+        """
+        if statuses is None:
+            statuses = self.config.UPDATE_STATUSES
+        
+        if min_age_days is None:
+            min_age_days = self.config.UPDATE_MIN_AGE_DAYS
+        
+        if max_age_days is None:                                       # ⬅️ НОВОЕ
+            max_age_days = self.config.UPDATE_MAX_AGE_DAYS             # ⬅️ НОВОЕ
+        
+        if cooldown_days is None:
+            cooldown_days = self.config.UPDATE_COOLDOWN_DAYS
+        
+        result = {"tax": [], "customs": []}
+        
+        async with self.get_connection() as conn:
+            cursor = conn.cursor()
+            
+            for table_name, key in [("qamqor_tax", "tax"), ("qamqor_customs", "customs")]:
+                sql = f"""
+                    SELECT registration_number 
+                    FROM {table_name}
+                    WHERE status_id = ANY(%s)
+                    AND reg_date IS NOT NULL
+                """
+                
+                params = [statuses]
+                
+                if not force:
+                    # КРИТЕРИЙ 2: Минимальный возраст (начинаем обновлять)
+                    sql += f" AND reg_date < CURRENT_DATE - INTERVAL '{min_age_days} days'"
+                    
+                    # ⬅️ НОВОЕ: Максимальный возраст (прекращаем обновлять)
+                    sql += f" AND reg_date >= CURRENT_DATE - INTERVAL '{max_age_days} days'"
+                    
+                    # КРИТЕРИЙ 3: Cooldown (не обновлялись недавно)
+                    sql += f"""
+                        AND (
+                            updated_at IS NULL 
+                            OR updated_at < NOW() - INTERVAL '{cooldown_days} days'
+                            OR updated_at = created_at
+                        )
+                    """
+                
+                sql += " ORDER BY reg_date DESC"  # ⬅️ Изменено: DESC (сначала свежие)
+                
+                cursor.execute(sql, params)
+                result[key] = [row[0] for row in cursor.fetchall()]
+        
+        return result
+
+    async def bulk_update_data(
+        self, 
+        data_batch: List[Dict], 
+        silent: bool = False
+    ) -> Tuple[int, int, List[Dict]]:
+        """
+        Массовое обновление записей с отслеживанием изменений.
+        
+        Args:
+            data_batch: Список записей для обновления
+            silent: Не логировать успешные обновления
+            
+        Returns:
+            (tax_updated, customs_updated, changes_log)
+        """
+        if not data_batch:
+            return 0, 0, []
+        
+        # Разделение на tax и customs
+        tax_data = []
+        customs_data = []
+        
+        for item in data_batch:
+            reg_num = item.get('registration_number', '')
+            if not reg_num or '/' not in reg_num:
+                continue
+            
+            try:
+                prefix = reg_num.split('/')[0]
+                check_type = int(prefix[-1])
+                values = self._prepare_db_values(item)
+                
+                if check_type == 1:
+                    tax_data.append(values)
+                elif check_type == 2:
+                    customs_data.append(values)
+            except (ValueError, IndexError):
+                continue
+        
+        changes_log = []
+        
+        # Retry-логика
+        max_attempts = 3
+        for attempt in range(1, max_attempts + 1):
+            try:
+                async with self.get_connection() as conn:
+                    cursor = conn.cursor()
+                    tax_updated = customs_updated = 0
+                    
+                    # UPDATE SQL с отслеживанием изменений
+                    update_sql = """
+                        WITH old_data AS (
+                            SELECT status_id, status, end_date, registration_number
+                            FROM {table_name} 
+                            WHERE registration_number = %s
+                        )
+                        UPDATE {table_name} SET
+                            reg_date = %s,
+                            act_date = %s,
+                            start_date = %s,
+                            end_date = %s,
+                            suspend_date = %s,
+                            resume_date = %s,
+                            prolong_start = %s,
+                            prolong_end = %s,
+                            revenue_name = %s,
+                            kpssu_name = %s,
+                            check_type = %s,
+                            subject_bin = %s,
+                            subject_name = %s,
+                            subject_address = %s,
+                            status_id = %s,
+                            status = %s,
+                            audit_theme = %s,
+                            audit_theme_1 = %s,
+                            theme_check = %s,
+                            theme_check_1 = %s
+                        WHERE registration_number = %s
+                        RETURNING 
+                            (SELECT status_id FROM old_data) as old_status_id,
+                            (SELECT status FROM old_data) as old_status,
+                            (SELECT end_date FROM old_data) as old_end_date,
+                            status_id as new_status_id,
+                            status as new_status,
+                            end_date as new_end_date,
+                            registration_number
+                    """
+                    
+                    if tax_data:
+                        for values in tax_data:
+                            reg_num = values[0]
+                            params = (reg_num,) + values[1:] + (reg_num,)
+                            
+                            cursor.execute(
+                                update_sql.format(table_name="qamqor_tax"),
+                                params
+                            )
+                            
+                            result = cursor.fetchone()
+                            if result:
+                                tax_updated += 1
+                                
+                                if self.config.UPDATE_TRACK_CHANGES:
+                                    changes = self._detect_changes(result)
+                                    if changes:
+                                        changes_log.append({
+                                            'table': 'qamqor_tax',
+                                            'registration_number': result[6],
+                                            'changes': changes
+                                        })
+                        
+                        if tax_updated > 0 and not silent:
+                            self.logger.info(f"🔄 TAX: ~{tax_updated}")
+                    
+                    if customs_data:
+                        for values in customs_data:
+                            reg_num = values[0]
+                            params = (reg_num,) + values[1:] + (reg_num,)
+                            
+                            cursor.execute(
+                                update_sql.format(table_name="qamqor_customs"),
+                                params
+                            )
+                            
+                            result = cursor.fetchone()
+                            if result:
+                                customs_updated += 1
+                                
+                                if self.config.UPDATE_TRACK_CHANGES:
+                                    changes = self._detect_changes(result)
+                                    if changes:
+                                        changes_log.append({
+                                            'table': 'qamqor_customs',
+                                            'registration_number': result[6],
+                                            'changes': changes
+                                        })
+                        
+                        if customs_updated > 0 and not silent:
+                            self.logger.info(f"🔄 CUSTOMS: ~{customs_updated}")
+                    
+                    # Записать изменения в audit_log
+                    if changes_log:
+                        await self._log_changes(cursor, changes_log)
+                    
+                    return tax_updated, customs_updated, changes_log
+                
+            except (psycopg2.OperationalError, psycopg2.InterfaceError) as e:
+                if attempt < max_attempts:
+                    self.logger.warning(
+                        f"⚠️ Ошибка обновления (попытка {attempt}/{max_attempts}): {e}"
+                    )
+                    await asyncio.sleep(2 * attempt)
+                else:
+                    self.logger.error(f"❌ Не удалось обновить данные после {max_attempts} попыток")
+                    raise
+            
+            except Exception as e:
+                self.logger.error(f"❌ Ошибка обновления: {e}", exc_info=True)
+                raise
+        
+        return 0, 0, []
+
+    def _detect_changes(self, result: Tuple) -> Optional[Dict]:
+        """Определить изменения между старыми и новыми данными."""
+        (old_status_id, old_status, old_end_date, 
+         new_status_id, new_status, new_end_date, reg_num) = result
+        
+        changes = {}
+        
+        if old_status_id != new_status_id:
+            changes['status_id'] = {'old': old_status_id, 'new': new_status_id}
+        
+        if old_status != new_status:
+            changes['status'] = {'old': old_status, 'new': new_status}
+        
+        if old_end_date != new_end_date:
+            changes['end_date'] = {
+                'old': str(old_end_date) if old_end_date else None,
+                'new': str(new_end_date) if new_end_date else None
+            }
+        
+        return changes if changes else None
+
+    async def _log_changes(self, cursor, changes_log: List[Dict]):
+        """Записать изменения в таблицу audit_log."""
+        if not changes_log:
+            return
+        
+        insert_sql = """
+            INSERT INTO audit_log (
+                registration_number, 
+                table_name, 
+                changed_fields, 
+                old_values, 
+                new_values
+            ) VALUES %s
+        """
+        
+        values = []
+        for change in changes_log:
+            changed_fields = list(change['changes'].keys())
+            old_values = {k: v['old'] for k, v in change['changes'].items()}
+            new_values = {k: v['new'] for k, v in change['changes'].items()}
+            
+            values.append((
+                change['registration_number'],
+                change['table'],
+                changed_fields,
+                psycopg2.extras.Json(old_values),
+                psycopg2.extras.Json(new_values)
+            ))
+        
+        psycopg2.extras.execute_values(cursor, insert_sql, values)
+
+    async def get_update_summary(self, since: datetime) -> Dict:
+        """Получить сводку обновлений за период."""
+        async with self.get_connection() as conn:
+            cursor = conn.cursor()
+            
+            cursor.execute("""
+                SELECT 
+                    table_name,
+                    COUNT(*) as total_changes,
+                    COUNT(DISTINCT registration_number) as unique_records,
+                    array_agg(DISTINCT unnest(changed_fields)) as fields_changed
+                FROM audit_log
+                WHERE changed_at >= %s
+                GROUP BY table_name
+            """, (since,))
+            
+            results = cursor.fetchall()
+            
+            summary = {}
+            for table_name, total, unique, fields in results:
+                summary[table_name] = {
+                    'total_changes': total,
+                    'unique_records': unique,
+                    'fields_changed': [f for f in fields if f is not None]
+                }
+            
+            return summary
+
+================================================================================
+FILE: core\enums.py
+================================================================================
+
+"""Перечисления для типизации и избежания magic strings."""
+
+from enum import Enum
+
+
+class CheckStatus(str, Enum):
+    """
+    Статусы проверок в системе QAMQOR.
+    
+    Используется для фильтрации записей при обновлении.
+    """
+    IN_PROGRESS = "1"
+    COMPLETED = "2"
+    CANCELLED = "3"
+    
+    def __str__(self) -> str:
+        """Строковое представление."""
+        return self.value
+
+
+class APIResponseCode(str, Enum):
+    """
+    Коды ответов API QAMQOR.
+    
+    Определяет тип ответа и необходимость повторных попыток.
+    """
+    OK = "OK"
+    RECAPTCHA = "CONTROLLER::RECAPTCHA"
+    MAINTENANCE = "MAINTENANCE"
+    SERVER_ERROR = "SERVER_ERROR"
+    INTERNAL_ERROR = "INTERNAL_ERROR"
+    SERVICE_UNAVAILABLE = "SERVICE_UNAVAILABLE"
+    
+    def __str__(self) -> str:
+        """Строковое представление."""
+        return self.value
+    
+    @property
+    def is_critical(self) -> bool:
+        """Проверка критичности ошибки."""
+        return self in {
+            self.MAINTENANCE,
+            self.SERVER_ERROR,
+            self.INTERNAL_ERROR,
+            self.SERVICE_UNAVAILABLE
+        }
+
+
+class APIResponseStatus(str, Enum):
+    """Статусы HTTP ответов API."""
+    SUCCESS = "success"
+    ERROR = "error"
+    
+    def __str__(self) -> str:
+        """Строковое представление."""
+        return self.value
+
+
+class ParserMode(str, Enum):
+    """Режимы работы парсера."""
+    FULL = "full"
+    MISSING_ONLY = "missing_only"
+    UPDATE = "update"
+    
+    def __str__(self) -> str:
+        """Строковое представление."""
+        return self.value
+
+
+class TableName(str, Enum):
+    """Названия таблиц в БД."""
+    TAX = "qamqor_tax"
+    CUSTOMS = "qamqor_customs"
+    AUDIT_LOG = "audit_log"
+    
+    def __str__(self) -> str:
+        """Строковое представление."""
+        return self.value
+
+================================================================================
+FILE: core\log_manager.py
+================================================================================
+
+"""Менеджер логирования."""
+
+import logging
+from datetime import datetime
+from typing import Dict
+
+from .config import Config
+
+
+class LogManager:
+    """Менеджер логирования с метриками."""
+    
+    def __init__(self, config: Config, name: str = "qamqor"):
+        self.config = config
+        self.logger = self._setup_logger(name)
+        self.metrics = {
+            'start_time': datetime.now(),
+            'records_processed': 0,
+            'api_requests': 0,
+            'api_errors': 0,
+            'db_inserts': 0,
+            'db_updates': 0,
+            'regions_completed': 0
+        }
+        
+    def _setup_logger(self, name: str) -> logging.Logger:
+        """Настройка логгера."""
+        self.config.LOG_DIR.mkdir(exist_ok=True)
+        
+        logger = logging.getLogger(name)
+        logger.setLevel(getattr(logging, self.config.LOG_LEVEL))
+        logger.handlers.clear()
+        logger.propagate = False  # ✅ Предотвращаем дублирование
+        
+        formatter = logging.Formatter(
+            '%(asctime)s | %(levelname)-8s | %(message)s',
+            datefmt='%H:%M:%S'
+        )
+        
+        # Файловый хендлер
+        log_file = self.config.LOG_DIR / f"{name}_{datetime.now():%Y%m%d_%H%M%S}.log"
+        fh = logging.FileHandler(log_file, encoding='utf-8')
+        fh.setFormatter(formatter)
+        fh.setLevel(logging.DEBUG)
+        
+        # Консольный хендлер
+        ch = logging.StreamHandler()
+        ch.setFormatter(formatter)
+        ch.setLevel(getattr(logging, self.config.LOG_LEVEL))
+        
+        logger.addHandler(fh)
+        logger.addHandler(ch)
+        
+        return logger
+    
+    def increment_metric(self, metric_name: str, delta: int = 1):
+        """Инкремент метрики."""
+        if metric_name in self.metrics:
+            self.metrics[metric_name] += delta
+        else:
+            self.logger.warning(f"⚠️ Неизвестная метрика: {metric_name}")
+    
+    def get_metrics_summary(self) -> Dict:
+        """Получение сводки метрик."""
+        elapsed = (datetime.now() - self.metrics['start_time']).total_seconds()
+        records_per_sec = (
+            self.metrics['records_processed'] / elapsed 
+            if elapsed > 0 
+            else 0
+        )
+        
+        return {
+            **self.metrics,
+            'elapsed_seconds': round(elapsed, 2),
+            'records_per_second': round(records_per_sec, 2)
+        }
+
+================================================================================
+FILE: core\stealth.py
+================================================================================
+
+"""
+Stealth utilities для обхода детекции автоматизации браузера.
+"""
+
+import asyncio
+import logging
+from contextlib import asynccontextmanager
+from typing import List, Set
+
+from playwright.async_api import BrowserContext, Page, Route
+
+from .config import Config
+
+
+async def apply_stealth(page: Page) -> bool:
+    """
+    Маскировка браузера под реального пользователя.
+    
+    Удаляет признаки автоматизации (webdriver флаг, добавляет chrome объект,
+    настраивает permissions, plugins и languages).
+    
+    Args:
+        page: Страница Playwright для применения stealth
+        
+    Returns:
+        True при успешном применении, False при ошибке
+    """
+    try:
+        await page.add_init_script("""
+            // Удаляем webdriver
+            Object.defineProperty(navigator, 'webdriver', {
+                get: () => undefined
+            });
+            
+            // Chrome объект
+            window.navigator.chrome = {
+                runtime: {},
+                loadTimes: function() {},
+                csi: function() {}
+            };
+            
+            // Permissions
+            const originalQuery = window.navigator.permissions.query;
+            window.navigator.permissions.query = (parameters) => (
+                parameters.name === 'notifications' ?
+                    Promise.resolve({ state: Notification.permission }) :
+                    originalQuery(parameters)
+            );
+            
+            // Plugins
+            Object.defineProperty(navigator, 'plugins', {
+                get: () => [1, 2, 3, 4, 5]
+            });
+            
+            // Languages
+            Object.defineProperty(navigator, 'languages', {
+                get: () => ['ru-RU', 'ru', 'en-US', 'en']
+            });
+        """)
+        return True
+    except Exception:
+        return False
+
+
+class StealthTabManager:
+    """
+    Менеджер пула вкладок браузера с автоматическим применением stealth.
+    
+    Управляет пулом вкладок с блокировкой ненужных ресурсов (изображения,
+    стили, шрифты) и автоматическим восстановлением при сбоях.
+    """
+    
+    # Типы ресурсов для блокировки
+    BLOCKED_RESOURCE_TYPES: Set[str] = {"image", "stylesheet", "font", "media"}
+    
+    def __init__(
+        self,
+        context: BrowserContext,
+        config: Config,
+        logger: logging.Logger
+    ):
+        """
+        Инициализация менеджера вкладок.
+        
+        Args:
+            context: Контекст браузера Playwright
+            config: Конфигурация парсера
+            logger: Логгер для вывода сообщений
+        """
+        self.context = context
+        self.config = config
+        self.logger = logger
+        self.available_tabs: asyncio.Queue[Page] = asyncio.Queue()
+        self.all_tabs: List[Page] = []
+        self._lock = asyncio.Lock()
+        self._closed = False
+    
+    async def initialize(self) -> None:
+        """
+        Инициализация пула вкладок.
+        
+        Создает указанное в конфигурации количество вкладок,
+        применяет stealth и блокировку ресурсов к каждой.
+        
+        Raises:
+            Exception: При ошибке создания вкладок
+        """
+        self.logger.debug(
+            "🔧 Инициализация %d вкладок...",
+            self.config.MAX_CONCURRENT_TABS
+        )
+        
+        for i in range(self.config.MAX_CONCURRENT_TABS):
+            try:
+                page = await self._create_configured_page()
+                await apply_stealth(page)
+                
+                self.all_tabs.append(page)
+                await self.available_tabs.put(page)
+                
+                self.logger.debug("✅ Вкладка %d (stealth) создана", i + 1)
+            except Exception as e:
+                self.logger.error("❌ Ошибка создания вкладки %d: %s", i + 1, e)
+                await self.close_all()
+                raise
+        
+        self.logger.debug("✅ Пул вкладок (stealth) инициализирован")
+    
+    async def _create_configured_page(self) -> Page:
+        """
+        Создание настроенной вкладки с блокировкой ресурсов.
+        
+        Returns:
+            Настроенная вкладка Playwright
+        """
+        page = await self.context.new_page()
+        
+        async def route_handler(route: Route) -> None:
+            """Обработчик маршрутов для блокировки ресурсов."""
+            try:
+                if route.request.resource_type in self.BLOCKED_RESOURCE_TYPES:
+                    await route.abort()
+                else:
+                    await route.continue_()
+            except Exception:
+                try:
+                    await route.abort()
+                except Exception:
+                    pass
+        
+        await page.route("**/*", route_handler)
+        return page
+    
+    @asynccontextmanager
+    async def get_tab(self):
+        """
+        Получение вкладки из пула с автоматическим восстановлением.
+        
+        Контекстный менеджер для безопасного получения и возврата
+        вкладки в пул. При закрытой вкладке автоматически создает новую.
+        
+        Yields:
+            Page: Вкладка браузера
+            
+        Raises:
+            RuntimeError: Если TabManager уже закрыт
+        """
+        if self._closed:
+            raise RuntimeError("TabManager закрыт")
+        
+        page = await self.available_tabs.get()
+        
+        # Проверка и восстановление закрытой вкладки
+        if page.is_closed():
+            async with self._lock:
+                # Double-check под lock'ом
+                if page.is_closed():
+                    self.logger.warning("⚠️ Вкладка закрыта, создаем новую")
+                    try:
+                        new_page = await self._create_configured_page()
+                        await apply_stealth(new_page)
+                        
+                        # Безопасное обновление списка
+                        try:
+                            idx = self.all_tabs.index(page)
+                            self.all_tabs[idx] = new_page
+                        except ValueError:
+                            self.all_tabs.append(new_page)
+                        
+                        page = new_page
+                    except Exception as e:
+                        self.logger.error("❌ Не удалось создать вкладку: %s", e)
+                        await self.available_tabs.put(page)
+                        raise
+        
+        try:
+            yield page
+        except Exception as e:
+            self.logger.error("❌ Ошибка работы с вкладкой: %s", e)
+            
+            # Восстановление при ошибке
+            async with self._lock:
+                try:
+                    if not page.is_closed():
+                        await page.close()
+                except Exception:
+                    pass
+                
+                try:
+                    page = await self._create_configured_page()
+                    await apply_stealth(page)
+                    self.logger.info("✅ Вкладка восстановлена после ошибки")
+                except Exception as create_error:
+                    self.logger.critical(
+                        "🚨 Не удалось восстановить вкладку: %s",
+                        create_error
+                    )
+                    raise
+            raise
+        finally:
+            # Возврат вкладки в пул
+            if not page.is_closed():
+                await self.available_tabs.put(page)
+            else:
+                # Асинхронное восстановление
+                asyncio.create_task(self._restore_pool_tab(page))
+    
+    async def _restore_pool_tab(self, closed_page: Page) -> None:
+        """
+        Асинхронное восстановление вкладки в пуле.
+        
+        Args:
+            closed_page: Закрытая вкладка для замены
+        """
+        async with self._lock:
+            try:
+                new_page = await self._create_configured_page()
+                await apply_stealth(new_page)
+                await self.available_tabs.put(new_page)
+                
+                # Обновление списка
+                try:
+                    idx = self.all_tabs.index(closed_page)
+                    self.all_tabs[idx] = new_page
+                except ValueError:
+                    self.all_tabs.append(new_page)
+            except Exception as e:
+                self.logger.critical("🚨 Не удалось восстановить пул: %s", e)
+    
+    async def close_all(self) -> None:
+        """Закрытие всех вкладок в пуле."""
+        self._closed = True
+        
+        async with self._lock:
+            for i, page in enumerate(self.all_tabs):
+                try:
+                    if not page.is_closed():
+                        await page.close()
+                except Exception:
+                    pass
+
+================================================================================
+FILE: core\tab_manager.py
+================================================================================
+
+"""Менеджер пула вкладок браузера."""
+
+import asyncio
+import logging
+from contextlib import asynccontextmanager
+from typing import List
+
+from playwright.async_api import BrowserContext, Page
+
+from .config import Config
+
+
+class TabManager:
+    """Менеджер пула вкладок браузера."""
+    
+    def __init__(self, context: BrowserContext, config: Config, logger: logging.Logger):
+        self.context = context
+        self.config = config
+        self.logger = logger
+        self.available_tabs: asyncio.Queue[Page] = asyncio.Queue()
+        self.all_tabs: List[Page] = []
+        self._lock = asyncio.Lock()
+        self._closed = False
+        
+    async def initialize(self):
+        """Инициализация пула вкладок."""
+        self.logger.debug(f"🔧 Инициализация {self.config.MAX_CONCURRENT_TABS} вкладок...")
+        
+        for i in range(self.config.MAX_CONCURRENT_TABS):
+            try:
+                page = await self._create_configured_page()
+                self.all_tabs.append(page)
+                await self.available_tabs.put(page)
+                self.logger.debug(f"✅ Вкладка {i+1}/{self.config.MAX_CONCURRENT_TABS} создана")
+            except Exception as e:
+                self.logger.error(f"❌ Не удалось создать вкладку {i+1}: {e}")
+                # Закрываем уже созданные вкладки
+                await self.close_all()
+                raise
+        
+        self.logger.debug("✅ Пул вкладок инициализирован")
+    
+    async def _create_configured_page(self) -> Page:
+        """
+        Создание настроенной вкладки с блокировкой лишних ресурсов.
+        
+        Returns:
+            Настроенная вкладка
+        """
+        page = await self.context.new_page()
+        
+        # ✅ Оптимизация: блокировка ненужных ресурсов
+        blocked_types = {"image", "stylesheet", "font", "media"}
+        
+        async def route_handler(route):
+            """Асинхронный обработчик маршрутов."""
+            try:
+                if route.request.resource_type in blocked_types:
+                    await route.abort()
+                else:
+                    await route.continue_()
+            except Exception as e:
+                self.logger.debug(f"Ошибка обработки маршрута: {e}")
+                try:
+                    await route.abort()
+                except Exception:
+                    pass
+        
+        await page.route("**/*", route_handler)
+        
+        return page
+    
+    @asynccontextmanager
+    async def get_tab(self):
+        """Получение вкладки с безопасным восстановлением."""
+        if self._closed:
+            raise RuntimeError("TabManager уже закрыт")
+        
+        page = await self.available_tabs.get()
+        
+        # Проверка и восстановление под одним lock'ом
+        if page.is_closed():
+            async with self._lock:
+                # ✅ Double-check под lock'ом
+                if page.is_closed():
+                    self.logger.warning("⚠️ Вкладка закрыта, создаем новую")
+                    try:
+                        new_page = await self._create_configured_page()
+                        
+                        # ✅ Безопасное обновление списка
+                        try:
+                            idx = self.all_tabs.index(page)
+                            self.all_tabs[idx] = new_page
+                        except ValueError:
+                            # Старая вкладка не найдена, добавляем новую
+                            self.all_tabs.append(new_page)
+                        
+                        page = new_page
+                        
+                    except Exception as e:
+                        self.logger.error(f"❌ Не удалось создать вкладку: {e}")
+                        # Возвращаем что-то в пул, чтобы не заблокировать
+                        await self.available_tabs.put(page)
+                        raise
+        
+        try:
+            yield page
+            
+        except Exception as e:
+            self.logger.error(f"❌ Ошибка работы с вкладкой: {e}")
+            
+            # При ошибке восстанавливаем вкладку
+            async with self._lock:
+                try:
+                    if not page.is_closed():
+                        await page.close()
+                except Exception:
+                    pass
+                
+                # Создаем замену
+                try:
+                    page = await self._create_configured_page()
+                    self.logger.info("✅ Вкладка восстановлена после ошибки")
+                except Exception as create_error:
+                    self.logger.critical(f"🚨 Не удалось восстановить вкладку: {create_error}")
+                    try:
+                        page = await self.context.new_page()
+                    except Exception:
+                        raise RuntimeError("Не удалось создать вкладку") from create_error
+            
+            raise
+            
+        finally:
+            # Возвращаем вкладку в пул
+            if not page.is_closed():
+                await self.available_tabs.put(page)
+            else:
+                # ✅ Асинхронное восстановление пула
+                asyncio.create_task(self._restore_pool_tab(page))
+
+    async def _restore_pool_tab(self, closed_page: Page):
+        """Асинхронное восстановление вкладки в пуле."""
+        async with self._lock:
+            try:
+                new_page = await self._create_configured_page()
+                await self.available_tabs.put(new_page)
+                
+                # Обновляем список
+                try:
+                    idx = self.all_tabs.index(closed_page)
+                    self.all_tabs[idx] = new_page
+                except ValueError:
+                    self.all_tabs.append(new_page)
+                    
+            except Exception as e:
+                self.logger.critical(f"🚨 Не удалось восстановить пул вкладок: {e}")
+    
+    async def close_all(self):
+        """Закрытие всех вкладок."""
+        self._closed = True
+        
+        self.logger.debug("🔧 Закрытие всех вкладок...")
+        
+        async with self._lock:
+            for i, page in enumerate(self.all_tabs):
+                try:
+                    if not page.is_closed():
+                        await page.close()
+                        self.logger.debug(f"✅ Вкладка {i+1} закрыта")
+                except Exception as e:
+                    self.logger.debug(f"⚠️ Ошибка закрытия вкладки {i+1}: {e}")
+        
+        self.logger.debug("✅ Все вкладки закрыты")
+
+================================================================================
+FILE: core\web_client.py
+================================================================================
+
+"""Клиент для проверки доступности сервиса."""
+
+import asyncio
+import logging
+from typing import Optional
+
+from playwright.async_api import Page, Response
+
+from .config import Config
+from .api_validator import APIValidator
+
+
+class WebClient:
+    """Клиент для проверки доступности сервиса."""
+    
+    def __init__(self, config: Config, logger: logging.Logger, validator: APIValidator):
+        self.config = config
+        self.logger = logger
+        self.validator = validator
+    
+    async def check_api_health_with_page(self, page: Page) -> bool:
+        """
+        Проверка API с использованием существующей вкладки.
+        
+        Args:
+            page: Вкладка браузера
+            
+        Returns:
+            True если API работает корректно
+        """
+        try:
+            self.logger.info("🔍 Проверка доступности API...")
+            
+            test_number = self.config.TEST_NUMBER
+            response_future: asyncio.Future[Response] = asyncio.Future()
+            
+            def handle_response(response: Response):
+                """Синхронный обработчик ответа."""
+                if self.config.API_ENDPOINT in response.url:
+                    if not response_future.done():
+                        response_future.set_result(response)
+            
+            page.on("response", handle_response)
+            
+            try:
+                # Заполняем поле
+                await page.fill(
+                    'input[placeholder="Тексеру/ тіркеу нөмірі"]', 
+                    test_number
+                )
+                
+                # Кликаем
+                await page.click("button.btn.btn-primary:has-text('Іздеу')")
+                
+                # Ждем Response объект
+                response = await asyncio.wait_for(
+                    response_future,
+                    timeout=self.config.RESPONSE_TIMEOUT
+                )
+                
+                # Парсим JSON вне обработчика
+                response_data = await response.json()
+                
+                if not response_data:
+                    self.logger.error("❌ API не ответил")
+                    return False
+                
+                # Валидация ответа
+                is_valid, error_msg = self.validator.validate_response(
+                    response_data, 
+                    context="Проверка API"
+                )
+                
+                if not is_valid:
+                    self.logger.error(f"❌ API вернул некорректный ответ: {error_msg}")
+                    self.logger.debug(f"   Ответ: {response_data}")
+                    return False
+                
+                self.logger.info("✅ API работает корректно")
+                return True
+                
+            finally:
+                # Удаляем обработчик
+                try:
+                    page.remove_listener("response", handle_response)
+                except Exception:
+                    pass
+                
+        except asyncio.TimeoutError:
+            self.logger.error("❌ Таймаут проверки API")
+            return False
+        except Exception as e:
+            self.logger.error(f"❌ Ошибка проверки API: {e}", exc_info=True)
+            return False
+
+================================================================================
+FILE: qamqor_parser.py
+================================================================================
+
+"""
+QAMQOR Parser - Основной парсер с обходом reCAPTCHA и тестовыми задержками.
+Полная версия с stealth-режимом и визуальной отладкой.
+"""
+
+import asyncio
+import argparse
+import signal
+import sys
+import random
+from types import FrameType
+from typing import Any, Dict, List, Optional, Tuple
+from contextlib import asynccontextmanager, suppress
+from signal import Signals
+from datetime import datetime
+
+from playwright.async_api import async_playwright, Page, Response
+
+from .core import (
+    Config,
+    DatabaseManager,
+    DataProcessor,
+    APIValidator,
+    WebClient,
+    StealthTabManager,
+    LogManager,
+    apply_stealth
+)
+
+class QamqorParser:
+    """Основной парсер QAMQOR с обходом CAPTCHA и тестовыми задержками."""
+    
+    def __init__(self, mode: str = "full") -> None:
+        self.config = Config()
+        self.config.MODE = mode
+        
+        self.log_manager = LogManager(self.config, name="qamqor_parser")
+        self.logger = self.log_manager.logger
+        
+        self.db_manager = DatabaseManager(self.config, self.logger)
+        self.data_processor = DataProcessor(self.config, self.logger)
+        self.api_validator = APIValidator(self.logger)
+        self.web_client = WebClient(self.config, self.logger, self.api_validator)
+        
+        self.data_queue: asyncio.Queue = asyncio.Queue()
+        self.shutdown_event = asyncio.Event()
+        self.active_workers: List[asyncio.Task] = []
+        
+        self.region_stats: Dict = {}
+        
+        signal.signal(signal.SIGINT, self._signal_handler)
+        signal.signal(signal.SIGTERM, self._signal_handler)
+    
+    def _signal_handler(self, signum: Signals, frame: Optional[FrameType]) -> None:
+        """Обработчик сигналов завершения."""
+        self.logger.warning(f"⚠️ Получен сигнал {signum}, завершение работы...")
+        self.shutdown_event.set()
+    
+    async def _graceful_shutdown(self, timeout: float = 30.0):
+        """Корректное завершение работы."""
+        if not self.active_workers:
+            return
+        
+        self.logger.warning(f"⚠️ Graceful shutdown: {len(self.active_workers)} воркеров...")
+        self.shutdown_event.set()
+        
+        try:
+            await asyncio.wait_for(
+                asyncio.gather(*self.active_workers, return_exceptions=True),
+                timeout=timeout
+            )
+            self.logger.info("✅ Все воркеры завершены")
+        except asyncio.TimeoutError:
+            self.logger.warning(f"⚠️ Таймаут {timeout}s, отмена задач...")
+            for task in self.active_workers:
+                if not task.done():
+                    task.cancel()
+            await asyncio.gather(*self.active_workers, return_exceptions=True)
+        finally:
+            self.active_workers.clear()
+    
+    async def run(self) -> bool:
+        """Главная функция запуска парсера."""
+        try:
+            self.logger.info("=" * 80)
+            self.logger.info("🚀 ЗАПУСК ПАРСЕРА QAMQOR | Режим: %s", self.config.MODE.upper())
+            self.logger.info("=" * 80)
+            
+            await self.db_manager.initialize_tables()
+            self.region_stats = await self.db_manager.get_region_stats()
+            
+            if self.config.MODE == "missing_only":
+                self.logger.info("🔍 Режим: ТОЛЬКО ПРОПУЩЕННЫЕ НОМЕРА")
+                await self._run_missing_numbers_search()
+            else:
+                region_state = await self.db_manager.get_region_state()
+                self.logger.info("📡 Режим: ПОЛНЫЙ ПАРСИНГ")
+                await self._run_parsing(region_state)
+                
+                if not self.shutdown_event.is_set():
+                    self.logger.info("")
+                    self.logger.info("=" * 80)
+                    self.logger.info("🔍 ФАЗА 2: ПОИСК ПРОПУЩЕННЫХ НОМЕРОВ")
+                    self.logger.info("=" * 80)
+                    await self._run_missing_numbers_search()
+            
+            await self._print_final_table()
+            
+            self.logger.info("=" * 80)
+            self.logger.info("✅ ПАРСИНГ ЗАВЕРШЕН")
+            self.logger.info("=" * 80)
+            return True
+            
+        except KeyboardInterrupt:
+            self.logger.warning("⚠️ Прервано пользователем")
+            return False
+        except Exception as e:
+            self.logger.error(f"❌ Критическая ошибка: {e}", exc_info=True)
+            return False
+    
+    async def _run_parsing(self, region_state: Dict[int, int]):
+        """Запуск основного процесса парсинга."""
+        async with async_playwright() as playwright:
+            self.logger.info("🔧 Запуск браузера...")
+            browser = await playwright.chromium.launch(
+                headless=True,
+                args=[
+                    "--disable-blink-features=AutomationControlled",
+                    "--disable-dev-shm-usage",
+                    "--no-sandbox",
+                    "--disable-setuid-sandbox",
+                    "--disable-gpu",
+                    "--disable-software-rasterizer",
+                    "--disable-extensions",
+                    "--disable-background-networking",
+                    "--disable-background-timer-throttling",
+                    "--disable-backgrounding-occluded-windows",
+                    "--disable-breakpad",
+                    "--disable-component-extensions-with-background-pages",
+                    "--disable-features=TranslateUI,BlinkGenPropertyTrees",
+                    "--disable-ipc-flooding-protection",
+                    "--disable-renderer-backgrounding",
+                    "--enable-features=NetworkService,NetworkServiceInProcess",
+                    "--force-color-profile=srgb",
+                    "--hide-scrollbars",
+                    "--metrics-recording-only",
+                    "--mute-audio",
+                    "--no-first-run",
+                    "--disable-infobars",
+                    "--window-size=1920,1080"
+                ]
+            )
+            
+            self.logger.info("🔧 Создание контекста...")
+            context = await browser.new_context(
+                viewport={"width": 1920, "height": 1080},
+                user_agent=(
+                    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                    "AppleWebKit/537.36 (KHTML, like Gecko) "
+                    "Chrome/120.0.0.0 Safari/537.36"
+                ),
+                locale="ru-RU,ru",
+                timezone_id="Asia/Almaty",
+                geolocation={"longitude": 76.8512, "latitude": 43.2220},
+                permissions=["geolocation"],
+                color_scheme="light",
+                device_scale_factor=1,
+                has_touch=False,
+                is_mobile=False,
+                extra_http_headers={
+                    "Accept-Language": "ru-RU,ru;q=0.9,en-US;q=0.8,en;q=0.7",
+                    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,image/apng,*/*;q=0.8",
+                    "Accept-Encoding": "gzip, deflate, br",
+                    "DNT": "1",
+                    "Connection": "keep-alive",
+                    "Upgrade-Insecure-Requests": "1",
+                    "Sec-Fetch-Dest": "document",
+                    "Sec-Fetch-Mode": "navigate",
+                    "Sec-Fetch-Site": "none",
+                    "Sec-Fetch-User": "?1"
+                }
+            )
+            
+            # Health check
+            self.logger.info("🏥 Запуск Health Check...")
+            health_check_page = await context.new_page()
+            
+            # Применяем stealth
+            await apply_stealth(health_check_page)
+            
+            # Блокировка ресурсов
+            async def health_route_handler(route):
+                if route.request.resource_type in ["image", "stylesheet", "font", "media"]:
+                    await route.abort()
+                else:
+                    await route.continue_()
+            
+            await health_check_page.route("**/*", health_route_handler)
+            
+            try:
+                self.logger.info(f"🌐 Загрузка страницы: {self.config.SEARCH_URL}")
+                
+                await health_check_page.goto(
+                    self.config.SEARCH_URL,
+                    timeout=self.config.PAGE_TIMEOUT,
+                    wait_until="domcontentloaded"
+                )
+                
+                # Ждем загрузку поля ввода
+                await health_check_page.wait_for_selector(
+                    'input[placeholder="Тексеру/ тіркеу нөмірі"]',
+                    state="visible",
+                    timeout=10000
+                )
+                
+                self.logger.info("✅ Страница загружена")
+                
+                # Проверка API
+                if not await self.web_client.check_api_health_with_page(health_check_page):
+                    self.logger.error("❌ API недоступен")
+                    return
+                
+                self.logger.info("✅ Health Check пройден успешно")
+                    
+            except Exception as e:
+                self.logger.error(f"❌ Ошибка в health check: {e}", exc_info=True)
+                return
+                
+            finally:
+                await health_check_page.close()
+            
+            # Инициализация TabManager
+            self.logger.info("🔧 Инициализация TabManager...")
+            tab_manager = StealthTabManager(context, self.config, self.logger)
+            await tab_manager.initialize()
+            
+            # Запуск обработчика данных
+            data_handler_task = asyncio.create_task(
+                self._data_handler(),
+                name="data_handler"
+            )
+            
+            # Заполнение очереди регионов
+            region_queue: asyncio.Queue = asyncio.Queue()
+            for region_code, start_pos in region_state.items():
+                region_name = self.config.REGIONS[region_code]
+                await region_queue.put((region_code, region_name, start_pos))
+            
+            self.logger.info("📋 В очереди %d регионов", len(self.config.REGIONS))
+            
+            # Запуск воркеров
+            self.active_workers = [
+                asyncio.create_task(
+                    self._region_worker(worker_id, region_queue, tab_manager),
+                    name=f"region_worker_{worker_id}"
+                )
+                for worker_id in range(self.config.MAX_CONCURRENT_TABS)
+            ]
+            
+            self.logger.info("👷 Запущено %d воркеров", len(self.active_workers))
+            
+            try:
+                await asyncio.gather(*self.active_workers, return_exceptions=True)
+                
+                if self.shutdown_event.is_set():
+                    await self._graceful_shutdown(timeout=30.0)
+            
+            except KeyboardInterrupt:
+                self.logger.warning("⚠️ KeyboardInterrupt - graceful shutdown...")
+                await self._graceful_shutdown(timeout=30.0)
+            
+            finally:
+                # Завершение обработчика данных
+                try:
+                    self.logger.info("🛑 Остановка обработчика данных...")
+                    await self.data_queue.put(None)
+                    await asyncio.wait_for(data_handler_task, timeout=15.0)
+                    self.logger.info("✅ Data handler завершен")
+                except asyncio.TimeoutError:
+                    self.logger.warning("⚠️ Таймаут data_handler (15s)")
+                    data_handler_task.cancel()
+                    try:
+                        await data_handler_task
+                    except asyncio.CancelledError:
+                        pass
+                
+                # Закрытие ресурсов
+                await tab_manager.close_all()
+                await browser.close()
+                self.logger.info("🔒 Браузер закрыт")
+    
+    async def _run_missing_numbers_search(self):
+        """Поиск и обработка пропущенных номеров."""
+        missing_numbers = await self.db_manager.find_missing_numbers()
+        
+        if not missing_numbers:
+            self.logger.info("✅ Пропущенных номеров не найдено")
+            return
+        
+        total_missing = sum(len(nums) for nums in missing_numbers.values())
+        self.logger.info("📋 Найдено пропущенных номеров: %d", total_missing)
+        
+        async with async_playwright() as playwright:
+            browser = await playwright.chromium.launch(
+                headless=True,
+                args=["--disable-dev-shm-usage", "--no-sandbox", "--disable-gpu"]
+            )
+            
+            context = await browser.new_context(
+                viewport={"width": 1920, "height": 1080},
+                user_agent="Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36"
+            )
+            
+            tab_manager = StealthTabManager(context, self.config, self.logger)
+            await tab_manager.initialize()
+            
+            data_handler_task = asyncio.create_task(
+                self._data_handler(),
+                name="missing_data_handler"
+            )
+            
+            missing_queue: asyncio.Queue = asyncio.Queue()
+            for region_code, numbers in missing_numbers.items():
+                region_name = self.config.REGIONS[region_code]
+                await missing_queue.put((region_code, region_name, numbers))
+            
+            self.active_workers = [
+                asyncio.create_task(
+                    self._missing_numbers_worker(worker_id, missing_queue, tab_manager),
+                    name=f"missing_worker_{worker_id}"
+                )
+                for worker_id in range(self.config.MAX_CONCURRENT_TABS)
+            ]
+            
+            try:
+                await asyncio.gather(*self.active_workers, return_exceptions=True)
+            finally:
+                try:
+                    await self.data_queue.put(None)
+                    await asyncio.wait_for(data_handler_task, timeout=15.0)
+                except asyncio.TimeoutError:
+                    data_handler_task.cancel()
+                
+                await tab_manager.close_all()
+                await browser.close()
+    
+    async def _region_worker(
+        self,
+        worker_id: int,
+        region_queue: asyncio.Queue[Tuple[int, str, int]],
+        tab_manager: StealthTabManager
+    ) -> None:
+        """Воркер для обработки региона."""
+        self.logger.debug(f"✅ W{worker_id} запущен")
+        
+        while not self.shutdown_event.is_set():
+            try:
+                try:
+                    region_data = await asyncio.wait_for(
+                        region_queue.get(),
+                        timeout=1.0
+                    )
+                except asyncio.TimeoutError:
+                    if region_queue.empty():
+                        self.logger.debug(f"✅ W{worker_id} завершен (очередь пуста)")
+                        break
+                    continue
+                
+                region_code, region_name, start_pos = region_data
+                
+            except asyncio.CancelledError:
+                self.logger.debug(f"🛑 W{worker_id} отменен")
+                break
+            except Exception as e:
+                self.logger.error(f"❌ W{worker_id} критическая ошибка: {e}")
+                break
+            
+            if self.shutdown_event.is_set():
+                self.logger.warning(f"⚠️ W{worker_id} | {region_name} пропущен (shutdown)")
+                region_queue.task_done()
+                continue
+            
+            success = False
+            for attempt in range(1, self.config.REGION_RETRY_LIMIT + 1):
+                try:
+                    async with tab_manager.get_tab() as page:
+                        await self._parse_region(
+                            page, region_code, region_name, start_pos, worker_id
+                        )
+                    
+                    success = True
+                    break
+                    
+                except Exception as e:
+                    if self.shutdown_event.is_set():
+                        self.logger.error(f"❌ W{worker_id} | {region_name} остановлен")
+                        break
+                    
+                    if attempt < self.config.REGION_RETRY_LIMIT:
+                        delay = self.config.RETRY_DELAY * attempt
+                        self.logger.warning(
+                            f"⚠️ W{worker_id} | {region_name} "
+                            f"попытка {attempt}/{self.config.REGION_RETRY_LIMIT}, "
+                            f"повтор через {delay}s: {e}"
+                        )
+                        await asyncio.sleep(delay)
+                    else:
+                        self.logger.error(f"❌ W{worker_id} | {region_name} ОШИБКА")
+            
+            region_queue.task_done()
+            
+            if not success:
+                self.logger.warning(f"⚠️ {region_name} не обработан полностью")
+        
+        self.logger.debug(f"✅ W{worker_id} завершен")
+    
+    async def _missing_numbers_worker(
+        self,
+        worker_id: int,
+        missing_queue: asyncio.Queue[Tuple[int, str, List[int]]],
+        tab_manager: StealthTabManager
+    ) -> None:
+        """Воркер для обработки пропущенных номеров."""
+        self.logger.debug(f"✅ MW{worker_id} запущен (missing)")
+        
+        while not self.shutdown_event.is_set():
+            try:
+                try:
+                    region_data = await asyncio.wait_for(
+                        missing_queue.get(),
+                        timeout=1.0
+                    )
+                except asyncio.TimeoutError:
+                    if missing_queue.empty():
+                        break
+                    continue
+                
+                region_code, region_name, numbers = region_data
+                    
+            except asyncio.CancelledError:
+                self.logger.debug(f"🛑 MW{worker_id} отменен")
+                break
+            
+            if self.shutdown_event.is_set():
+                self.logger.warning(f"⚠️ MW{worker_id} | {region_name} (missing) пропущен")
+                missing_queue.task_done()
+                continue
+            
+            for attempt in range(1, self.config.REGION_RETRY_LIMIT + 1):
+                try:
+                    async with tab_manager.get_tab() as page:
+                        await self._process_missing_numbers(
+                            page, region_code, region_name, numbers, worker_id
+                        )
+                    break
+                    
+                except Exception as e:
+                    if self.shutdown_event.is_set():
+                        break
+                    
+                    if attempt < self.config.REGION_RETRY_LIMIT:
+                        delay = self.config.RETRY_DELAY * attempt
+                        self.logger.warning(f"⚠️ MW{worker_id} | {region_name} retry {attempt}")
+                        await asyncio.sleep(delay)
+            
+            missing_queue.task_done()
+        
+        self.logger.debug(f"✅ MW{worker_id} завершен (missing)")
+    
+    async def _parse_region(
+        self,
+        page: Page,
+        region_code: int,
+        region_name: str,
+        start_position: int,
+        worker_id: int
+    ):
+        """Парсинг региона с правильным ожиданием загрузки."""
+        await page.goto(
+            self.config.SEARCH_URL,
+            timeout=self.config.PAGE_TIMEOUT,
+            wait_until="domcontentloaded"
+        )
+        
+        await page.wait_for_selector(
+            'input[placeholder="Тексеру/ тіркеу нөмірі"]',
+            state="visible",
+            timeout=10000
+        )
+        
+        # Случайная задержка для естественности
+        await asyncio.sleep(
+            random.uniform(self.config.NATURAL_DELAY_MIN, self.config.NATURAL_DELAY_MAX)
+        )
+        
+        current_position = start_position
+        empty_count = 0
+        found_count = 0
+        
+        input_selector = 'input[placeholder="Тексеру/ тіркеу нөмірі"]'
+        button_selector = "button.btn.btn-primary:has-text('Іздеу')"
+        
+        while current_position <= self.config.MAX_NUMBER and not self.shutdown_event.is_set():
+            found_in_position = False
+            
+            for check_type in [1, 2]:
+                if self.shutdown_event.is_set():
+                    break
+                
+                reg_num = f"25{region_code}170101{check_type}/{current_position:05d}"
+                
+                try:
+                    result = await self._try_number_safe(
+                        page, reg_num, worker_id, input_selector, button_selector
+                    )
+                    
+                    if result:
+                        await self.data_queue.put({
+                            'data': result,
+                            'region_code': region_code
+                        })
+                        found_in_position = True
+                        found_count += 1
+                        empty_count = 0
+                        break
+                except Exception:
+                    pass
+            
+            if not found_in_position:
+                empty_count += 1
+                if empty_count >= self.config.MAX_EMPTY_SEQUENCE:
+                    break
+            
+            current_position += 1
+        
+        if region_code in self.region_stats:
+            self.region_stats[region_code]['found_new'] += found_count
+        
+        self.log_manager.increment_metric('regions_completed')
+        self.logger.info("✅ %s завершен (найдено: %d)", region_name, found_count)
+    
+    async def _process_missing_numbers(
+        self,
+        page: Page,
+        region_code: int,
+        region_name: str,
+        numbers: List[int],
+        worker_id: int
+    ):
+        """Обработка списка пропущенных номеров."""
+        await page.goto(
+            self.config.SEARCH_URL,
+            timeout=self.config.PAGE_TIMEOUT,
+            wait_until="domcontentloaded"
+        )
+        
+        await page.wait_for_selector(
+            'input[placeholder="Тексеру/ тіркеу нөмірі"]',
+            state="visible",
+            timeout=10000
+        )
+        
+        found_count = 0
+        
+        for number in numbers:
+            if self.shutdown_event.is_set():
+                break
+            
+            for check_type in [1, 2]:
+                reg_num = f"25{region_code}170101{check_type}/{number:05d}"
+                
+                try:
+                    result = await self._try_number_safe(
+                        page,
+                        reg_num,
+                        worker_id,
+                        'input[placeholder="Тексеру/ тіркеу нөмірі"]',
+                        "button.btn.btn-primary:has-text('Іздеу')"
+                    )
+                    
+                    if result:
+                        await self.data_queue.put({
+                            'data': result,
+                            'region_code': region_code
+                        })
+                        found_count += 1
+                        break
+                        
+                except Exception:
+                    pass
+        
+        if region_code in self.region_stats:
+            self.region_stats[region_code]['found_new'] += found_count
+        
+        self.logger.info(
+            "✅ %s: пропущенные (%d/%d)", 
+            region_name, 
+            found_count, 
+            len(numbers)
+        )
+    
+    async def _try_number_safe(
+        self,
+        page: Page,
+        registration_number: str,
+        worker_id: int,
+        input_selector: str,
+        button_selector: str
+    ) -> Optional[Dict]:
+        """Безопасная проверка номера БЕЗ race conditions."""
+        self.log_manager.increment_metric('api_requests')
+        
+        for attempt in range(1, self.config.MAX_RETRIES + 1):
+            try:
+                if self.shutdown_event.is_set():
+                    return None
+                
+                await page.wait_for_selector(input_selector, state="visible", timeout=5000)
+                
+                # Случайная задержка для имитации человека
+                await asyncio.sleep(
+                    random.uniform(self.config.NATURAL_DELAY_MIN, self.config.NATURAL_DELAY_MAX)
+                )
+
+                await page.fill(input_selector, '')
+                await page.fill(input_selector, registration_number)
+
+                await asyncio.sleep(
+                    random.uniform(self.config.TYPING_DELAY_MIN, self.config.TYPING_DELAY_MAX)
+                )
+                
+                async with self._response_listener(page) as wait_response:
+                    await page.click(button_selector)
+                    response_data = await wait_response()
+                
+                if not response_data:
+                    if attempt < self.config.MAX_RETRIES:
+                        await asyncio.sleep(self.config.RETRY_DELAY)
+                        continue
+                    return None
+                
+                is_valid, error_msg = self.api_validator.validate_response(
+                    response_data,
+                    context=f"W{worker_id}:{registration_number}"
+                )
+                
+                if not is_valid:
+                    if self.api_validator.is_critical_error(response_data):
+                        self.logger.critical(f"🚨 КРИТИЧЕСКАЯ ОШИБКА API: {error_msg}")
+                        self.shutdown_event.set()
+                        return None
+                    if attempt < self.config.MAX_RETRIES:
+                        await asyncio.sleep(self.config.RETRY_DELAY)
+                        continue
+                    return None
+                
+                total_elements = response_data.get("data", {}).get("totalElements", 0)
+                if total_elements == 0:
+                    return None
+                
+                processed_data = self.data_processor.process_api_response(response_data)
+                if processed_data:
+                    self.log_manager.increment_metric('records_processed')
+                
+                return processed_data
+                
+            except asyncio.TimeoutError:
+                if attempt < self.config.MAX_RETRIES:
+                    await asyncio.sleep(self.config.RETRY_DELAY * attempt)
+                else:
+                    self.log_manager.increment_metric('api_errors')
+                    return None
+            except Exception as e:
+                if self.shutdown_event.is_set():
+                    return None
+                if attempt < self.config.MAX_RETRIES:
+                    await asyncio.sleep(self.config.RETRY_DELAY * attempt)
+                else:
+                    self.log_manager.increment_metric('api_errors')
+                    return None
+        
+        return None
+    
+    @asynccontextmanager
+    async def _response_listener(self, page: Page):
+        """Контекстный менеджер для безопасной работы с обработчиками."""
+        response_future: asyncio.Future[Dict] = asyncio.Future()
+        
+        async def handle_response(response: Response):
+            try:
+                if self.config.API_ENDPOINT in response.url and not response_future.done():
+                    json_data = await response.json()
+                    response_future.set_result(json_data)
+            except Exception as e:
+                if not response_future.done():
+                    response_future.set_exception(e)
+        
+        page.on("response", handle_response)
+        
+        async def wait_response():
+            try:
+                return await asyncio.wait_for(
+                    response_future,
+                    timeout=self.config.RESPONSE_TIMEOUT
+                )
+            except:
+                return None
+        
+        try:
+            yield wait_response
+        finally:
+            with suppress(Exception):
+                page.remove_listener("response", handle_response)
+    
+    async def _data_handler(self) -> None:
+        """Обработчик очереди данных с периодическим сохранением."""
+        batch = []
+        last_save_time = asyncio.get_event_loop().time()
+        save_interval = 5.0
+        total_saved = 0
+        
+        self.logger.info(f"💾 Data handler запущен (батч={self.config.BATCH_SIZE})")
+        
+        while True:
+            try:
+                current_time = asyncio.get_event_loop().time()
+                timeout = max(0.5, save_interval - (current_time - last_save_time))
+                
+                item = await asyncio.wait_for(self.data_queue.get(), timeout=timeout)
+                
+                if item is None:
+                    self.logger.info("🛑 Сигнал завершения data handler")
+                    break
+                
+                batch.append(item['data'])
+                
+                current_time = asyncio.get_event_loop().time()
+                should_save = (
+                    len(batch) >= self.config.BATCH_SIZE or
+                    (current_time - last_save_time) >= save_interval
+                )
+                
+                if should_save and batch:
+                    try:
+                        tax, customs = await self.db_manager.bulk_insert_data(batch, silent=True)
+                        total_inserted = tax + customs
+                        total_saved += total_inserted
+                        
+                        self.log_manager.increment_metric('db_inserts', total_inserted)
+                        
+                        if total_inserted > 0:
+                            self.logger.info("💾 Сохранено: TAX=%d, CUSTOMS=%d, всего=%d", tax, customs, total_saved)
+                    except Exception as e:
+                        self.logger.error(f"❌ Ошибка сохранения: {e}")
+                    
+                    batch.clear()
+                    last_save_time = asyncio.get_event_loop().time()
+                
+            except asyncio.TimeoutError:
+                if batch:
+                    try:
+                        tax, customs = await self.db_manager.bulk_insert_data(batch, silent=True)
+                        total_saved += (tax + customs)
+                        self.log_manager.increment_metric('db_inserts', tax + customs)
+                        if tax + customs > 0:
+                            self.logger.info(f"💾 Периодическое сохранение: TAX={tax}, CUSTOMS={customs}")
+                    except Exception as e:
+                        self.logger.error(f"❌ Ошибка сохранения: {e}")
+                    batch.clear()
+                    last_save_time = asyncio.get_event_loop().time()
+            
+            except Exception as e:
+                self.logger.error(f"❌ Ошибка data handler: {e}", exc_info=True)
+                if batch:
+                    try:
+                        tax, customs = await self.db_manager.bulk_insert_data(batch, silent=False)
+                        self.logger.info(f"💾 Аварийное сохранение: {len(batch)} записей")
+                    except Exception:
+                        self.logger.critical(f"🚨 ПОТЕРЯ ДАННЫХ: {len(batch)} записей")
+                    batch.clear()
+        
+        # Финальное сохранение
+        if batch:
+            try:
+                tax, customs = await self.db_manager.bulk_insert_data(batch, silent=False)
+                total_saved += (tax + customs)
+                self.logger.info(f"💾 Финальное сохранение: TAX={tax}, CUSTOMS={customs}")
+            except Exception as e:
+                self.logger.critical(f"🚨 ПОТЕРЯ ДАННЫХ: {len(batch)} записей: {e}")
+        
+        self.logger.info(f"✅ Data handler завершен. Всего: {total_saved} записей")
+    
+    async def _print_final_table(self) -> None:
+        """Вывод красивой итоговой таблицы."""
+        self.logger.info("")
+        self.logger.info("=" * 120)
+        self.logger.info("📊 СВОДНАЯ ТАБЛИЦА ПО РЕГИОНАМ")
+        self.logger.info("=" * 120)
+        
+        header = f"{'Регион':<20} | {'Записей':>10} | {'След. номер':>12} | {'Пропущено':>11} | {'Найдено':>10}"
+        self.logger.info(header)
+        self.logger.info("-" * 120)
+        
+        total_records = total_missing = total_found = 0
+        
+        for region_code in sorted(self.config.REGIONS.keys()):
+            region_name = self.config.REGIONS[region_code]
+            stats = self.region_stats.get(region_code, {
+                'total_records': 0,
+                'next_number': 1,
+                'missing_count': 0,
+                'found_new': 0
+            })
+            
+            row = (
+                f"{region_name:<20} | {stats['total_records']:>10} | "
+                f"{stats['next_number']:>12} | {stats['missing_count']:>11} | "
+                f"{stats['found_new']:>10}"
+            )
+            self.logger.info(row)
+            
+            total_records += stats['total_records']
+            total_missing += stats['missing_count']
+            total_found += stats['found_new']
+        
+        self.logger.info("=" * 120)
+        summary = f"{'ИТОГО':<20} | {total_records:>10} | {'-':>12} | {total_missing:>11} | {total_found:>10}"
+        self.logger.info(summary)
+        self.logger.info("=" * 120)
+        
+        metrics = self.log_manager.get_metrics_summary()
+        self.logger.info("")
+        self.logger.info("📈 МЕТРИКИ:")
+        self.logger.info(f"   └─ Время: {metrics['elapsed_seconds']}s")
+        self.logger.info(f"   └─ API запросов: {metrics['api_requests']}")
+        self.logger.info(f"   └─ Обработано: {metrics['records_processed']}")
+        self.logger.info(f"   └─ Скорость: {metrics['records_per_second']} зап/с")
+
+def parse_arguments():
+    """Парсинг аргументов командной строки."""
+    parser = argparse.ArgumentParser(description='Парсер QAMQOR')
+    parser.add_argument('--missing-only', action='store_true', help='Только пропущенные')
+    return parser.parse_args()
+
+
+async def main():
+    """Точка входа."""
+    args = parse_arguments()
+    mode = "missing_only" if args.missing_only else "full"
+    parser = QamqorParser(mode=mode)
+    success = await parser.run()
+    sys.exit(0 if success else 1)
+
+
+if __name__ == "__main__":
+    try:
+        asyncio.run(main())
+    except KeyboardInterrupt:
+        print("\n⚠️ Прервано пользователем")
+        sys.exit(1)
+
+================================================================================
+FILE: qamqor_updater.py
+================================================================================
+
+"""
+QAMQOR Updater - Апдейтер существующих записей.
+Синхронизирован с основным парсером.
+"""
+
+import asyncio
+import argparse
+import signal
+import sys
+import random
+from datetime import datetime, timedelta
+from types import FrameType
+from typing import Any, Dict, List, Optional
+from contextlib import asynccontextmanager, suppress
+from signal import Signals
+
+from playwright.async_api import async_playwright, Page, Response
+
+from .core import (
+    Config,
+    DatabaseManager,
+    DataProcessor,
+    APIValidator,
+    WebClient,
+    StealthTabManager,
+    LogManager,
+    apply_stealth
+)
+
+class QamqorUpdater:
+    """Апдейтер с синхронизацией парсера."""
+    
+    def __init__(
+        self, 
+        force: bool = False, 
+        statuses: Optional[List[str]] = None,
+        single_number: Optional[str] = None  # ✅ Новый параметр
+    ) -> None:
+        self.config = Config()
+        self.log_manager = LogManager(self.config, name="qamqor_updater")
+        self.logger = self.log_manager.logger
+        
+        self.db_manager = DatabaseManager(self.config, self.logger)
+        self.data_processor = DataProcessor(self.config, self.logger)
+        self.api_validator = APIValidator(self.logger)
+        self.web_client = WebClient(self.config, self.logger, self.api_validator)
+        
+        self.force = force
+        self.statuses = statuses or self.config.UPDATE_STATUSES
+        self.single_number = single_number  # ✅ Сохраняем номер
+        
+        # ... остальное без изменений
+        
+        self.update_queue: asyncio.Queue = asyncio.Queue()
+        self.data_queue: asyncio.Queue = asyncio.Queue()
+        self.shutdown_event = asyncio.Event()
+        self.active_workers: List[asyncio.Task] = []
+        
+        self.stats = {
+            'total_to_update': 0,
+            'processed': 0,
+            'updated': 0,
+            'unchanged': 0,
+            'not_found': 0,
+            'errors': 0
+        }
+        
+        signal.signal(signal.SIGINT, self._signal_handler)
+        signal.signal(signal.SIGTERM, self._signal_handler)
+    
+    def _signal_handler(self, signum: Signals, frame: Optional[FrameType]) -> None:
+        self.logger.warning(f"⚠️ Получен сигнал {signum}")
+        self.shutdown_event.set()
+    
+    async def _graceful_shutdown(self, timeout: float = 30.0):
+        """Корректное завершение."""
+        if not self.active_workers:
+            return
+        
+        self.logger.warning(f"⚠️ Graceful shutdown: {len(self.active_workers)} воркеров...")
+        self.shutdown_event.set()
+        
+        try:
+            await asyncio.wait_for(
+                asyncio.gather(*self.active_workers, return_exceptions=True),
+                timeout=timeout
+            )
+            self.logger.info("✅ Все воркеры завершены")
+        except asyncio.TimeoutError:
+            self.logger.warning(f"⚠️ Таймаут {timeout}s, отмена задач...")
+            for task in self.active_workers:
+                if not task.done():
+                    task.cancel()
+            await asyncio.gather(*self.active_workers, return_exceptions=True)
+        finally:
+            self.active_workers.clear()
+    
+    async def run(self) -> bool:
+        """Главная функция."""
+        try:
+            self.logger.info("=" * 80)
+            self.logger.info("🔄 ЗАПУСК АПДЕЙТЕРА QAMQOR")
+            self.logger.info("=" * 80)
+            
+            await self.db_manager.initialize_tables()
+            
+            # Если указан конкретный номер
+            if self.single_number:
+                self.logger.info("🎯 Режим: ОБНОВЛЕНИЕ ОДНОГО НОМЕРА")
+                self.logger.info(f"   Номер: {self.single_number}")
+                
+                try:
+                    check_type = self.single_number[15]
+                    
+                    if check_type == '1':
+                        records = {'tax': [self.single_number], 'customs': []}
+                        self.logger.info("   Тип: 📊 Налоговая проверка (TAX)")
+                    elif check_type == '2':
+                        records = {'tax': [], 'customs': [self.single_number]}
+                        self.logger.info("   Тип: 🚢 Таможенная проверка (CUSTOMS)")
+                    else:
+                        self.logger.error(f"❌ Неверный тип проверки: '{check_type}'")
+                        return False
+                        
+                except (IndexError, ValueError) as e:
+                    self.logger.error(f"❌ Неверный формат номера: {e}")
+                    return False
+                
+                total = 1
+                self.stats['total_to_update'] = total
+            else:
+                # Массовое обновление
+                self.logger.info("📊 Критерии отбора:")
+                self.logger.info(f"   ├─ Статусы: {self.statuses}")
+                self.logger.info(f"   ├─ Минимальный возраст: {self.config.UPDATE_MIN_AGE_DAYS} дней")
+                self.logger.info(f"   ├─ Максимальный возраст: {self.config.UPDATE_MAX_AGE_DAYS} дней")  # ⬅️ НОВОЕ
+                self.logger.info(f"   ├─ Cooldown: {self.config.UPDATE_COOLDOWN_DAYS} дней")
+                self.logger.info(f"   └─ Принудительно: {'Да' if self.force else 'Нет'}")
+                
+                records = await self.db_manager.get_records_to_update(
+                    statuses=self.statuses,
+                    force=self.force
+                    # ⬅️ max_age_days передается автоматически через Config
+                )
+                
+                total = len(records['tax']) + len(records['customs'])
+                self.stats['total_to_update'] = total
+                
+                if total > 0:
+                    self.logger.info("")
+                    self.logger.info("📋 Найдено записей:")
+                    self.logger.info(f"   ├─ TAX: {len(records['tax'])}")
+                    self.logger.info(f"   ├─ CUSTOMS: {len(records['customs'])}")
+                    self.logger.info(f"   └─ ВСЕГО: {total}")
+            
+            if total == 0:
+                self.logger.info("✅ Нет записей для обновления")
+                return True
+            
+            self.logger.info("")
+            await self._run_update_process(records)
+            await self._print_update_summary()
+            
+            self.logger.info("=" * 80)
+            self.logger.info("✅ ОБНОВЛЕНИЕ ЗАВЕРШЕНО")
+            self.logger.info("=" * 80)
+            return True
+            
+        except KeyboardInterrupt:
+            self.logger.warning("⚠️ Прервано пользователем")
+            return False
+        except Exception as e:
+            self.logger.error(f"❌ Критическая ошибка: {e}", exc_info=True)
+            return False
+    
+    async def _run_update_process(self, records: Dict[str, List[str]]):
+        """Процесс обновления."""
+        all_numbers = records['tax'] + records['customs']
+        
+        # ✅ ВАЖНО: Проверяем, что есть номера для обработки
+        if not all_numbers:
+            self.logger.warning("⚠️ Нет номеров для обработки")
+            return
+        
+        async with async_playwright() as playwright:
+            self.logger.info("🔧 Запуск браузера...")
+            browser = await playwright.chromium.launch(
+                headless=True,
+                args=[
+                    "--disable-blink-features=AutomationControlled",
+                    "--disable-dev-shm-usage",
+                    "--no-sandbox",
+                    "--disable-gpu",
+                    "--disable-software-rasterizer"
+                ]
+            )
+            
+            context = await browser.new_context(
+                viewport={"width": 1920, "height": 1080},
+                user_agent=(
+                    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                    "AppleWebKit/537.36 (KHTML, like Gecko) "
+                    "Chrome/120.0.0.0 Safari/537.36"
+                ),
+                locale="ru-RU,ru",
+                timezone_id="Asia/Almaty",
+                extra_http_headers={
+                    "Accept-Language": "ru-RU,ru;q=0.9,en-US;q=0.8,en;q=0.7",
+                    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8"
+                }
+            )
+            
+            # Health check
+            self.logger.info("🏥 Health Check...")
+            health_page = await context.new_page()
+            
+            await apply_stealth(health_page)
+            
+            try:
+                await health_page.goto(
+                    self.config.SEARCH_URL,
+                    wait_until="domcontentloaded",
+                    timeout=self.config.PAGE_TIMEOUT
+                )
+                
+                await health_page.wait_for_selector(
+                    'input[placeholder="Тексеру/ тіркеу нөмірі"]',
+                    state="visible",
+                    timeout=10000
+                )
+                
+                if not await self.web_client.check_api_health_with_page(health_page):
+                    self.logger.error("❌ API недоступен")
+                    return
+                
+                self.logger.info("✅ Health Check пройден")
+                
+            finally:
+                await health_page.close()
+            
+            # Инициализация TabManager со stealth
+            tab_manager = StealthTabManager(context, self.config, self.logger)
+            await tab_manager.initialize()
+            
+            # Запуск data handler
+            data_handler_task = asyncio.create_task(
+                self._update_data_handler(),
+                name="update_data_handler"
+            )
+            
+            # ✅ КРИТИЧНО: Заполняем очередь номерами ДО запуска воркеров
+            self.logger.info(f"📋 Добавление {len(all_numbers)} номеров в очередь...")
+            for reg_num in all_numbers:
+                await self.update_queue.put(reg_num)
+            self.logger.info(f"✅ Очередь заполнена: {self.update_queue.qsize()} номеров")
+            
+            # Запуск воркеров
+            self.active_workers = [
+                asyncio.create_task(
+                    self._update_worker(worker_id, tab_manager),
+                    name=f"update_worker_{worker_id}"
+                )
+                for worker_id in range(self.config.MAX_CONCURRENT_TABS)
+            ]
+            
+            self.logger.info("👷 Запущено %d воркеров", len(self.active_workers))
+            
+            try:
+                await asyncio.gather(*self.active_workers, return_exceptions=True)
+                
+                if self.shutdown_event.is_set():
+                    await self._graceful_shutdown(timeout=30.0)
+                    
+            except KeyboardInterrupt:
+                await self._graceful_shutdown(timeout=30.0)
+                
+            finally:
+                try:
+                    self.logger.info("🛑 Остановка data handler...")
+                    await self.data_queue.put(None)
+                    await asyncio.wait_for(data_handler_task, timeout=15.0)
+                    self.logger.info("✅ Data handler завершен")
+                except asyncio.TimeoutError:
+                    self.logger.warning("⚠️ Таймаут data_handler (15s)")
+                    data_handler_task.cancel()
+                    try:
+                        await data_handler_task
+                    except asyncio.CancelledError:
+                        pass
+                
+                await tab_manager.close_all()
+                await browser.close()
+                self.logger.info("🔒 Браузер закрыт")
+    
+    async def _update_worker(
+        self, 
+        worker_id: int, 
+        tab_manager: StealthTabManager
+    ) -> None:
+        """Воркер обновления."""
+        self.logger.debug(f"✅ UW{worker_id} запущен")
+        
+        async with tab_manager.get_tab() as page:
+            await page.goto(
+                self.config.SEARCH_URL,
+                wait_until="domcontentloaded",
+                timeout=self.config.PAGE_TIMEOUT
+            )
+            
+            await page.wait_for_selector(
+                'input[placeholder="Тексеру/ тіркеу нөмірі"]',
+                state="visible",
+                timeout=10000
+            )
+            
+            # ✅ ДИАГНОСТИКА
+            self.logger.info(f"🔍 UW{worker_id}: Очередь содержит {self.update_queue.qsize()} номеров")
+            
+            while not self.shutdown_event.is_set():
+                try:
+                    reg_num = await asyncio.wait_for(
+                        self.update_queue.get(),
+                        timeout=1.0
+                    )
+                    
+                    # ✅ ДИАГНОСТИКА
+                    self.logger.info(f"🔍 UW{worker_id}: Получен номер {reg_num}")
+                    
+                except asyncio.TimeoutError:
+                    if self.update_queue.empty():
+                        self.logger.debug(f"✅ UW{worker_id}: Очередь пуста, завершение")
+                        break
+                    continue
+                except asyncio.CancelledError:
+                    break
+                
+                try:
+                    # ✅ ДИАГНОСТИКА
+                    self.logger.info(f"🔍 UW{worker_id}: Начало обработки {reg_num}")
+                    
+                    result = await self._fetch_record_data(page, reg_num, worker_id)
+                    if result:
+                        await self.data_queue.put({'type': 'data', 'data': result})
+                        self.stats['processed'] += 1
+                        self.logger.info(f"✅ UW{worker_id}: {reg_num} обработан")
+                    else:
+                        self.stats['not_found'] += 1
+                        self.logger.warning(f"⚠️ UW{worker_id}: {reg_num} не найден")
+                except Exception as e:
+                    self.stats['errors'] += 1
+                    self.logger.error("❌ UW%d | %s: %s", worker_id, reg_num, e, exc_info=True)
+                finally:
+                    self.update_queue.task_done()
+        
+        self.logger.debug(f"✅ UW{worker_id} завершен")
+    
+    async def _fetch_record_data(
+        self,
+        page: Page,
+        registration_number: str,
+        worker_id: int
+    ) -> Optional[Dict]:
+        """Получение данных записи."""
+        self.log_manager.increment_metric('api_requests')
+        
+        for attempt in range(1, self.config.MAX_RETRIES + 1):
+            try:
+                if self.shutdown_event.is_set():
+                    return None
+                
+                await page.wait_for_selector(
+                    'input[placeholder="Тексеру/ тіркеу нөмірі"]',
+                    state="visible",
+                    timeout=5000
+                )
+                
+                # Случайная задержка для имитации человека
+                await asyncio.sleep(
+                    random.uniform(self.config.NATURAL_DELAY_MIN, self.config.NATURAL_DELAY_MAX)
+                )
+
+                await page.fill('input[placeholder="Тексеру/ тіркеу нөмірі"]', '')
+                await page.fill('input[placeholder="Тексеру/ тіркеу нөмірі"]', registration_number)
+
+                await asyncio.sleep(
+                    random.uniform(self.config.TYPING_DELAY_MIN, self.config.TYPING_DELAY_MAX)
+                )
+                
+                async with self._response_listener(page) as wait_response:
+                    await page.click("button.btn.btn-primary:has-text('Іздеу')")
+                    response_data = await wait_response()
+                
+                if not response_data:
+                    if attempt < self.config.MAX_RETRIES:
+                        await asyncio.sleep(self.config.RETRY_DELAY)
+                        continue
+                    return None
+                
+                is_valid, error_msg = self.api_validator.validate_response(
+                    response_data,
+                    context=f"UW{worker_id}:{registration_number}"
+                )
+                
+                if not is_valid:
+                    if self.api_validator.is_critical_error(response_data):
+                        self.logger.critical(f"🚨 КРИТИЧЕСКАЯ ОШИБКА API: {error_msg}")
+                        self.shutdown_event.set()
+                        return None
+                    if attempt < self.config.MAX_RETRIES:
+                        await asyncio.sleep(self.config.RETRY_DELAY)
+                        continue
+                    return None
+                
+                if response_data.get("data", {}).get("totalElements", 0) == 0:
+                    return None
+                
+                processed = self.data_processor.process_api_response(response_data)
+                if processed:
+                    self.log_manager.increment_metric('records_processed')
+                return processed
+                
+            except asyncio.TimeoutError:
+                if attempt < self.config.MAX_RETRIES:
+                    await asyncio.sleep(self.config.RETRY_DELAY * attempt)
+                else:
+                    self.log_manager.increment_metric('api_errors')
+                    return None
+            except Exception as e:
+                if self.shutdown_event.is_set():
+                    return None
+                if attempt < self.config.MAX_RETRIES:
+                    await asyncio.sleep(self.config.RETRY_DELAY * attempt)
+                else:
+                    self.log_manager.increment_metric('api_errors')
+                    return None
+        
+        return None
+    
+    @asynccontextmanager
+    async def _response_listener(self, page: Page):
+        """Контекстный менеджер для обработчика."""
+        response_future: asyncio.Future[Dict] = asyncio.Future()
+        
+        async def handle_response(response: Response):
+            try:
+                if self.config.API_ENDPOINT in response.url and not response_future.done():
+                    json_data = await response.json()
+                    response_future.set_result(json_data)
+            except Exception as e:
+                if not response_future.done():
+                    response_future.set_exception(e)
+        
+        page.on("response", handle_response)
+        
+        async def wait_response():
+            try:
+                return await asyncio.wait_for(
+                    response_future,
+                    timeout=self.config.RESPONSE_TIMEOUT
+                )
+            except:
+                return None
+        
+        try:
+            yield wait_response
+        finally:
+            with suppress(Exception):
+                page.remove_listener("response", handle_response)
+    
+    async def _update_data_handler(self) -> None:
+        """Обработчик данных обновления."""
+        batch = []
+        last_save_time = asyncio.get_event_loop().time()
+        save_interval = 5.0
+        total_saved = 0
+        
+        self.logger.info(f"💾 Update data handler запущен (батч={self.config.UPDATE_BATCH_SIZE})")
+        
+        while True:
+            try:
+                current_time = asyncio.get_event_loop().time()
+                timeout = max(0.5, save_interval - (current_time - last_save_time))
+                
+                item = await asyncio.wait_for(self.data_queue.get(), timeout=timeout)
+                
+                if item is None:
+                    self.logger.info("🛑 Сигнал завершения update data handler")
+                    break
+                
+                if isinstance(item, dict) and item.get('type') == 'data':
+                    batch.append(item['data'])
+                
+                current_time = asyncio.get_event_loop().time()
+                should_save = (
+                    len(batch) >= self.config.UPDATE_BATCH_SIZE or
+                    (current_time - last_save_time) >= save_interval
+                )
+                
+                if should_save and batch:
+                    try:
+                        tax, customs, changes = await self.db_manager.bulk_update_data(batch, silent=True)
+                        total = tax + customs
+                        self.stats['updated'] += total
+                        self.stats['unchanged'] += len(batch) - total
+                        total_saved += total
+                        
+                        self.log_manager.increment_metric('db_updates', total)
+                        
+                        if total > 0:
+                            self.logger.info("🔄 Обновлено: TAX=%d, CUSTOMS=%d, всего=%d", tax, customs, total_saved)
+                    except Exception as e:
+                        self.logger.error(f"❌ Ошибка обновления: {e}")
+                    
+                    batch.clear()
+                    last_save_time = asyncio.get_event_loop().time()
+                    
+            except asyncio.TimeoutError:
+                if batch:
+                    try:
+                        tax, customs, changes = await self.db_manager.bulk_update_data(batch, silent=True)
+                        total = tax + customs
+                        self.stats['updated'] += total
+                        self.stats['unchanged'] += len(batch) - total
+                        total_saved += total
+                        
+                        self.log_manager.increment_metric('db_updates', total)
+                        
+                        if total > 0:
+                            self.logger.info(f"🔄 Периодическое обновление: TAX={tax}, CUSTOMS={customs}")
+                    except Exception as e:
+                        self.logger.error(f"❌ Ошибка обновления: {e}")
+                    
+                    batch.clear()
+                    last_save_time = asyncio.get_event_loop().time()
+            
+            except Exception as e:
+                self.logger.error(f"❌ Ошибка update data handler: {e}", exc_info=True)
+                if batch:
+                    try:
+                        tax, customs, changes = await self.db_manager.bulk_update_data(batch, silent=False)
+                        self.logger.info(f"💾 Аварийное обновление: {len(batch)} записей")
+                    except Exception:
+                        self.logger.critical(f"🚨 ПОТЕРЯ ДАННЫХ: {len(batch)} записей")
+                    batch.clear()
+        
+        # Финальное сохранение
+        if batch:
+            try:
+                tax, customs, changes = await self.db_manager.bulk_update_data(batch, silent=False)
+                total = tax + customs
+                total_saved += total
+                self.stats['updated'] += total
+                self.stats['unchanged'] += len(batch) - total
+                self.logger.info(f"💾 Финальное обновление: TAX={tax}, CUSTOMS={customs}")
+            except Exception as e:
+                self.logger.critical(f"🚨 ПОТЕРЯ ДАННЫХ: {len(batch)} записей: {e}")
+        
+        self.logger.info(f"✅ Update data handler завершен. Всего обновлено: {total_saved}")
+    
+    async def _print_update_summary(self) -> None:
+        """Итоговая статистика."""
+        self.logger.info("")
+        self.logger.info("=" * 80)
+        self.logger.info("📊 РЕЗУЛЬТАТЫ ОБНОВЛЕНИЯ")
+        self.logger.info("=" * 80)
+        self.logger.info(f"📋 Всего записей: {self.stats['total_to_update']}")
+        self.logger.info(f"   ├─ Обработано: {self.stats['processed']}")
+        self.logger.info(f"   ├─ Обновлено: {self.stats['updated']}")
+        self.logger.info(f"   ├─ Без изменений: {self.stats['unchanged']}")
+        self.logger.info(f"   ├─ Не найдено: {self.stats['not_found']}")
+        self.logger.info(f"   └─ Ошибок: {self.stats['errors']}")
+        self.logger.info("=" * 80)
+        
+        metrics = self.log_manager.get_metrics_summary()
+        self.logger.info("")
+        self.logger.info("📈 МЕТРИКИ:")
+        self.logger.info(f"   └─ Время: {metrics['elapsed_seconds']}s")
+        self.logger.info(f"   └─ API запросов: {metrics['api_requests']}")
+        self.logger.info(f"   └─ Обработано: {metrics['records_processed']}")
+        self.logger.info(f"   └─ Скорость: {metrics['records_per_second']} зап/с")
+
+
+def parse_arguments():
+    """Парсинг аргументов."""
+    parser = argparse.ArgumentParser(
+        description='Апдейтер QAMQOR',
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+Примеры использования:
+  # Обновить конкретный номер
+  python -m parsers.qamqor.qamqor_updater --number "251000000170101/00123"
+  
+  # Массовое обновление по статусу "1"
+  python -m parsers.qamqor.qamqor_updater --status "1"
+  
+  # Принудительное обновление всех
+  python -m parsers.qamqor.qamqor_updater --force
+        """
+    )
+    
+    parser.add_argument(
+        '--number',
+        type=str,
+        help='Обновить конкретный номер (пример: 251000000170101/00123)'
+    )
+    parser.add_argument(
+        '--force',
+        action='store_true',
+        help='Принудительное обновление всех записей (игнорирует фильтры)'
+    )
+    parser.add_argument(
+        '--status',
+        type=str,
+        help='Статусы для обновления через запятую (по умолчанию: "1")'
+    )
+    
+    return parser.parse_args()
+
+
+async def main():
+    """Точка входа."""
+    args = parse_arguments()
+    
+    # Валидация
+    if args.number and (args.status or args.force):
+        print("❌ --number нельзя использовать с --status или --force")
+        sys.exit(1)
+    
+    # ✅ Проверка формата номера
+    if args.number:
+        import re
+        # Формат: 25 + 7 цифр (регион) + 170101 + тип (1 или 2) + / + 5 цифр
+        pattern = r'^25\d{7}170101[12]/\d{5}$'
+        if not re.match(pattern, args.number):
+            print(f"❌ Неверный формат номера: {args.number}")
+            print("   Ожидается: 25RRRRRRR170101T/SSSSS")
+            print("   Где:")
+            print("     RRRRRRR = код региона (7 цифр)")
+            print("     T       = тип проверки (1=налоговая, 2=таможенная)")
+            print("     SSSSS   = порядковый номер (5 цифр)")
+            print("")
+            print("   Пример: 2575000001701012/01598")
+            sys.exit(1)
+        
+        # ✅ Дополнительная проверка существования в БД
+        check_type = args.number[12]
+        table = 'qamqor_tax' if check_type == '1' else 'qamqor_customs'
+        
+        print(f"ℹ️  Проверяем наличие номера в таблице {table}...")
+    
+    statuses = [s.strip() for s in args.status.split(',')] if args.status else None
+    
+    updater = QamqorUpdater(
+        force=args.force,
+        statuses=statuses,
+        single_number=args.number
+    )
+    
+    success = await updater.run()
+    sys.exit(0 if success else 1)
+
+
+if __name__ == "__main__":
+    try:
+        asyncio.run(main())
+    except KeyboardInterrupt:
+        print("\n⚠️ Прервано пользователем")
+        sys.exit(1)
+
+================================================================================
+END OF CODE
+================================================================================

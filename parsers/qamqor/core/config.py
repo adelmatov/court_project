@@ -80,8 +80,9 @@ class Config:
     
     # Настройки апдейтера
     UPDATE_BATCH_SIZE: int = 100
-    UPDATE_MIN_AGE_DAYS: int = 60
-    UPDATE_COOLDOWN_DAYS: int = 7
+    UPDATE_MIN_AGE_DAYS: int = 7              # ⬅️ Изменено: было 60
+    UPDATE_MAX_AGE_DAYS: int = 180            # ⬅️ НОВОЕ: добавлен лимит
+    UPDATE_COOLDOWN_DAYS: int = 3             # ⬅️ Изменено: было 7
     UPDATE_STATUSES: List[str] = field(default_factory=lambda: ["1"])
     UPDATE_TRACK_CHANGES: bool = True
     
