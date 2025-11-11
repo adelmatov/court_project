@@ -2,6 +2,24 @@
 Company Parser - Main entry point
 """
 
+# ==================== ИСПРАВЛЕНИЕ RuntimeWarning ====================
+import sys
+import os
+
+# 1. Установить UTF-8 для Windows
+if sys.platform == "win32":
+    import codecs
+    sys.stdout = codecs.getwriter('utf-8')(sys.stdout.buffer, 'replace')
+    sys.stderr = codecs.getwriter('utf-8')(sys.stderr.buffer, 'replace')
+    os.environ["PYTHONIOENCODING"] = "utf-8"
+
+# 2. Очистить кеш модуля при запуске через python -m
+if __name__ == "__main__":
+    keys_to_remove = [k for k in sys.modules.keys() if 'company_info.main' in k]
+    for key in keys_to_remove:
+        sys.modules.pop(key, None)
+# ====================================================================
+
 import sys
 import argparse
 import logging
