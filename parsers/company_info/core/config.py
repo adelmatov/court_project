@@ -5,6 +5,13 @@ Configuration settings for company parser
 import os
 from pathlib import Path
 from typing import Dict, Any
+import sys
+
+# Установить кодировку UTF-8 для вывода
+if sys.platform == "win32":
+    sys.stdout.reconfigure(encoding='utf-8')
+    sys.stderr.reconfigure(encoding='utf-8')
+    os.environ["PYTHONIOENCODING"] = "utf-8"
 
 # ════════════════════════════════════════════════════════════════
 # LOAD .env FROM PARSER DIRECTORY
@@ -18,9 +25,9 @@ env_path = parser_dir / '.env'
 load_dotenv(dotenv_path=env_path)
 
 if env_path.exists():
-    print(f"✅ Loaded .env from: {env_path}")
+    print(f"[OK] Loaded .env from: {env_path}")
 else:
-    print(f"⚠️  .env not found at: {env_path}")
+    print(f"[!]  .env not found at: {env_path}")
     print(f"   Please create .env file or set environment variables")
 
 # ════════════════════════════════════════════════════════════════
