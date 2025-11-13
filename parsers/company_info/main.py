@@ -6,12 +6,23 @@ Company Parser - Main entry point
 import sys
 import os
 
-# 1. Установить UTF-8 для Windows
+# 1. Установить UTF-8 для Windows (безопасная версия)
 if sys.platform == "win32":
-    import codecs
-    sys.stdout = codecs.getwriter('utf-8')(sys.stdout.buffer, 'replace')
-    sys.stderr = codecs.getwriter('utf-8')(sys.stderr.buffer, 'replace')
     os.environ["PYTHONIOENCODING"] = "utf-8"
+    
+    try:
+        import codecs
+        # Проверить, не обёрнут ли уже stdout
+        if hasattr(sys.stdout, 'buffer') and not isinstance(sys.stdout, codecs.StreamWriter):
+            sys.stdout = codecs.getwriter('utf-8')(sys.stdout.buffer, 'replace')
+            sys.stderr = codecs.getwriter('utf-8')(sys.stderr.buffer, 'replace')
+        elif hasattr(sys.stdout, 'reconfigure'):
+            # Python 3.7+ с поддержкой reconfigure
+            sys.stdout.reconfigure(encoding='utf-8')
+            sys.stderr.reconfigure(encoding='utf-8')
+    except (AttributeError, OSError):
+        # Если ничего не сработало, просто переменная окружения
+        pass
 
 # 2. Очистить кеш модуля при запуске через python -m
 if __name__ == "__main__":

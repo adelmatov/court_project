@@ -237,7 +237,14 @@ class DataProcessor:
                 continue
             
             year = item.get('year')
-            if not year:
+            
+            # ✅ ВАЛИДАЦИЯ ГОДА: пропускаем некорректные значения
+            if not year or not isinstance(year, int):
+                continue
+            
+            # Пропускаем года вне разумного диапазона (1990-2099)
+            if year < 1990 or year > 2099:
+                logger.warning(f"Invalid year in taxes: {year}, skipping")
                 continue
             
             result.append({
@@ -269,7 +276,14 @@ class DataProcessor:
                 continue
             
             year = item.get('year')
-            if not year:
+            
+            # ✅ ВАЛИДАЦИЯ ГОДА: пропускаем некорректные значения
+            if not year or not isinstance(year, int):
+                continue
+            
+            # Пропускаем года вне разумного диапазона (1990-2099)
+            if year < 1990 or year > 2099:
+                logger.warning(f"Invalid year in NDS: {year}, skipping")
                 continue
             
             result.append({

@@ -311,6 +311,14 @@ class DatabaseManager:
             
             # ═══ INSERT TAXES ═══
             for tax in data.get('taxes', []):
+                year = tax.get('year')
+                total_taxes = tax.get('total_taxes')
+                
+                # ✅ Дополнительная защита: пропускаем некорректные данные
+                if not year or not isinstance(year, int) or year < 1990 or year > 2099:
+                    logger.warning(f"Skipping invalid tax entry for {data.get('bin')}: year={year}")
+                    continue
+                
                 cursor.execute("""
                     INSERT INTO company_taxes (
                         bin, year, total_taxes, check_date
@@ -320,12 +328,20 @@ class DatabaseManager:
                         check_date = NOW()
                 """, (
                     data.get('bin'),
-                    tax.get('year'),
-                    tax.get('total_taxes')
+                    year,
+                    total_taxes
                 ))
-            
+
             # ═══ INSERT NDS ═══
             for nds in data.get('nds', []):
+                year = nds.get('year')
+                nds_amount = nds.get('nds_amount')
+                
+                # ✅ Дополнительная защита: пропускаем некорректные данные
+                if not year or not isinstance(year, int) or year < 1990 or year > 2099:
+                    logger.warning(f"Skipping invalid NDS entry for {data.get('bin')}: year={year}")
+                    continue
+                
                 cursor.execute("""
                     INSERT INTO company_nds (
                         bin, year, nds_amount, check_date
@@ -335,8 +351,8 @@ class DatabaseManager:
                         check_date = NOW()
                 """, (
                     data.get('bin'),
-                    nds.get('year'),
-                    nds.get('nds_amount')
+                    year,
+                    nds_amount
                 ))
             
             # ═══ INSERT RELATIONS ═══
@@ -487,6 +503,14 @@ class DatabaseManager:
             
             # ═══ UPDATE TAXES (UPSERT) ═══
             for tax in data.get('taxes', []):
+                year = tax.get('year')
+                total_taxes = tax.get('total_taxes')
+                
+                # ✅ Дополнительная защита: пропускаем некорректные данные
+                if not year or not isinstance(year, int) or year < 1990 or year > 2099:
+                    logger.warning(f"Skipping invalid tax entry for {bin_value}: year={year}")
+                    continue
+                
                 cursor.execute("""
                     INSERT INTO company_taxes (
                         bin, year, total_taxes, check_date
@@ -496,12 +520,20 @@ class DatabaseManager:
                         check_date = NOW()
                 """, (
                     bin_value,
-                    tax.get('year'),
-                    tax.get('total_taxes')
+                    year,
+                    total_taxes
                 ))
-            
+
             # ═══ UPDATE NDS (UPSERT) ═══
             for nds in data.get('nds', []):
+                year = nds.get('year')
+                nds_amount = nds.get('nds_amount')
+                
+                # ✅ Дополнительная защита: пропускаем некорректные данные
+                if not year or not isinstance(year, int) or year < 1990 or year > 2099:
+                    logger.warning(f"Skipping invalid NDS entry for {bin_value}: year={year}")
+                    continue
+                
                 cursor.execute("""
                     INSERT INTO company_nds (
                         bin, year, nds_amount, check_date
@@ -511,8 +543,8 @@ class DatabaseManager:
                         check_date = NOW()
                 """, (
                     bin_value,
-                    nds.get('year'),
-                    nds.get('nds_amount')
+                    year,
+                    nds_amount
                 ))
             
             # ═══ UPDATE RELATIONS (APPEND NEW) ═══
