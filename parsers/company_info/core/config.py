@@ -7,11 +7,25 @@ from pathlib import Path
 from typing import Dict, Any
 import sys
 
-# Установить кодировку UTF-8 для вывода
+# Установить UTF-8 для Windows (безопасная версия)
 if sys.platform == "win32":
-    sys.stdout.reconfigure(encoding='utf-8')
-    sys.stderr.reconfigure(encoding='utf-8')
+    import codecs
     os.environ["PYTHONIOENCODING"] = "utf-8"
+    
+    # Безопасная установка кодировки (работает при перенаправлении)
+    try:
+        # Попытка использовать reconfigure (Python 3.7+)
+        if hasattr(sys.stdout, 'reconfigure'):
+            sys.stdout.reconfigure(encoding='utf-8')
+            sys.stderr.reconfigure(encoding='utf-8')
+        else:
+            # Fallback для старых версий или перенаправленных потоков
+            if hasattr(sys.stdout, 'buffer'):
+                sys.stdout = codecs.getwriter('utf-8')(sys.stdout.buffer, 'replace')
+                sys.stderr = codecs.getwriter('utf-8')(sys.stderr.buffer, 'replace')
+    except (AttributeError, OSError):
+        # Если ничего не сработало, просто устанавливаем переменную окружения
+        pass
 
 # ════════════════════════════════════════════════════════════════
 # LOAD .env FROM PARSER DIRECTORY
