@@ -2,20 +2,10 @@
 # -*- coding: utf-8 -*-
 """
 Объединенный файл парсера суда
-Дата сборки: 2025-10-19 00:11:17
-Автор: Court Parser Team
+Дата сборки: 2025-11-30 12:12:43
 
 Этот файл содержит все модули проекта, объединенные в один файл.
 Для запуска: python court_parser_unified.py
-
-Структура:
-- Утилиты (логирование, валидация, обработка текста)
-- Конфигурация
-- Аутентификация
-- База данных
-- Парсинг HTML
-- Поисковые функции
-- Основная логика
 """
 
 # ============================================================================
@@ -26,6 +16,7 @@ import sys
 import json
 import time
 import logging
+import base64
 from datetime import datetime
 from pathlib import Path
 from typing import Optional, Dict, List, Any
@@ -36,27 +27,54 @@ from dataclasses import dataclass, field
 from datetime import date
 from datetime import datetime
 from datetime import datetime, date
+from datetime import datetime, timedelta
+from functools import wraps
 from pathlib import Path
 from selectolax.parser import HTMLParser
+from typing import Callable, Any, Optional, List, Type
 from typing import Dict, Any, Optional
 from typing import Dict, Any, Optional, List
-from typing import Dict, List, Optional, Any
+from typing import Dict, List, Optional, Any, Set
 from typing import Dict, Optional
 from typing import List, Optional
 from typing import List, Optional, Dict
 from typing import List, Tuple, Optional
 from typing import Optional, Dict, Any
-from typing import Optional, Dict, List, Any
+from typing import Optional, Dict, List, Any, Set
 from typing import Optional, List
 import aiohttp
 import asyncio
 import asyncpg
 import json
 import logging
+import random
 import re
 import ssl
 import sys
 import traceback
+
+# ============================================================================
+# ВСТРОЕННЫЕ РЕСУРСЫ
+# ============================================================================
+
+_EMBEDDED_RESOURCES = {
+  "config.json": "{\n    \"auth\": {\n        \"login\": \"941208351468\",\n        \"password\": \"1234Poker!\",\n        \"user_name\": \"ДЕЛЬМАТОВ АЛМАЗ УРАЗГАЛИЕВИЧ\"\n    },\n    \"base_url\": \"https://office.sud.kz\",\n    \"database\": {\n        \"dbname\": \"court\",\n        \"user\": \"postgres\",\n        \"password\": \"admin\",\n        \"host\": \"localhost\",\n        \"port\": 5432\n    },\n    \"parsing_settings\": {\n        \"year\": \"2025\",\n        \"court_types\": [\"smas\"],\n        \"start_from\": 1,\n        \"max_number\": 9999,\n        \"max_consecutive_empty\": 5,\n        \"max_consecutive_failures\": 5,\n        \"max_parallel_regions\": 3,\n        \"delay_between_requests\": 1.7,\n        \n        \"region_retry_max_attempts\": 3,\n        \"region_retry_delay_seconds\": 5,\n        \n        \"limit_regions\": 1,\n        \"limit_cases_per_region\": null,\n        \"target_regions\": [\"almaty\"]\n    },\n    \"regions\": {\n        \"astana\": {\n            \"id\": \"2\",\n            \"name\": \"город Астана\",\n            \"kato_code\": \"71\",\n            \"courts\": {\n                \"smas\": {\n                    \"id\": \"413\",\n                    \"name\": \"Специализированный межрайонный административный суд города Астаны\",\n                    \"instance_code\": \"94\",\n                    \"case_type_code\": \"4\"\n                },\n                \"appellate\": {\n                    \"id\": \"2\",\n                    \"name\": \"Суд города Астаны\",\n                    \"instance_code\": \"99\",\n                    \"case_type_code\": \"4а\"\n                }\n            }\n        },\n        \"almaty\": {\n            \"id\": \"3\",\n            \"name\": \"город Алматы\",\n            \"kato_code\": \"75\",\n            \"courts\": {\n                \"smas\": {\n                    \"id\": \"414\",\n                    \"name\": \"Специализированный межрайонный административный суд города Алматы\",\n                    \"instance_code\": \"94\",\n                    \"case_type_code\": \"4\"\n                },\n                \"appellate\": {\n                    \"id\": \"13\",\n                    \"name\": \"Алматинский городской суд\",\n                    \"instance_code\": \"99\",\n                    \"case_type_code\": \"4а\"\n                }\n            }\n        },\n        \"shymkent\": {\n            \"id\": \"19\",\n            \"name\": \"город Шымкент\",\n            \"kato_code\": \"52\",\n            \"courts\": {\n                \"smas\": {\n                    \"id\": \"415\",\n                    \"name\": \"Специализированный межрайонный административный суд города Шымкента\",\n                    \"instance_code\": \"94\",\n                    \"case_type_code\": \"4\"\n                },\n                \"appellate\": {\n                    \"id\": \"383\",\n                    \"name\": \"Суд города Шымкента\",\n                    \"instance_code\": \"99\",\n                    \"case_type_code\": \"4а\"\n                }\n            }\n        },\n        \"akmola\": {\n            \"id\": \"4\",\n            \"name\": \"Акмолинская область\",\n            \"kato_code\": \"11\",\n            \"courts\": {\n                \"smas\": {\n                    \"id\": \"416\",\n                    \"name\": \"Специализированный межрайонный административный суд Акмолинской области\",\n                    \"instance_code\": \"94\",\n                    \"case_type_code\": \"4\"\n                },\n                \"appellate\": {\n                    \"id\": \"29\",\n                    \"name\": \"Акмолинский областной суд\",\n                    \"instance_code\": \"99\",\n                    \"case_type_code\": \"4а\"\n                }\n            }\n        },\n        \"aktobe\": {\n            \"id\": \"5\",\n            \"name\": \"Актюбинская область\",\n            \"kato_code\": \"15\",\n            \"courts\": {\n                \"smas\": {\n                    \"id\": \"417\",\n                    \"name\": \"Специализированный межрайонный административный суд Актюбинской области\",\n                    \"instance_code\": \"94\",\n                    \"case_type_code\": \"4\"\n                },\n                \"appellate\": {\n                    \"id\": \"55\",\n                    \"name\": \"Актюбинский областной суд\",\n                    \"instance_code\": \"99\",\n                    \"case_type_code\": \"4а\"\n                }\n            }\n        },\n        \"almaty_region\": {\n            \"id\": \"6\",\n            \"name\": \"Алматинская область\",\n            \"kato_code\": \"19\",\n            \"courts\": {\n                \"smas\": {\n                    \"id\": \"430\",\n                    \"name\": \"Специализированный межрайонный административный суд Алматинской области\",\n                    \"instance_code\": \"93\",\n                    \"case_type_code\": \"4\"\n                },\n                \"appellate\": {\n                    \"id\": \"75\",\n                    \"name\": \"Алматинский областной суд\",\n                    \"instance_code\": \"99\",\n                    \"case_type_code\": \"4а\"\n                }\n            }\n        },\n        \"atyrau\": {\n            \"id\": \"7\",\n            \"name\": \"Атырауская область\",\n            \"kato_code\": \"23\",\n            \"courts\": {\n                \"smas\": {\n                    \"id\": \"419\",\n                    \"name\": \"Специализированный межрайонный административный суд Атырауской области\",\n                    \"instance_code\": \"94\",\n                    \"case_type_code\": \"4\"\n                },\n                \"appellate\": {\n                    \"id\": \"105\",\n                    \"name\": \"Атырауский областной суд\",\n                    \"instance_code\": \"99\",\n                    \"case_type_code\": \"4а\"\n                }\n            }\n        },\n        \"vko\": {\n            \"id\": \"8\",\n            \"name\": \"Восточно-Казахстанская область\",\n            \"kato_code\": \"63\",\n            \"courts\": {\n                \"smas\": {\n                    \"id\": \"420\",\n                    \"name\": \"Специализированный межрайонный административный суд Восточно-Казахстанской области\",\n                    \"instance_code\": \"94\",\n                    \"case_type_code\": \"4\"\n                },\n                \"appellate\": {\n                    \"id\": \"119\",\n                    \"name\": \"Восточно-Казахстанский областной суд\",\n                    \"instance_code\": \"99\",\n                    \"case_type_code\": \"4а\"\n                }\n            }\n        },\n        \"zhambyl\": {\n            \"id\": \"9\",\n            \"name\": \"Жамбылская область\",\n            \"kato_code\": \"31\",\n            \"courts\": {\n                \"smas\": {\n                    \"id\": \"421\",\n                    \"name\": \"Специализированный межрайонный административный суд Жамбылской области\",\n                    \"instance_code\": \"94\",\n                    \"case_type_code\": \"4\"\n                },\n                \"appellate\": {\n                    \"id\": \"158\",\n                    \"name\": \"Жамбылский областной суд\",\n                    \"instance_code\": \"99\",\n                    \"case_type_code\": \"4а\"\n                }\n            }\n        },\n        \"zko\": {\n            \"id\": \"10\",\n            \"name\": \"Западно-Казахстанская область\",\n            \"kato_code\": \"27\",\n            \"courts\": {\n                \"smas\": {\n                    \"id\": \"422\",\n                    \"name\": \"Специализированный межрайонный административный суд Западно-Казахстанской области\",\n                    \"instance_code\": \"94\",\n                    \"case_type_code\": \"4\"\n                },\n                \"appellate\": {\n                    \"id\": \"175\",\n                    \"name\": \"Западно-Казахстанский областной суд\",\n                    \"instance_code\": \"99\",\n                    \"case_type_code\": \"4а\"\n                }\n            }\n        },\n        \"karaganda\": {\n            \"id\": \"11\",\n            \"name\": \"Карагандинская область\",\n            \"kato_code\": \"35\",\n            \"courts\": {\n                \"smas\": {\n                    \"id\": \"423\",\n                    \"name\": \"Специализированный межрайонный административный суд Карагандинской области\",\n                    \"instance_code\": \"94\",\n                    \"case_type_code\": \"4\"\n                },\n                \"appellate\": {\n                    \"id\": \"199\",\n                    \"name\": \"Карагандинский областной суд\",\n                    \"instance_code\": \"99\",\n                    \"case_type_code\": \"4а\"\n                }\n            }\n        },\n        \"kostanay\": {\n            \"id\": \"12\",\n            \"name\": \"Костанайская область\",\n            \"kato_code\": \"39\",\n            \"courts\": {\n                \"smas\": {\n                    \"id\": \"424\",\n                    \"name\": \"Специализированный межрайонный административный суд Костанайской области\",\n                    \"instance_code\": \"94\",\n                    \"case_type_code\": \"4\"\n                },\n                \"appellate\": {\n                    \"id\": \"237\",\n                    \"name\": \"Костанайский областной суд\",\n                    \"instance_code\": \"99\",\n                    \"case_type_code\": \"4а\"\n                }\n            }\n        },\n        \"kyzylorda\": {\n            \"id\": \"13\",\n            \"name\": \"Кызылординская область\",\n            \"kato_code\": \"43\",\n            \"courts\": {\n                \"smas\": {\n                    \"id\": \"425\",\n                    \"name\": \"Специализированный межрайонный административный суд Кызылординской области\",\n                    \"instance_code\": \"94\",\n                    \"case_type_code\": \"4\"\n                },\n                \"appellate\": {\n                    \"id\": \"266\",\n                    \"name\": \"Кызылординский областной суд\",\n                    \"instance_code\": \"99\",\n                    \"case_type_code\": \"4а\"\n                }\n            }\n        },\n        \"mangystau\": {\n            \"id\": \"14\",\n            \"name\": \"Мангистауская область\",\n            \"kato_code\": \"47\",\n            \"courts\": {\n                \"smas\": {\n                    \"id\": \"426\",\n                    \"name\": \"Специализированный межрайонный административный суд Мангистауской области\",\n                    \"instance_code\": \"94\",\n                    \"case_type_code\": \"4\"\n                },\n                \"appellate\": {\n                    \"id\": \"281\",\n                    \"name\": \"Мангистауский областной суд\",\n                    \"instance_code\": \"99\",\n                    \"case_type_code\": \"4а\"\n                }\n            }\n        },\n        \"pavlodar\": {\n            \"id\": \"15\",\n            \"name\": \"Павлодарская область\",\n            \"kato_code\": \"55\",\n            \"courts\": {\n                \"smas\": {\n                    \"id\": \"427\",\n                    \"name\": \"Специализированный межрайонный административный суд Павлодарской области\",\n                    \"instance_code\": \"94\",\n                    \"case_type_code\": \"4\"\n                },\n                \"appellate\": {\n                    \"id\": \"295\",\n                    \"name\": \"Павлодарский областной суд\",\n                    \"instance_code\": \"99\",\n                    \"case_type_code\": \"4а\"\n                }\n            }\n        },\n        \"sko\": {\n            \"id\": \"16\",\n            \"name\": \"Северо-Казахстанская область\",\n            \"kato_code\": \"59\",\n            \"courts\": {\n                \"smas\": {\n                    \"id\": \"428\",\n                    \"name\": \"Специализированный межрайонный административный суд Северо-Казахстанской области\",\n                    \"instance_code\": \"94\",\n                    \"case_type_code\": \"4\"\n                },\n                \"appellate\": {\n                    \"id\": \"316\",\n                    \"name\": \"Северо-Казахстанский областной суд\",\n                    \"instance_code\": \"99\",\n                    \"case_type_code\": \"4а\"\n                }\n            }\n        },\n        \"turkestan\": {\n            \"id\": \"17\",\n            \"name\": \"Туркестанская область\",\n            \"kato_code\": \"51\",\n            \"courts\": {\n                \"smas\": {\n                    \"id\": \"429\",\n                    \"name\": \"Специализированный межрайонный административный суд Туркестанской области\",\n                    \"instance_code\": \"94\",\n                    \"case_type_code\": \"4\"\n                },\n                \"appellate\": {\n                    \"id\": \"340\",\n                    \"name\": \"Туркестанский областной суд\",\n                    \"instance_code\": \"99\",\n                    \"case_type_code\": \"4а\"\n                }\n            }\n        },\n        \"ulytau\": {\n            \"id\": \"20\",\n            \"name\": \"Область Ұлытау\",\n            \"kato_code\": \"62\",\n            \"courts\": {\n                \"smas\": {\n                    \"id\": \"482\",\n                    \"name\": \"Специализированный межрайонный административный суд области Ұлытау\",\n                    \"instance_code\": \"94\",\n                    \"case_type_code\": \"4\"\n                },\n                \"appellate\": {\n                    \"id\": \"476\",\n                    \"name\": \"Суд области Ұлытау\",\n                    \"instance_code\": \"00\",\n                    \"case_type_code\": \"4а\"\n                }\n            }\n        },\n        \"abay\": {\n            \"id\": \"21\",\n            \"name\": \"Область Абай\",\n            \"kato_code\": \"10\",\n            \"courts\": {\n                \"smas\": {\n                    \"id\": \"467\",\n                    \"name\": \"Специализированный межрайонный административный суд области Абай\",\n                    \"instance_code\": \"94\",\n                    \"case_type_code\": \"4\"\n                },\n                \"appellate\": {\n                    \"id\": \"456\",\n                    \"name\": \"Суд области Абай\",\n                    \"instance_code\": \"00\",\n                    \"case_type_code\": \"4а\"\n                }\n            }\n        },\n        \"zhetysu\": {\n            \"id\": \"22\",\n            \"name\": \"Область Жетісу\",\n            \"kato_code\": \"33\",\n            \"courts\": {\n                \"smas\": {\n                    \"id\": \"450\",\n                    \"name\": \"Специализированный межрайонный административный суд области Жетісу\",\n                    \"instance_code\": \"94\",\n                    \"case_type_code\": \"4\"\n                },\n                \"appellate\": {\n                    \"id\": \"437\",\n                    \"name\": \"Суд области Жетісу\",\n                    \"instance_code\": \"00\",\n                    \"case_type_code\": \"4а\"\n                }\n            }\n        }\n    },\n    \"retry_settings\": {\n        \"http_request\": {\n            \"max_attempts\": 3,\n            \"initial_delay\": 1.0,\n            \"backoff_multiplier\": 2.0,\n            \"max_delay\": 30.0,\n            \"jitter\": true,\n            \"retriable_status_codes\": [500, 502, 503, 504],\n            \"retriable_exceptions\": [\"TimeoutError\", \"ClientError\", \"ServerDisconnectedError\"]\n        },\n        \"authentication\": {\n            \"max_attempts\": 5,\n            \"initial_delay\": 2.0,\n            \"backoff_multiplier\": 2.0,\n            \"max_delay\": 60.0,\n            \"create_new_session\": true,\n            \"retriable_on_auth_check_fail\": true\n        },\n        \"search_case\": {\n            \"max_attempts\": 3,\n            \"delay\": 3.0,\n            \"backoff\": \"linear\",\n            \"save_failed_html\": true\n        },\n        \"rate_limit\": {\n            \"default_wait\": 60,\n            \"respect_retry_after_header\": true,\n            \"slow_down_multiplier\": 2.0,\n            \"slow_down_duration\": 600\n        },\n        \"circuit_breaker\": {\n            \"enabled\": true,\n            \"failure_threshold\": 20,\n            \"recovery_timeout\": 300,\n            \"half_open_max_attempts\": 3\n        },\n        \"session_recovery\": {\n            \"reauth_on_401\": true,\n            \"max_reauth_attempts\": 2\n        }\n    },\n    \"update_settings\": {\n        \"enabled\": true,\n        \"update_interval_days\": 2,\n        \"filters\": {\n            \"defendant_keywords\": [\"доход\"],\n            \"exclude_event_types\": [\n                \"Отправлено в архив\",\n                \"Завершение дела\",\n                \"Решение вступило в силу\"\n            ]\n        }\n    }\n}"
+}
+
+def get_embedded_resource(name: str) -> str:
+    """Получить встроенный ресурс по имени"""
+    return _EMBEDDED_RESOURCES.get(name, "")
+
+def get_embedded_json(name: str) -> dict:
+    """Получить встроенный JSON как словарь"""
+    content = _EMBEDDED_RESOURCES.get(name, "{}")
+    return json.loads(content)
+
+def get_embedded_binary(name: str) -> bytes:
+    """Получить бинарный ресурс (декодирует из base64)"""
+    content = _EMBEDDED_RESOURCES.get(name, "")
+    return base64.b64decode(content) if content else b""
+
 
 
 # ============================================================================
@@ -120,6 +138,292 @@ def setup_logger(name: str, log_dir: str = "logs", level: str = "INFO") -> loggi
 def get_logger(name: str) -> logging.Logger:
     """Получить логгер"""
     return logging.getLogger(name)
+
+
+# ============================================================================
+# МОДУЛЬ: parsers/court_parser/utils/retry.py
+# ============================================================================
+
+"""
+Гибкая система retry с поддержкой различных стратегий
+"""
+
+
+
+# REMOVED IMPORT: from utils.logger import get_logger
+
+
+class RetryableError(Exception):
+    """Ошибка, которую можно повторить"""
+    pass
+
+
+class NonRetriableError(Exception):
+    """Ошибка, которую нельзя повторить"""
+    pass
+
+
+class CircuitBreakerOpenError(Exception):
+    """Circuit Breaker в состоянии OPEN"""
+    pass
+
+
+class RetryConfig:
+    """Конфигурация retry"""
+    
+    def __init__(self, config: dict):
+        self.max_attempts = config.get('max_attempts', 3)
+        self.initial_delay = config.get('initial_delay', 1.0)
+        self.backoff_multiplier = config.get('backoff_multiplier', 2.0)
+        self.max_delay = config.get('max_delay', 30.0)
+        self.jitter = config.get('jitter', True)
+        self.backoff = config.get('backoff', 'exponential')  # exponential или linear
+        
+        # Для HTTP retry
+        self.retriable_status_codes = config.get('retriable_status_codes', [500, 502, 503, 504])
+        self.retriable_exceptions = config.get('retriable_exceptions', [])
+
+
+class CircuitBreaker:
+    """
+    Circuit Breaker паттерн
+    
+    Состояния:
+    - CLOSED: нормальная работа
+    - OPEN: сервер недоступен, не пытаемся
+    - HALF_OPEN: проверка восстановления
+    """
+    
+    def __init__(self, config: dict):
+        self.enabled = config.get('enabled', True)
+        self.failure_threshold = config.get('failure_threshold', 20)
+        self.recovery_timeout = config.get('recovery_timeout', 300)  # секунд
+        self.half_open_max_attempts = config.get('half_open_max_attempts', 3)
+        
+        self.state = 'CLOSED'
+        self.failure_count = 0
+        self.last_failure_time: Optional[datetime] = None
+        self.half_open_success_count = 0
+        
+        self.logger = get_logger('circuit_breaker')
+    
+    def record_success(self):
+        """Запись успешного запроса"""
+        if not self.enabled:
+            return
+        
+        if self.state == 'HALF_OPEN':
+            self.half_open_success_count += 1
+            
+            if self.half_open_success_count >= self.half_open_max_attempts:
+                self.logger.info("🎉 Circuit Breaker: HALF_OPEN → CLOSED (сервер восстановлен)")
+                self.state = 'CLOSED'
+                self.failure_count = 0
+                self.half_open_success_count = 0
+        
+        elif self.state == 'CLOSED':
+            # Сбрасываем счетчик при успехе
+            self.failure_count = max(0, self.failure_count - 1)
+    
+    def record_failure(self):
+        """Запись неудачного запроса"""
+        if not self.enabled:
+            return
+        
+        self.failure_count += 1
+        self.last_failure_time = datetime.now()
+        
+        if self.state == 'CLOSED' and self.failure_count >= self.failure_threshold:
+            self.logger.critical(
+                f"🚨 Circuit Breaker: CLOSED → OPEN "
+                f"({self.failure_count} ошибок подряд)"
+            )
+            self.state = 'OPEN'
+        
+        elif self.state == 'HALF_OPEN':
+            self.logger.warning("Circuit Breaker: HALF_OPEN → OPEN (проверка не пройдена)")
+            self.state = 'OPEN'
+            self.half_open_success_count = 0
+    
+    def can_execute(self) -> bool:
+        """Можно ли выполнить запрос"""
+        if not self.enabled:
+            return True
+        
+        if self.state == 'CLOSED':
+            return True
+        
+        if self.state == 'HALF_OPEN':
+            return True
+        
+        # state == 'OPEN'
+        if self.last_failure_time:
+            elapsed = (datetime.now() - self.last_failure_time).total_seconds()
+            
+            if elapsed >= self.recovery_timeout:
+                self.logger.info(
+                    f"Circuit Breaker: OPEN → HALF_OPEN "
+                    f"(пауза {self.recovery_timeout} сек прошла)"
+                )
+                self.state = 'HALF_OPEN'
+                self.half_open_success_count = 0
+                return True
+        
+        return False
+    
+    def get_wait_time(self) -> Optional[float]:
+        """Сколько ждать до следующей попытки (если OPEN)"""
+        if self.state != 'OPEN' or not self.last_failure_time:
+            return None
+        
+        elapsed = (datetime.now() - self.last_failure_time).total_seconds()
+        remaining = self.recovery_timeout - elapsed
+        
+        return max(0, remaining)
+
+
+class RetryStrategy:
+    """Стратегия retry с гибкими настройками"""
+    
+    def __init__(self, config: RetryConfig, circuit_breaker: Optional[CircuitBreaker] = None):
+        self.config = config
+        self.circuit_breaker = circuit_breaker
+        self.logger = get_logger('retry_strategy')
+    
+    def calculate_delay(self, attempt: int) -> float:
+        """Расчет задержки перед следующей попыткой"""
+        if self.config.backoff == 'linear':
+            delay = self.config.initial_delay
+        else:  # exponential
+            delay = self.config.initial_delay * (self.config.backoff_multiplier ** (attempt - 1))
+        
+        # Ограничение максимальной задержки
+        delay = min(delay, self.config.max_delay)
+        
+        # Jitter (случайность ±20%)
+        if self.config.jitter:
+            jitter_range = delay * 0.2
+            delay += random.uniform(-jitter_range, jitter_range)
+        
+        return max(0, delay)
+    
+    def is_retriable_exception(self, exc: Exception) -> bool:
+        """Проверка что исключение можно повторить"""
+        exc_name = type(exc).__name__
+        
+        # Проверка по списку из конфига
+        if exc_name in self.config.retriable_exceptions:
+            return True
+        
+        # Стандартные retriable исключения
+        retriable_types = (
+            asyncio.TimeoutError,
+            aiohttp.ClientError,
+            aiohttp.ServerDisconnectedError,
+            aiohttp.ClientConnectionError,
+            ConnectionError,
+            RetryableError
+        )
+        
+        return isinstance(exc, retriable_types)
+    
+    def is_retriable_status(self, status: int) -> bool:
+        """Проверка что HTTP статус можно повторить"""
+        return status in self.config.retriable_status_codes
+    
+    async def execute_with_retry(self, 
+                                func: Callable,
+                                *args,
+                                error_context: str = "",
+                                **kwargs) -> Any:
+        """
+        Выполнение функции с retry
+        
+        Args:
+            func: асинхронная функция для выполнения
+            error_context: контекст для логирования (например, "HTTP GET /api")
+            *args, **kwargs: параметры для func
+        
+        Raises:
+            NonRetriableError: если ошибка не подлежит retry
+            CircuitBreakerOpenError: если Circuit Breaker в состоянии OPEN
+        """
+        last_exception = None
+        
+        for attempt in range(1, self.config.max_attempts + 1):
+            # Проверка Circuit Breaker
+            if self.circuit_breaker and not self.circuit_breaker.can_execute():
+                wait_time = self.circuit_breaker.get_wait_time()
+                
+                if wait_time and wait_time > 0:
+                    self.logger.warning(
+                        f"⏸️ Circuit Breaker OPEN, ждем {wait_time:.0f} сек..."
+                    )
+                    await asyncio.sleep(wait_time)
+                    
+                    # Повторная проверка после ожидания
+                    if not self.circuit_breaker.can_execute():
+                        raise CircuitBreakerOpenError(
+                            f"Circuit Breaker в состоянии OPEN, сервер недоступен"
+                        )
+                else:
+                    raise CircuitBreakerOpenError(
+                        f"Circuit Breaker в состоянии OPEN"
+                    )
+            
+            try:
+                # Попытка выполнения
+                result = await func(*args, **kwargs)
+                
+                # Успех
+                if self.circuit_breaker:
+                    self.circuit_breaker.record_success()
+                
+                if attempt > 1:
+                    self.logger.info(f"✅ Успех на попытке {attempt}")
+                
+                return result
+            
+            except NonRetriableError:
+                # Не повторяемая ошибка - прокидываем наверх
+                if self.circuit_breaker:
+                    self.circuit_breaker.record_success()  # Не считаем как failure
+                raise
+            
+            except Exception as exc:
+                last_exception = exc
+                
+                # Проверяем можно ли повторить
+                if not self.is_retriable_exception(exc):
+                    self.logger.error(f"❌ Non-retriable error: {type(exc).__name__}: {exc}")
+                    raise NonRetriableError(f"{type(exc).__name__}: {exc}") from exc
+                
+                # Записываем failure
+                if self.circuit_breaker:
+                    self.circuit_breaker.record_failure()
+                
+                # Если это последняя попытка - выбрасываем ошибку
+                if attempt >= self.config.max_attempts:
+                    self.logger.error(
+                        f"❌ Все {self.config.max_attempts} попытки исчерпаны"
+                    )
+                    raise RetryableError(
+                        f"Не удалось выполнить после {self.config.max_attempts} попыток: {exc}"
+                    ) from exc
+                
+                # Логирование и задержка перед следующей попыткой
+                delay = self.calculate_delay(attempt)
+                
+                self.logger.warning(
+                    f"⚠️ [{error_context}] {type(exc).__name__} "
+                    f"(попытка {attempt}/{self.config.max_attempts}), "
+                    f"повтор через {delay:.1f} сек"
+                )
+                
+                await asyncio.sleep(delay)
+        
+        # Не должно сюда дойти, но на всякий случай
+        raise RetryableError(f"Unexpected retry exhaustion") from last_exception
 
 
 # ============================================================================
@@ -304,52 +608,52 @@ class TextProcessor:
             'sequence': match.group(5)
         }
 
-@staticmethod
-def find_region_and_court_by_case_number(case_number: str, regions_config: Dict) -> Optional[Dict]:
-    """
-    Определить region_key и court_key по номеру дела
-    
-    Args:
-        case_number: полный номер дела "6294-25-00-4/215"
-        regions_config: конфигурация регионов из settings
-    
-    Returns:
-        {
-            'region_key': 'astana',
-            'court_key': 'smas',
-            'year': '2025',
-            'sequence': '215'
-        }
-    """
-    parsed = TextProcessor.parse_full_case_number(case_number)
-    if not parsed:
-        return None
-    
-    # Извлекаем код суда (КАТО + инстанция)
-    court_code = parsed['court_code']
-    case_type = parsed['case_type']
-    
-    # Ищем регион и суд по коду
-    for region_key, region_config in regions_config.items():
-        kato = region_config['kato_code']
+    @staticmethod
+    def find_region_and_court_by_case_number(case_number: str, regions_config: Dict) -> Optional[Dict]:
+        """
+        Определить region_key и court_key по номеру дела
         
-        for court_key, court_config in region_config['courts'].items():
-            instance = court_config['instance_code']
-            full_code = f"{kato}{instance}"
+        Args:
+            case_number: полный номер дела "6294-25-00-4/215"
+            regions_config: конфигурация регионов из settings
+        
+        Returns:
+            {
+                'region_key': 'astana',
+                'court_key': 'smas',
+                'year': '2025',
+                'sequence': '215'
+            }
+        """
+        parsed = TextProcessor.parse_full_case_number(case_number)
+        if not parsed:
+            return None
+        
+        # Извлекаем код суда (КАТО + инстанция)
+        court_code = parsed['court_code']
+        case_type = parsed['case_type']
+        
+        # Ищем регион и суд по коду
+        for region_key, region_config in regions_config.items():
+            kato = region_config['kato_code']
             
-            if court_code == full_code and court_config['case_type_code'] == case_type:
-                # Восстанавливаем полный год из короткого
-                year_short = int(parsed['year_short'])
-                year = f"20{year_short:02d}"
+            for court_key, court_config in region_config['courts'].items():
+                instance = court_config['instance_code']
+                full_code = f"{kato}{instance}"
                 
-                return {
-                    'region_key': region_key,
-                    'court_key': court_key,
-                    'year': year,
-                    'sequence': parsed['sequence']
-                }
-    
-    return None
+                if court_code == full_code and court_config['case_type_code'] == case_type:
+                    # Восстанавливаем полный год из короткого
+                    year_short = int(parsed['year_short'])
+                    year = f"20{year_short:02d}"
+                    
+                    return {
+                        'region_key': region_key,
+                        'court_key': court_key,
+                        'year': year,
+                        'sequence': parsed['sequence']
+                    }
+        
+        return None
 
 
 # ============================================================================
@@ -943,58 +1247,6 @@ class Authenticator:
 
 
 # ============================================================================
-# МОДУЛЬ: parsers/court_parser/database/models.py
-# ============================================================================
-
-"""
-Структуры данных для БД
-"""
-
-
-@dataclass
-class CaseData:
-    """Данные дела"""
-    case_number: str
-    case_date: Optional[date] = None
-    judge: Optional[str] = None
-    plaintiffs: List[str] = field(default_factory=list)
-    defendants: List[str] = field(default_factory=list)
-    events: List['EventData'] = field(default_factory=list)
-    
-    def to_dict(self) -> dict:
-        """Преобразование в словарь"""
-        return {
-            'case_number': self.case_number,
-            'case_date': self.case_date,
-            'judge': self.judge,
-            'plaintiffs': self.plaintiffs,
-            'defendants': self.defendants,
-            'events': [e.to_dict() for e in self.events]
-        }
-
-
-@dataclass
-class EventData:
-    """Данные события"""
-    event_type: str
-    event_date: date
-    
-    def to_dict(self) -> dict:
-        return {
-            'event_type': self.event_type,
-            'event_date': self.event_date
-        }
-
-
-@dataclass
-class SearchResult:
-    """Результат поиска"""
-    found: bool
-    case_data: Optional[CaseData] = None
-    error: Optional[str] = None
-
-
-# ============================================================================
 # МОДУЛЬ: parsers/court_parser/database/db_manager.py
 # ============================================================================
 
@@ -1251,16 +1503,6 @@ class DatabaseManager:
     async def get_cases_for_update(self, filters: Dict) -> List[str]:
         """
         Получить номера дел для обновления
-        
-        Args:
-            filters: {
-                'defendant_keywords': ['доход'],
-                'exclude_event_types': ['Завершение дела', ...],
-                'update_interval_days': 2
-            }
-        
-        Returns:
-            ['6294-25-00-4/215', '6294-25-00-4/450', ...]
         """
         defendant_keywords = filters.get('defendant_keywords', [])
         exclude_events = filters.get('exclude_event_types', [])
@@ -1268,7 +1510,7 @@ class DatabaseManager:
         
         # Построение SQL запроса
         query = """
-            SELECT DISTINCT c.case_number
+            SELECT DISTINCT c.case_number, c.case_date
             FROM cases c
         """
         
@@ -1283,7 +1525,6 @@ class DatabaseManager:
                 JOIN parties p ON cp.party_id = p.id
             """
             
-            # OR логика для нескольких ключевых слов
             keyword_conditions = []
             for keyword in defendant_keywords:
                 keyword_conditions.append(f"p.name ILIKE ${param_counter}")
@@ -1328,6 +1569,7 @@ class DatabaseManager:
         async with self.pool.acquire() as conn:
             rows = await conn.fetch(query, *params)
         
+        # Извлекаем только номера дел
         case_numbers = [row['case_number'] for row in rows]
         
         self.logger.info(f"Найдено дел для обновления: {len(case_numbers)}")
@@ -1351,6 +1593,293 @@ class DatabaseManager:
             """, case_number)
         
         self.logger.debug(f"Дело помечено как обновлённое: {case_number}")
+
+    async def get_existing_case_numbers(
+        self, 
+        region_key: str, 
+        court_key: str, 
+        year: str,
+        settings
+    ) -> Set[int]:
+        """
+        Получить множество существующих порядковых номеров дел для региона/суда/года
+        
+        Args:
+            region_key: ключ региона ('astana', 'almaty', ...)
+            court_key: ключ суда ('smas', 'appellate')
+            year: год ('2025')
+            settings: экземпляр Settings для получения конфигурации
+        
+        Returns:
+            {1, 2, 5, 10, 15, 23, 45, 67, 89, 100, ...}
+        
+        Example:
+            >>> existing = await db.get_existing_case_numbers('astana', 'smas', '2025', settings)
+            >>> 1075 in existing
+            True
+        """
+        # Получаем конфигурацию для формирования префикса номера
+        region_config = settings.get_region(region_key)
+        court_config = settings.get_court(region_key, court_key)
+        
+        # Формируем префикс номера дела
+        # Например: "6294-25-00-4/" для Астаны, SMAS, 2025
+        kato = region_config['kato_code']
+        instance = court_config['instance_code']
+        year_short = year[-2:]  # "2025" → "25"
+        case_type = court_config['case_type_code']
+        
+        prefix = f"{kato}{instance}-{year_short}-00-{case_type}/"
+        
+        # SQL запрос
+        query = """
+            SELECT case_number
+            FROM cases
+            WHERE case_number LIKE $1
+        """
+        
+        async with self.pool.acquire() as conn:
+            rows = await conn.fetch(query, f"{prefix}%")
+        
+        # Извлекаем порядковые номера
+        sequence_numbers = set()
+        
+        for row in rows:
+            case_number = row['case_number']
+            # Извлекаем порядковый номер из "6294-25-00-4/1075"
+            if '/' in case_number:
+                try:
+                    seq_str = case_number.split('/')[-1]
+                    seq_num = int(seq_str)
+                    sequence_numbers.add(seq_num)
+                except (ValueError, IndexError):
+                    # Некорректный формат - пропускаем
+                    self.logger.warning(f"Некорректный формат номера: {case_number}")
+                    continue
+        
+        self.logger.info(
+            f"Загружено существующих номеров для {region_key}/{court_key}/{year}: {len(sequence_numbers)}"
+        )
+        
+        return sequence_numbers
+    
+    async def get_last_sequence_number(
+        self, 
+        region_key: str, 
+        court_key: str, 
+        year: str,
+        settings
+    ) -> int:
+        """
+        Получить последний (максимальный) порядковый номер дела для региона/суда/года
+        
+        Args:
+            region_key: ключ региона ('astana')
+            court_key: ключ суда ('smas', 'appellate')
+            year: год ('2025')
+            settings: экземпляр Settings
+        
+        Returns:
+            Максимальный порядковый номер или 0 если дел нет
+        
+        Example:
+            >>> last = await db.get_last_sequence_number('astana', 'smas', '2025', settings)
+            >>> last
+            1075
+        """
+        region_config = settings.get_region(region_key)
+        court_config = settings.get_court(region_key, court_key)
+        
+        # Формируем префикс номера дела
+        kato = region_config['kato_code']
+        instance = court_config['instance_code']
+        year_short = year[-2:]
+        case_type = court_config['case_type_code']
+        
+        prefix = f"{kato}{instance}-{year_short}-00-{case_type}/"
+        
+        query = """
+            SELECT case_number
+            FROM cases
+            WHERE case_number LIKE $1
+        """
+        
+        async with self.pool.acquire() as conn:
+            rows = await conn.fetch(query, f"{prefix}%")
+        
+        if not rows:
+            self.logger.info(f"Дел для {region_key}/{court_key}/{year} не найдено, начинаем с 1")
+            return 0
+        
+        # Извлекаем максимальный порядковый номер
+        max_sequence = 0
+        
+        for row in rows:
+            case_number = row['case_number']
+            if '/' in case_number:
+                try:
+                    seq_str = case_number.split('/')[-1]
+                    seq_num = int(seq_str)
+                    if seq_num > max_sequence:
+                        max_sequence = seq_num
+                except (ValueError, IndexError):
+                    continue
+        
+        self.logger.info(
+            f"Последний номер для {region_key}/{court_key}/{year}: {max_sequence}"
+        )
+        
+        return max_sequence
+
+
+# ============================================================================
+# МОДУЛЬ: parsers/court_parser/database/models.py
+# ============================================================================
+
+"""
+Структуры данных для БД
+"""
+
+
+@dataclass
+class CaseData:
+    """Данные дела"""
+    case_number: str
+    case_date: Optional[date] = None
+    judge: Optional[str] = None
+    plaintiffs: List[str] = field(default_factory=list)
+    defendants: List[str] = field(default_factory=list)
+    events: List['EventData'] = field(default_factory=list)
+    
+    def to_dict(self) -> dict:
+        """Преобразование в словарь"""
+        return {
+            'case_number': self.case_number,
+            'case_date': self.case_date,
+            'judge': self.judge,
+            'plaintiffs': self.plaintiffs,
+            'defendants': self.defendants,
+            'events': [e.to_dict() for e in self.events]
+        }
+
+
+@dataclass
+class EventData:
+    """Данные события"""
+    event_type: str
+    event_date: date
+    
+    def to_dict(self) -> dict:
+        return {
+            'event_type': self.event_type,
+            'event_date': self.event_date
+        }
+
+
+@dataclass
+class SearchResult:
+    """Результат поиска"""
+    found: bool
+    case_data: Optional[CaseData] = None
+    error: Optional[str] = None
+
+
+# ============================================================================
+# МОДУЛЬ: parsers/court_parser/parsing/data_extractor.py
+# ============================================================================
+
+"""
+Извлечение данных из HTML элементов
+"""
+
+# REMOVED IMPORT: from database.models import EventData
+# REMOVED IMPORT: from utils.text_processor import TextProcessor
+# REMOVED IMPORT: from utils.logger import get_logger
+
+
+class DataExtractor:
+    """Извлечение данных из HTML элементов"""
+    
+    def __init__(self):
+        self.text_processor = TextProcessor()
+        self.logger = get_logger('data_extractor')
+    
+    def extract_case_info(self, cell) -> Tuple[str, Optional[date]]:
+        """
+        Извлечение номера дела и даты
+        
+        Возвращает: (case_number, case_date)
+        """
+        paragraphs = cell.css('p')
+        case_number = ""
+        case_date = None
+        
+        if paragraphs:
+            # Первый параграф - номер дела
+            case_number = self.text_processor.clean(paragraphs[0].text())
+            
+            # Второй параграф - дата (если есть)
+            if len(paragraphs) > 1:
+                date_str = self.text_processor.clean(paragraphs[1].text())
+                parsed_date = self.text_processor.parse_date(date_str)
+                if parsed_date:
+                    case_date = parsed_date.date()
+        
+        return case_number, case_date
+    
+    def extract_parties(self, cell) -> Tuple[List[str], List[str]]:
+        """
+        Извлечение сторон дела
+        
+        Возвращает: (plaintiffs, defendants)
+        """
+        paragraphs = cell.css('p')
+        plaintiffs = []
+        defendants = []
+        
+        if len(paragraphs) >= 2:
+            # Первый параграф - истцы
+            plaintiffs_text = self.text_processor.clean(paragraphs[0].text())
+            if plaintiffs_text:
+                plaintiffs = self.text_processor.split_parties(plaintiffs_text)
+            
+            # Второй параграф - ответчики
+            defendants_text = self.text_processor.clean(paragraphs[1].text())
+            if defendants_text:
+                defendants = self.text_processor.split_parties(defendants_text)
+        
+        return plaintiffs, defendants
+    
+    def extract_judge(self, cell) -> Optional[str]:
+        """Извлечение имени судьи"""
+        judge_text = self.text_processor.clean(cell.text())
+        return judge_text if judge_text else None
+    
+    def extract_events(self, cell) -> List[EventData]:
+        """Извлечение событий дела"""
+        paragraphs = cell.css('p')
+        events = []
+        
+        for paragraph in paragraphs:
+            text = self.text_processor.clean(paragraph.text())
+            
+            # Формат: "15.01.2025 - Дело принято к производству"
+            if ' - ' in text:
+                try:
+                    date_part, event_part = text.split(' - ', 1)
+                    
+                    parsed_date = self.text_processor.parse_date(date_part)
+                    event_type = self.text_processor.clean(event_part)
+                    
+                    if parsed_date and event_type:
+                        events.append(EventData(
+                            event_type=event_type,
+                            event_date=parsed_date.date()
+                        ))
+                except ValueError:
+                    continue
+        
+        return events
 
 
 # ============================================================================
@@ -1460,104 +1989,6 @@ class ResultsParser:
 
 
 # ============================================================================
-# МОДУЛЬ: parsers/court_parser/parsing/data_extractor.py
-# ============================================================================
-
-"""
-Извлечение данных из HTML элементов
-"""
-
-# REMOVED IMPORT: from database.models import EventData
-# REMOVED IMPORT: from utils.text_processor import TextProcessor
-# REMOVED IMPORT: from utils.logger import get_logger
-
-
-class DataExtractor:
-    """Извлечение данных из HTML элементов"""
-    
-    def __init__(self):
-        self.text_processor = TextProcessor()
-        self.logger = get_logger('data_extractor')
-    
-    def extract_case_info(self, cell) -> Tuple[str, Optional[date]]:
-        """
-        Извлечение номера дела и даты
-        
-        Возвращает: (case_number, case_date)
-        """
-        paragraphs = cell.css('p')
-        case_number = ""
-        case_date = None
-        
-        if paragraphs:
-            # Первый параграф - номер дела
-            case_number = self.text_processor.clean(paragraphs[0].text())
-            
-            # Второй параграф - дата (если есть)
-            if len(paragraphs) > 1:
-                date_str = self.text_processor.clean(paragraphs[1].text())
-                parsed_date = self.text_processor.parse_date(date_str)
-                if parsed_date:
-                    case_date = parsed_date.date()
-        
-        return case_number, case_date
-    
-    def extract_parties(self, cell) -> Tuple[List[str], List[str]]:
-        """
-        Извлечение сторон дела
-        
-        Возвращает: (plaintiffs, defendants)
-        """
-        paragraphs = cell.css('p')
-        plaintiffs = []
-        defendants = []
-        
-        if len(paragraphs) >= 2:
-            # Первый параграф - истцы
-            plaintiffs_text = self.text_processor.clean(paragraphs[0].text())
-            if plaintiffs_text:
-                plaintiffs = self.text_processor.split_parties(plaintiffs_text)
-            
-            # Второй параграф - ответчики
-            defendants_text = self.text_processor.clean(paragraphs[1].text())
-            if defendants_text:
-                defendants = self.text_processor.split_parties(defendants_text)
-        
-        return plaintiffs, defendants
-    
-    def extract_judge(self, cell) -> Optional[str]:
-        """Извлечение имени судьи"""
-        judge_text = self.text_processor.clean(cell.text())
-        return judge_text if judge_text else None
-    
-    def extract_events(self, cell) -> List[EventData]:
-        """Извлечение событий дела"""
-        paragraphs = cell.css('p')
-        events = []
-        
-        for paragraph in paragraphs:
-            text = self.text_processor.clean(paragraph.text())
-            
-            # Формат: "15.01.2025 - Дело принято к производству"
-            if ' - ' in text:
-                try:
-                    date_part, event_part = text.split(' - ', 1)
-                    
-                    parsed_date = self.text_processor.parse_date(date_part)
-                    event_type = self.text_processor.clean(event_part)
-                    
-                    if parsed_date and event_type:
-                        events.append(EventData(
-                            event_type=event_type,
-                            event_date=parsed_date.date()
-                        ))
-                except ValueError:
-                    continue
-        
-        return events
-
-
-# ============================================================================
 # МОДУЛЬ: parsers/court_parser/search/form_handler.py
 # ============================================================================
 
@@ -1570,19 +2001,34 @@ class DataExtractor:
 
 
 class FormHandler:
-    """Обработчик поисковой формы"""
+    """Обработчик поисковой формы с кешированием ID"""
     
     def __init__(self, base_url: str):
         self.base_url = base_url
         self.logger = get_logger('form_handler')
+        
+        # Кеш ID формы (извлекается один раз за сессию)
+        self._cached_form_ids: Optional[Dict[str, str]] = None
+        self._cache_initialized: bool = False
+    
+    def reset_cache(self):
+        """
+        Сброс кеша ID формы
+        
+        Вызывать при:
+        - Переавторизации
+        - Ошибках, связанных с невалидными ID
+        """
+        self._cached_form_ids = None
+        self._cache_initialized = False
+        self.logger.debug("Кеш ID формы сброшен")
     
     async def prepare_search_form(self, session: aiohttp.ClientSession) -> tuple:
         """
         Подготовка формы поиска
         
-        Raises:
-            aiohttp.ClientError: при HTTP 500, 502, 503, 504 (retriable)
-            NonRetriableError: при HTTP 400, 401, 403, 404 (non-retriable)
+        - ViewState: извлекается КАЖДЫЙ раз (уникален для каждого запроса)
+        - Form IDs: извлекаются ОДИН раз и кешируются
         
         Returns:
             (viewstate, form_ids)
@@ -1592,47 +2038,43 @@ class FormHandler:
         
         try:
             async with session.get(url, headers=headers) as response:
-                # ОБРАБОТКА HTTP СТАТУСОВ
-                
-                # Постоянные ошибки
+                # Обработка HTTP ошибок
                 if response.status in [400, 401, 403, 404]:
-                    self.logger.error(f"HTTP {response.status} при загрузке формы")
                     raise NonRetriableError(f"HTTP {response.status}: Постоянная ошибка")
                 
-                # Временные ошибки
                 if response.status in [500, 502, 503, 504]:
-                    self.logger.warning(f"HTTP {response.status}: Временная ошибка сервера")
                     raise aiohttp.ClientError(f"HTTP {response.status}: Сервер недоступен")
                 
-                # Другие ошибки
                 if response.status != 200:
-                    self.logger.error(f"HTTP {response.status} при загрузке формы")
                     raise aiohttp.ClientError(f"HTTP {response.status}: Неожиданная ошибка")
                 
                 html = await response.text()
-                viewstate = self._extract_viewstate(html)
-                form_ids = self._extract_form_ids(html)
                 
-                self.logger.debug("Форма поиска подготовлена")
-                return viewstate, form_ids
+                # ViewState — всегда извлекаем заново
+                viewstate = self._extract_viewstate(html)
+                
+                # Form IDs — извлекаем только один раз
+                if not self._cache_initialized:
+                    self._cached_form_ids = self._extract_form_ids(html)
+                    self._cache_initialized = True
+                    
+                    self.logger.info("📋 ID формы извлечены и закешированы:")
+                    for key, value in self._cached_form_ids.items():
+                        self.logger.info(f"   {key}: {value}")
+                
+                return viewstate, self._cached_form_ids
         
         except (aiohttp.ClientError, NonRetriableError):
             raise
         
         except Exception as e:
-            self.logger.error(f"Неожиданная ошибка при подготовке формы: {e}")
+            self.logger.error(f"Ошибка подготовки формы: {e}")
             raise aiohttp.ClientError(f"Ошибка подготовки формы: {e}")
     
     async def select_region(self, session: aiohttp.ClientSession, 
-                      viewstate: str, region_id: str, 
-                      form_ids: Dict[str, str]):
-        """
-        Выбор региона в форме
-        
-        Raises:
-            aiohttp.ClientError: при retriable ошибках
-            NonRetriableError: при non-retriable ошибках
-        """
+                           viewstate: str, region_id: str, 
+                           form_ids: Dict[str, str]):
+        """Выбор региона в форме"""
         url = f"{self.base_url}/form/lawsuit/index.xhtml"
         form_base = form_ids.get('form_base', 'j_idt45:j_idt46')
         
@@ -1661,22 +2103,14 @@ class FormHandler:
         
         try:
             async with session.post(url, data=data, headers=headers) as response:
-                # ОБРАБОТКА HTTP СТАТУСОВ
-                
-                # Постоянные ошибки
                 if response.status in [400, 401, 403, 404]:
-                    self.logger.error(f"HTTP {response.status} при выборе региона")
-                    raise NonRetriableError(f"HTTP {response.status}: Постоянная ошибка")
+                    raise NonRetriableError(f"HTTP {response.status}")
                 
-                # Временные ошибки
                 if response.status in [500, 502, 503, 504]:
-                    self.logger.warning(f"HTTP {response.status}: Временная ошибка сервера")
-                    raise aiohttp.ClientError(f"HTTP {response.status}: Сервер недоступен")
+                    raise aiohttp.ClientError(f"HTTP {response.status}")
                 
-                # Другие ошибки
                 if response.status != 200:
-                    self.logger.error(f"HTTP {response.status} при выборе региона")
-                    raise aiohttp.ClientError(f"HTTP {response.status}: Неожиданная ошибка")
+                    raise aiohttp.ClientError(f"HTTP {response.status}")
                 
                 self.logger.debug(f"Регион выбран: {region_id}")
         
@@ -1684,7 +2118,6 @@ class FormHandler:
             raise
         
         except Exception as e:
-            self.logger.error(f"Неожиданная ошибка при выборе региона: {e}")
             raise aiohttp.ClientError(f"Ошибка выбора региона: {e}")
     
     def _extract_viewstate(self, html: str) -> Optional[str]:
@@ -1692,7 +2125,7 @@ class FormHandler:
         parser = HTMLParser(html)
         viewstate_input = parser.css_first('input[name="javax.faces.ViewState"]')
         
-        if viewstate_input:
+        if viewstate_input and viewstate_input.attributes:
             return viewstate_input.attributes.get('value')
         return None
     
@@ -1703,7 +2136,7 @@ class FormHandler:
         
         # Поиск базового ID формы
         form = parser.css_first('form')
-        if form and form.attributes.get('id'):
+        if form and form.attributes and form.attributes.get('id'):
             ids['form_id'] = form.attributes['id']
         
         # Поиск полей формы
@@ -1712,14 +2145,45 @@ class FormHandler:
         for field in field_mappings:
             elements = parser.css(f'[id*="{field}"]')
             for element in elements:
-                if element.attributes.get('id'):
+                if element.attributes and element.attributes.get('id'):
                     ids[field] = element.attributes['id']
                     name = element.attributes.get('name', '')
                     if ':' in name:
                         ids['form_base'] = ':'.join(name.split(':')[:-1])
                     break
         
+        # Извлечение ID кнопки поиска
+        search_button = self._extract_search_button_id(html, ids.get('form_base', ''))
+        if search_button:
+            ids['search_button'] = search_button
+        else:
+            self.logger.warning("ID кнопки поиска не найден, будет использован fallback")
+        
         return ids
+    
+    def _extract_search_button_id(self, html: str, form_base: str) -> Optional[str]:
+        """
+        Извлечение ID кнопки поиска из RichFaces скрипта
+        
+        Ищет паттерн: goNext = function(...) { RichFaces.ajax("ID", ...)
+        """
+        
+        pattern = r'goNext\s*=\s*function\s*\([^)]*\)\s*\{\s*RichFaces\.ajax\s*\(\s*["\']([^"\']+)["\']'
+        match = re.search(pattern, html)
+        
+        if match:
+            button_id = match.group(1)
+            
+            # Валидация: ID должен начинаться с form_base
+            if form_base and not button_id.startswith(form_base):
+                self.logger.warning(
+                    f"ID '{button_id}' не соответствует form_base '{form_base}'"
+                )
+                return None
+            
+            return button_id
+        
+        return None
     
     def _get_headers(self) -> Dict[str, str]:
         """Базовые заголовки"""
@@ -1758,71 +2222,62 @@ class SearchEngine:
         self.base_url = base_url
         self.logger = get_logger('search_engine')
     
-    async def search_case(self, session: aiohttp.ClientSession,
-                 viewstate: str, region_id: str, court_id: str,
-                 year: str, full_case_number: str,
-                 form_ids: Dict[str, str],
-                 extract_sequence: bool = False) -> str:  # ← ДОБАВЛЕН параметр
+    async def search_case(
+        self, 
+        session: aiohttp.ClientSession,
+        viewstate: str, 
+        region_id: str, 
+        court_id: str,
+        year: str, 
+        sequence_number: int,
+        form_ids: Dict[str, str]
+    ) -> str:
         """
-        Поиск дела
+        Поиск дела по порядковому номеру
         
         Args:
-            full_case_number: полный номер дела (например, "6294-25-00-4/215")
-            extract_sequence: 
-                False (default) - передать полный номер в FormData (Full Scan Mode)
-                True - передать только порядковый номер в FormData (Update Mode)
+            sequence_number: порядковый номер (1, 2, 3, ...)
         
         Returns:
             HTML с результатами
         """
-        # Отправка поискового запроса
         await self._send_search_request(
             session, viewstate, region_id, court_id,
-            year, full_case_number, form_ids, extract_sequence  # ← ДОБАВЛЕН параметр
+            year, sequence_number, form_ids
         )
         
-        # Небольшая задержка для обработки на сервере
         await asyncio.sleep(0.5)
         
-        # Получение результатов
         results_html = await self._get_results(session)
         
-        self.logger.debug(f"Поиск выполнен для номера: {full_case_number}")
+        self.logger.debug(f"Поиск выполнен для номера: {sequence_number}")
         return results_html
     
-    async def _send_search_request(self, session: aiohttp.ClientSession,
-                      viewstate: str, region_id: str, court_id: str,
-                      year: str, full_case_number: str,
-                      form_ids: Dict[str, str],
-                      extract_sequence: bool = False):
+    async def _send_search_request(
+        self, 
+        session: aiohttp.ClientSession,
+        viewstate: str, 
+        region_id: str, 
+        court_id: str,
+        year: str, 
+        sequence_number: int,
+        form_ids: Dict[str, str]
+    ):
         """
         Отправка поискового запроса
         
-        Args:
-            extract_sequence: 
-                False - передать полный номер в FormData (Full Scan Mode)
-                True - передать только порядковый номер в FormData (Update Mode)
-        
-        Raises:
-            aiohttp.ClientError: при HTTP 500, 502, 503, 504 (retriable)
-            NonRetriableError: при HTTP 400, 401, 403, 404 (non-retriable)
+        В edit-num всегда передаётся только порядковый номер
         """
         url = f"{self.base_url}/form/lawsuit/index.xhtml"
         form_base = form_ids.get('form_base', 'j_idt45:j_idt46')
-        search_button = f'{form_base}:j_idt83'
         
-        # КЛЮЧЕВАЯ ЛОГИКА: Выбор что передавать в FormData
-        if extract_sequence:
-            # Update Mode: только порядковый номер
-            if '/' in full_case_number:
-                search_number = full_case_number.split('/')[-1]  # "215"
-            else:
-                search_number = full_case_number
-            self.logger.debug(f"Update Mode: извлечён порядковый {search_number} из {full_case_number}")
-        else:
-            # Full Scan Mode: полный номер
-            search_number = full_case_number  # "6294-25-00-4/1"
-            self.logger.debug(f"Full Scan Mode: используется полный номер {search_number}")
+        search_button = form_ids.get('search_button')
+        if not search_button:
+            search_button = f'{form_base}:j_idt83'
+            self.logger.warning(f"Fallback ID кнопки: {search_button}")
+        
+        # Всегда передаём только порядковый номер
+        search_number = str(sequence_number)
         
         data = {
             form_base: form_base,
@@ -1831,7 +2286,7 @@ class SearchEngine:
             f'{form_base}:edit-court': court_id,
             f'{form_base}:edit-year': year,
             f'{form_base}:edit-iin': '',
-            f'{form_base}:edit-num': search_number,  # ← Зависит от режима!
+            f'{form_base}:edit-num': search_number,
             f'{form_base}:edit-fio': '',
             'javax.faces.ViewState': viewstate,
             'javax.faces.source': search_button,
@@ -1845,95 +2300,50 @@ class SearchEngine:
             'javax.faces.partial.ajax': 'true'
         }
         
-        # Логирование для отладки
-        self.logger.debug(f"🔍 Поиск дела:")
-        self.logger.debug(f"   Регион ID: {region_id}")
-        self.logger.debug(f"   Суд ID: {court_id}")
-        self.logger.debug(f"   Год: {year}")
-        self.logger.debug(f"   Полный номер: {full_case_number}")
-        self.logger.debug(f"   В FormData: {search_number}")
+        self.logger.debug(f"🔍 Поиск: регион={region_id}, суд={court_id}, год={year}, номер={search_number}")
         
         headers = self._get_ajax_headers()
         
         try:
             async with session.post(url, data=data, headers=headers) as response:
-                # ОБРАБОТКА HTTP СТАТУСОВ
-                
-                # Постоянные ошибки (non-retriable)
                 if response.status in [400, 401, 403, 404]:
-                    self.logger.error(f"HTTP {response.status} при отправке поиска")
-                    raise NonRetriableError(f"HTTP {response.status}: Постоянная ошибка")
+                    raise NonRetriableError(f"HTTP {response.status}")
                 
-                # Временные ошибки сервера (retriable)
                 if response.status in [500, 502, 503, 504]:
-                    self.logger.warning(f"HTTP {response.status}: Временная ошибка сервера")
-                    raise aiohttp.ClientError(f"HTTP {response.status}: Сервер недоступен")
+                    raise aiohttp.ClientError(f"HTTP {response.status}")
                 
-                # Другие ошибки
                 if response.status != 200:
-                    self.logger.error(f"HTTP {response.status} при отправке поиска")
-                    raise aiohttp.ClientError(f"HTTP {response.status}: Неожиданная ошибка")
+                    raise aiohttp.ClientError(f"HTTP {response.status}")
                 
                 await response.text()
         
         except (aiohttp.ClientError, NonRetriableError):
-            # Пробрасываем исключения для retry
             raise
-        
         except Exception as e:
-            # Неожиданная ошибка
-            self.logger.error(f"Неожиданная ошибка при поиске: {e}")
             raise aiohttp.ClientError(f"Ошибка поиска: {e}")
     
     async def _get_results(self, session: aiohttp.ClientSession) -> str:
-        """
-        Получение страницы с результатами
-        
-        Raises:
-            aiohttp.ClientError: при HTTP 500, 502, 503, 504 (retriable)
-            NonRetriableError: при HTTP 400, 401, 403, 404 (non-retriable)
-        
-        Returns:
-            HTML страницы с результатами
-        """
+        """Получение страницы с результатами"""
         url = f"{self.base_url}/lawsuit/lawsuitList.xhtml"
         headers = self._get_headers()
         
         try:
             async with session.get(url, headers=headers) as response:
-                # ОБРАБОТКА HTTP СТАТУСОВ
-                
-                # Постоянные ошибки (non-retriable)
                 if response.status in [400, 401, 403, 404]:
-                    self.logger.error(f"HTTP {response.status} при получении результатов")
-                    raise NonRetriableError(f"HTTP {response.status}: Постоянная ошибка")
+                    raise NonRetriableError(f"HTTP {response.status}")
                 
-                # Временные ошибки сервера (retriable)
                 if response.status in [500, 502, 503, 504]:
-                    self.logger.warning(f"HTTP {response.status}: Временная ошибка сервера")
-                    raise aiohttp.ClientError(f"HTTP {response.status}: Сервер недоступен")
+                    raise aiohttp.ClientError(f"HTTP {response.status}")
                 
-                # Другие ошибки
                 if response.status != 200:
-                    self.logger.error(f"HTTP {response.status} при получении результатов")
-                    raise aiohttp.ClientError(f"HTTP {response.status}: Неожиданная ошибка")
+                    raise aiohttp.ClientError(f"HTTP {response.status}")
                 
                 return await response.text()
         
         except (aiohttp.ClientError, NonRetriableError):
-            # Пробрасываем исключения для retry
             raise
-        
         except Exception as e:
-            # Неожиданная ошибка
-            self.logger.error(f"Неожиданная ошибка при получении результатов: {e}")
             raise aiohttp.ClientError(f"Ошибка получения результатов: {e}")
-        
-        async with session.get(url, headers=headers) as response:
-            if response.status != 200:
-                raise Exception(f"HTTP {response.status} при получении результатов")
-            
-            return await response.text()
     
     def _get_headers(self) -> Dict[str, str]:
         """Базовые заголовки"""
@@ -1952,6 +2362,337 @@ class SearchEngine:
             'Faces-Request': 'partial/ajax'
         })
         return headers
+
+
+# ============================================================================
+# МОДУЛЬ: parsers/court_parser/core/parser.py
+# ============================================================================
+
+"""
+Главный класс парсера с retry и восстановлением
+"""
+
+
+# REMOVED IMPORT: from config.settings import Settings
+# REMOVED IMPORT: from core.session import SessionManager
+# REMOVED IMPORT: from auth.authenticator import Authenticator
+# REMOVED IMPORT: from search.form_handler import FormHandler
+# REMOVED IMPORT: from search.search_engine import SearchEngine
+# REMOVED IMPORT: from parsing.html_parser import ResultsParser
+# REMOVED IMPORT: from database.db_manager import DatabaseManager
+# REMOVED IMPORT: from database.models import CaseData, SearchResult
+# REMOVED IMPORT: from utils.text_processor import TextProcessor
+# REMOVED IMPORT: from utils.logger import get_logger
+# REMOVED IMPORT: from utils.retry import RetryStrategy, RetryConfig, NonRetriableError
+
+class CourtParser:
+    """Главный класс парсера"""
+    
+    def __init__(self, config_path: Optional[str] = None):
+        # Загрузка конфигурации
+        self.settings = Settings(config_path)
+        
+        # Retry конфигурация
+        self.retry_config = self.settings.config.get('retry_settings', {})
+        
+        # Инициализация компонентов
+        self.session_manager = SessionManager(
+            timeout=30,
+            retry_config=self.retry_config
+        )
+        
+        self.authenticator = Authenticator(
+            self.settings.base_url,
+            self.settings.auth,
+            retry_config=self.retry_config
+        )
+        
+        self.form_handler = FormHandler(self.settings.base_url)
+        self.search_engine = SearchEngine(self.settings.base_url)
+        self.results_parser = ResultsParser()
+        self.db_manager = DatabaseManager(self.settings.database)
+        self.text_processor = TextProcessor()
+        
+        # Lock для stateful операций
+        self.form_lock = asyncio.Lock()
+        
+        # Счётчики ошибок
+        self.session_error_count = 0
+        self.max_session_errors = 10
+        self.reauth_count = 0
+        self.max_reauth = self.retry_config.get('session_recovery', {}).get(
+            'max_reauth_attempts', 2
+        )
+        
+        
+        self.logger = get_logger('court_parser')
+        self.logger.info("🚀 Парсер инициализирован")
+    
+    async def initialize(self):
+        """Инициализация"""
+        try:
+            await self.db_manager.connect()
+            await self.authenticator.authenticate(self.session_manager)
+            self.logger.info("✅ Парсер готов к работе")
+        except Exception as e:
+            self.logger.error(f"❌ Ошибка инициализации: {e}")
+            await self.cleanup()
+            raise
+    
+    async def cleanup(self):
+        """Очистка ресурсов"""
+        try:
+            await self.db_manager.disconnect()
+        except:
+            pass
+        
+        try:
+            await self.session_manager.close()
+        except:
+            pass
+        
+        self.logger.info("Ресурсы очищены")
+    
+    async def search_and_save(
+        self, 
+        region_key: str, 
+        court_key: str,
+        sequence_number: int, 
+        year: str = "2025"
+    ) -> Dict[str, Any]:
+        """
+        Поиск и сохранение дела
+        
+        Args:
+            region_key: ключ региона ('astana')
+            court_key: ключ суда ('smas', 'appellate')
+            sequence_number: порядковый номер (1, 2, 3, ...)
+            year: год ('2025')
+        
+        Returns:
+            {
+                'success': True/False,
+                'saved': True/False,
+                'case_number': '6294-25-00-4/215',
+                'error': None или строка
+            }
+        """
+        search_retry_config = self.retry_config.get('search_case', {})
+        
+        if not search_retry_config:
+            return await self._do_search_and_save(
+                region_key, court_key, sequence_number, year
+            )
+        
+        # С retry
+        retry_cfg = RetryConfig(search_retry_config)
+        strategy = RetryStrategy(retry_cfg, self.session_manager.circuit_breaker)
+        
+        async def _search_with_recovery():
+            try:
+                return await self._do_search_and_save(
+                    region_key, court_key, sequence_number, year
+                )
+            except Exception as e:
+                if await self._handle_session_recovery(e):
+                    return await self._do_search_and_save(
+                        region_key, court_key, sequence_number, year
+                    )
+                raise
+        
+        try:
+            result = await strategy.execute_with_retry(
+                _search_with_recovery,
+                error_context=f"Поиск дела #{sequence_number}"
+            )
+            self.session_error_count = 0
+            return result
+        
+        except NonRetriableError as e:
+            return {
+                'success': False,
+                'saved': False,
+                'case_number': None,
+                'error': str(e)
+            }
+        
+        except Exception as e:
+            self.session_error_count += 1
+            self.logger.error(f"❌ Ошибка поиска: {e}")
+            return {
+                'success': False,
+                'saved': False,
+                'case_number': None,
+                'error': str(e)
+            }
+    
+    async def _do_search_and_save(
+        self, 
+        region_key: str, 
+        court_key: str,
+        sequence_number: int, 
+        year: str
+    ) -> Dict[str, Any]:
+        """
+        Один цикл поиска и сохранения
+        """
+        region_config = self.settings.get_region(region_key)
+        court_config = self.settings.get_court(region_key, court_key)
+        
+        target_case_number = self.text_processor.generate_case_number(
+            region_config, court_config, year, sequence_number
+        )
+        
+        self.logger.info(f"🔍 Ищу дело: {target_case_number}")
+        
+        # Работа с формой
+        async with self.form_lock:
+            session = await self.session_manager.get_session()
+            
+            viewstate, form_ids = await self.form_handler.prepare_search_form(session)
+            
+            await self.form_handler.select_region(
+                session, viewstate, region_config['id'], form_ids
+            )
+            
+            await asyncio.sleep(1)
+            
+            results_html = await self.search_engine.search_case(
+                session, viewstate, 
+                region_config['id'], 
+                court_config['id'],
+                year, 
+                sequence_number,
+                form_ids
+            )
+        
+        # Парсинг результатов
+        cases = self.results_parser.parse(results_html)
+        
+        if not cases:
+            self.logger.info(f"❌ Ничего не найдено: {target_case_number}")
+            return {
+                'success': False,
+                'saved': False,
+                'case_number': target_case_number,
+                'error': 'no_results'
+            }
+        
+        # Выбор дела для сохранения
+        case_to_save = self._select_case_to_save(
+            cases, court_key, target_case_number
+        )
+        
+        if not case_to_save:
+            self.logger.warning(f"⚠️ Целевое дело не найдено: {target_case_number}")
+            return {
+                'success': False,
+                'saved': False,
+                'case_number': target_case_number,
+                'error': 'target_not_found'
+            }
+        
+        # Сохранение
+        save_result = await self.db_manager.save_case(case_to_save)
+        
+        if save_result['status'] in ['saved', 'updated']:
+            judge_info = "✅ судья" if case_to_save.judge else "⚠️ без судьи"
+            parties = len(case_to_save.plaintiffs) + len(case_to_save.defendants)
+            events = len(case_to_save.events)
+            
+            self.logger.info(
+                f"✅ Сохранено: {case_to_save.case_number} "
+                f"({judge_info}, {parties} сторон, {events} событий)"
+            )
+            
+            return {
+                'success': True,
+                'saved': True,
+                'case_number': case_to_save.case_number
+            }
+        
+        return {
+            'success': False,
+            'saved': False,
+            'case_number': target_case_number,
+            'error': 'save_failed'
+        }
+    
+    def _select_case_to_save( self, 
+        cases: List[CaseData], 
+        court_key: str, 
+        target_case_number: str
+    ) -> Optional[CaseData]:
+        """
+        Выбор дела для сохранения в зависимости от типа суда
+        
+        Args:
+            cases: список найденных дел
+            court_key: тип суда ('smas', 'appellate')
+            target_case_number: целевой номер дела
+        
+        Returns:
+            CaseData или None
+        """
+        if court_key == 'smas':
+            # СМЭС: сервер возвращает одно дело — берём первое
+            if cases:
+                return cases[0]
+            return None
+        
+        elif court_key == 'appellate':
+            # Апелляция: ищем целевое дело по точному номеру
+            for case in cases:
+                if case.case_number == target_case_number:
+                    return case
+            
+            # Если не нашли точное совпадение — логируем что вернулось
+            self.logger.debug(
+                f"Апелляция: получено {len(cases)} дел, "
+                f"целевое {target_case_number} не найдено"
+            )
+            for case in cases:
+                self.logger.debug(f"  - {case.case_number}")
+            
+            return None
+        
+        else:
+            # Другие типы судов: по умолчанию ищем целевое
+            for case in cases:
+                if case.case_number == target_case_number:
+                    return case
+            return cases[0] if cases else None
+    
+    async def _handle_session_recovery(self, error: Exception) -> bool:
+        """Восстановление сессии"""
+        if not (isinstance(error, (aiohttp.ClientError, NonRetriableError)) 
+                and '401' in str(error)):
+            return False
+        
+        if self.reauth_count >= self.max_reauth:
+            return False
+        
+        self.reauth_count += 1
+        self.logger.warning(f"⚠️ Переавторизация ({self.reauth_count}/{self.max_reauth})...")
+        
+        try:
+            await self.authenticator.authenticate(self.session_manager)
+            self.form_handler.reset_cache()
+            self.session_error_count = 0
+            self.logger.info("✅ Переавторизация успешна")
+            return True
+        except Exception as e:
+            self.logger.error(f"❌ Переавторизация не удалась: {e}")
+            return False
+    
+    
+    async def __aenter__(self):
+        await self.initialize()
+        return self
+    
+    async def __aexit__(self, exc_type, exc_val, exc_tb):
+        await self.cleanup()
+        return False
 
 
 # ============================================================================
@@ -2076,418 +2817,16 @@ class SessionManager:
 
 
 # ============================================================================
-# МОДУЛЬ: parsers/court_parser/core/parser.py
+# МОДУЛЬ: parsers/court_parser/__init__.py
 # ============================================================================
 
 """
-Главный класс парсера с retry и восстановлением
+Court Parser - Парсер судебных дел Казахстана
 """
-
-
-# REMOVED IMPORT: from config.settings import Settings
-# REMOVED IMPORT: from core.session import SessionManager
-# REMOVED IMPORT: from auth.authenticator import Authenticator
-# REMOVED IMPORT: from search.form_handler import FormHandler
-# REMOVED IMPORT: from search.search_engine import SearchEngine
-# REMOVED IMPORT: from parsing.html_parser import ResultsParser
-# REMOVED IMPORT: from database.db_manager import DatabaseManager
-# REMOVED IMPORT: from database.models import CaseData, SearchResult
-# REMOVED IMPORT: from utils.text_processor import TextProcessor
-# REMOVED IMPORT: from utils.logger import get_logger
-# REMOVED IMPORT: from utils.retry import RetryStrategy, RetryConfig, NonRetriableError
-
-
-class CourtParser:
-    """Главный класс парсера с retry и восстановлением"""
-    
-    def __init__(self, config_path: Optional[str] = None, update_mode: bool = False):
-        # Загрузка конфигурации
-        self.settings = Settings(config_path)
-        
-        # РЕЖИМ РАБОТЫ
-        self.update_mode = update_mode
-        
-        # Retry конфигурация
-        self.retry_config = self.settings.config.get('retry_settings', {})
-        
-        # Инициализация компонентов с retry
-        self.session_manager = SessionManager(
-            timeout=30,
-            retry_config=self.retry_config
-        )
-        
-        self.authenticator = Authenticator(
-            self.settings.base_url,
-            self.settings.auth,
-            retry_config=self.retry_config
-        )
-        
-        self.form_handler = FormHandler(self.settings.base_url)
-        self.search_engine = SearchEngine(self.settings.base_url)
-        self.results_parser = ResultsParser()
-        self.db_manager = DatabaseManager(self.settings.database)
-        self.text_processor = TextProcessor()
-        
-        # НОВОЕ: Lock для stateful операций с формой
-        self.form_lock = asyncio.Lock()
-        
-        # Счетчик ошибок для переавторизации
-        self.session_error_count = 0
-        self.max_session_errors = 10
-        
-        # Счетчик переавторизаций
-        self.reauth_count = 0
-        self.max_reauth = self.retry_config.get('session_recovery', {}).get(
-            'max_reauth_attempts', 2
-        )
-        
-        self.logger = get_logger('court_parser')
-        
-        # Логирование режима
-        mode_name = "Update Mode" if self.update_mode else "Full Scan Mode"
-        self.logger.info(f"🚀 Парсер инициализирован в режиме: {mode_name}")
-    
-    async def initialize(self):
-        """Инициализация (подключение к БД, авторизация)"""
-        try:
-            await self.db_manager.connect()
-            await self.authenticator.authenticate(self.session_manager)
-            self.logger.info("✅ Парсер готов к работе")
-        except Exception as e:
-            # При ошибке инициализации закрываем ресурсы
-            self.logger.error(f"❌ Ошибка инициализации: {e}")
-            await self.cleanup()
-            raise
-    
-    async def cleanup(self):
-        """Очистка ресурсов"""
-        try:
-            await self.db_manager.disconnect()
-        except Exception as e:
-            self.logger.error(f"Ошибка закрытия БД: {e}")
-        
-        try:
-            await self.session_manager.close()
-        except Exception as e:
-            self.logger.error(f"Ошибка закрытия сессии: {e}")
-        
-        self.logger.info("Ресурсы очищены")
-    
-    async def _handle_session_recovery(self, error: Exception) -> bool:
-        """
-        Обработка восстановления сессии
-        
-        Returns:
-            True если удалось восстановить, False если нет
-        """
-        reauth_on_401 = self.retry_config.get('session_recovery', {}).get('reauth_on_401', True)
-        
-        # Проверяем что это HTTP 401
-        if not (isinstance(error, (aiohttp.ClientError, NonRetriableError)) and '401' in str(error)):
-            return False
-        
-        if not reauth_on_401:
-            return False
-        
-        # Проверяем лимит переавторизаций
-        if self.reauth_count >= self.max_reauth:
-            self.logger.error(
-                f"❌ Достигнут лимит переавторизаций ({self.max_reauth})"
-            )
-            return False
-        
-        self.reauth_count += 1
-        
-        self.logger.warning(
-            f"⚠️ HTTP 401: Сессия истекла, переавторизация "
-            f"({self.reauth_count}/{self.max_reauth})..."
-        )
-        
-        try:
-            await self.authenticator.authenticate(self.session_manager)
-            self.session_error_count = 0  # Сброс счетчика ошибок
-            self.logger.info("✅ Переавторизация успешна")
-            return True
-        
-        except Exception as e:
-            self.logger.error(f"❌ Переавторизация не удалась: {e}")
-            return False
-    
-    async def _handle_rate_limit(self, response: aiohttp.ClientResponse):
-        """Обработка HTTP 429 (Rate Limit)"""
-        rate_limit_config = self.retry_config.get('rate_limit', {})
-        
-        # Читаем header Retry-After
-        retry_after = response.headers.get('Retry-After')
-        
-        if retry_after and rate_limit_config.get('respect_retry_after_header', True):
-            try:
-                wait_time = int(retry_after)
-            except ValueError:
-                wait_time = rate_limit_config.get('default_wait', 60)
-        else:
-            wait_time = rate_limit_config.get('default_wait', 60)
-        
-        self.logger.warning(
-            f"⚠️ HTTP 429 (Rate Limit), ждем {wait_time} сек..."
-        )
-        
-        await asyncio.sleep(wait_time)
-        
-        # TODO: Уменьшить скорость запросов (реализуем позже в adaptive)
-    
-    async def search_and_save_with_retry(self, region_key: str, court_key: str,
-                                    case_number: str, year: str = "2025") -> Dict[str, Any]:
-        """
-        Поиск и сохранение дела с retry и восстановлением
-        
-        Returns:
-            {
-                'success': True/False,
-                'target_found': True/False,
-                'total_saved': 5,
-                'related_saved': 4,
-                'target_case_number': '...',
-                'error': None или строка с ошибкой
-            }
-        """
-        search_retry_config = self.retry_config.get('search_case', {})
-        
-        if not search_retry_config:
-            # Без retry
-            try:
-                return await self._do_search_and_save(region_key, court_key, case_number, year)
-            except NonRetriableError as e:
-                return {
-                    'success': False,
-                    'target_found': False,
-                    'total_saved': 0,
-                    'related_saved': 0,
-                    'error': str(e)
-                }
-        
-        # С retry
-        retry_cfg = RetryConfig(search_retry_config)
-        strategy = RetryStrategy(retry_cfg, self.session_manager.circuit_breaker)
-        
-        async def _search_with_recovery():
-            try:
-                return await self._do_search_and_save(region_key, court_key, case_number, year)
-            
-            except Exception as e:
-                # Попытка восстановления сессии
-                if await self._handle_session_recovery(e):
-                    # Повторяем после успешной переавторизации
-                    return await self._do_search_and_save(region_key, court_key, case_number, year)
-                raise
-        
-        try:
-            result = await strategy.execute_with_retry(
-                _search_with_recovery,
-                error_context=f"Поиск дела {case_number}"
-            )
-            
-            # Успех - сбрасываем счетчик ошибок
-            self.session_error_count = 0
-            
-            return result
-        
-        except NonRetriableError as e:
-            # Постоянная ошибка (дело не существует)
-            self.session_error_count = 0
-            return {
-                'success': False,
-                'target_found': False,
-                'total_saved': 0,
-                'related_saved': 0,
-                'error': str(e)
-            }
-        
-        except Exception as e:
-            # Временная ошибка, но retry исчерпан
-            self.session_error_count += 1
-            
-            self.logger.error(f"❌ Не удалось найти дело после retry: {e}")
-            
-            # Проверка на множественные ошибки подряд
-            if self.session_error_count >= self.max_session_errors:
-                self.logger.warning(
-                    f"⚠️ {self.max_session_errors} ошибок подряд, "
-                    f"попытка переавторизации..."
-                )
-                
-                if await self._handle_session_recovery(Exception("Multiple failures")):
-                    self.session_error_count = 0
-            
-            return {
-                'success': False,
-                'target_found': False,
-                'total_saved': 0,
-                'related_saved': 0,
-                'error': str(e)
-            }
-
-    # Алиас для обратной совместимости
-    async def search_and_save(self, *args, **kwargs):
-        return await self.search_and_save_with_retry(*args, **kwargs)
-    
-    async def _do_search_and_save(self, region_key: str, court_key: str,
-                        case_number: str, year: str) -> Dict[str, Any]:
-        """
-        Один цикл поиска и сохранения с Lock на stateful операции
-        
-        Архитектура:
-        1. [LOCK] Подготовка формы + выбор региона + поиск (stateful)
-        2. [БЕЗ LOCK] Парсинг HTML + сохранение в БД (stateless)
-        
-        Returns:
-            {
-                'success': True/False,
-                'target_found': True/False,
-                'total_saved': 5,
-                'related_saved': 4,
-                'target_case_number': '6294-25-00-4/1',
-                'error': None или строка с ошибкой
-            }
-        """
-        # Получение конфигурации
-        region_config = self.settings.get_region(region_key)
-        court_config = self.settings.get_court(region_key, court_key)
-        
-        # Генерация полного номера
-        full_case_number = self.text_processor.generate_case_number(
-            region_config, court_config, year, int(case_number)
-        )
-        
-        self.logger.info(f"🔍 Ищу дело: {full_case_number}")
-        
-        # ============================================================
-        # КРИТИЧЕСКАЯ СЕКЦИЯ: Stateful операции (под Lock)
-        # ============================================================
-        async with self.form_lock:
-            self.logger.debug(f"[{region_key}] Захватил form_lock")
-            
-            # Получение сессии
-            session = await self.session_manager.get_session()
-            
-            # Подготовка формы
-            viewstate, form_ids = await self.form_handler.prepare_search_form(session)
-            
-            # Выбор региона
-            await self.form_handler.select_region(
-                session, viewstate, region_config['id'], form_ids
-            )
-            
-            await asyncio.sleep(1)
-            
-            # Поиск
-            results_html = await self.search_engine.search_case(
-                session, viewstate, region_config['id'], court_config['id'],
-                year, full_case_number, form_ids,
-                extract_sequence=self.update_mode
-            )
-            
-            self.logger.debug(f"[{region_key}] Освободил form_lock")
-        
-        # ============================================================
-        # Stateless операции (БЕЗ Lock — параллельно для всех)
-        # ============================================================
-        
-        # Парсинг
-        cases = self.results_parser.parse(results_html)
-        
-        if not cases:
-            self.logger.info(f"❌ Ничего не найдено: {full_case_number}")
-            return {
-                'success': False,
-                'target_found': False,
-                'total_saved': 0,
-                'related_saved': 0,
-                'target_case_number': full_case_number,
-                'error': 'no_results'
-            }
-        
-        # Сохранение всех найденных дел
-        saved_count = 0
-        target_found = False
-        related_count = 0
-        
-        for case in cases:
-            # Проверка что дело из нашего региона/суда
-            if not case.case_number.startswith(
-                f"{region_config['kato_code']}{court_config['instance_code']}"
-            ):
-                continue
-            
-            # Проверка целевого дела
-            is_target = (case.case_number == full_case_number)
-            
-            if is_target:
-                target_found = True
-            
-            # Сохранение
-            save_result = await self.db_manager.save_case(case)
-            
-            if save_result['status'] in ['saved', 'updated']:
-                saved_count += 1
-                
-                if is_target:
-                    judge = "✅ судья" if case.judge else "⚠️ без судьи"
-                    parties = len(case.plaintiffs) + len(case.defendants)
-                    events = len(case.events)
-                    self.logger.info(
-                        f"✅ ЦЕЛЕВОЕ: {case.case_number} "
-                        f"({judge}, {parties} стороны, {events} события)"
-                    )
-                else:
-                    related_count += 1
-                    self.logger.debug(f"💾 Связанное: {case.case_number}")
-        
-        # Итоговый лог
-        if saved_count > 0:
-            if saved_count > 1:
-                self.logger.info(
-                    f"💾 Всего сохранено: {saved_count} дел "
-                    f"(целевое: {1 if target_found else 0}, связанных: {related_count})"
-                )
-            
-            if not target_found:
-                self.logger.warning(
-                    f"⚠️ Целевое дело {full_case_number} не найдено, "
-                    f"но сохранено {saved_count} связанных"
-                )
-            
-            return {
-                'success': True,
-                'target_found': target_found,
-                'total_saved': saved_count,
-                'related_saved': related_count,
-                'target_case_number': full_case_number
-            }
-        else:
-            self.logger.info(f"❌ Ничего не сохранено для дела {full_case_number}")
-            
-            return {
-                'success': False,
-                'target_found': False,
-                'total_saved': 0,
-                'related_saved': 0,
-                'target_case_number': full_case_number,
-                'error': 'nothing_saved'
-            }
-    
-    # Алиас для обратной совместимости
-    async def search_and_save(self, *args, **kwargs):
-        return await self.search_and_save_with_retry(*args, **kwargs)
-    
-    async def __aenter__(self):
-        await self.initialize()
-        return self
-    
-    async def __aexit__(self, exc_type, exc_val, exc_tb):
-        await self.cleanup()
-        # Не подавляем исключения
-        return False
+__version__ = "2.0.0"
+__author__ = "Your Name"
+# REMOVED IMPORT: from core.parser import CourtParser
+__all__ = ['CourtParser']
 
 
 # ============================================================================
@@ -2501,7 +2840,7 @@ class CourtParser:
 # REMOVED IMPORT: from core.parser import CourtParser
 # REMOVED IMPORT: from config.settings import Settings
 # REMOVED IMPORT: from utils.logger import setup_logger
-# REMOVED IMPORT: from utils import TextProcessor
+# REMOVED IMPORT: from utils.text_processor import TextProcessor
 
 
 async def parse_all_regions_from_config() -> dict:
@@ -2516,7 +2855,7 @@ async def parse_all_regions_from_config() -> dict:
     court_types = ps.get('court_types', ['smas'])
     start_from = ps.get('start_from', 1)
     max_number = ps.get('max_number', 9999)
-    max_consecutive_failures = ps.get('max_consecutive_failures', 50)
+    max_consecutive_empty = ps.get('max_consecutive_empty', 200)
     delay_between_requests = ps.get('delay_between_requests', 2)
     max_parallel_regions = ps.get('max_parallel_regions', 1)
     
@@ -2535,10 +2874,10 @@ async def parse_all_regions_from_config() -> dict:
     logger.info(f"  Год: {year}")
     logger.info(f"  Типы судов: {', '.join(court_types)}")
     logger.info(f"  Диапазон номеров: {start_from}-{max_number}")
-    logger.info(f"  Макс. неудач подряд: {max_consecutive_failures}")
+    logger.info(f"  Лимит пустых подряд: {max_consecutive_empty}")
     logger.info(f"  Задержка между запросами: {delay_between_requests} сек")
     logger.info(f"  Параллельных регионов: {max_parallel_regions}")
-    logger.info(f"  Retry на регион: {region_retry_max_attempts} попыток, задержка {region_retry_delay} сек")
+    logger.info(f"  Retry на регион: {region_retry_max_attempts} попыток")
     
     if limit_regions:
         logger.info(f"  🔒 ЛИМИТ РЕГИОНОВ: {limit_regions}")
@@ -2558,13 +2897,11 @@ async def parse_all_regions_from_config() -> dict:
         regions_to_process = all_regions
         logger.info(f"Обрабатываю все {len(regions_to_process)} регионов")
     
-    # Общая статистика (thread-safe)
+    # Общая статистика
     total_stats = {
         'regions_processed': 0,
         'regions_failed': 0,
         'total_queries': 0,
-        'total_target_cases': 0,
-        'total_related_cases': 0,
         'total_cases_saved': 0
     }
     stats_lock = asyncio.Lock()
@@ -2572,100 +2909,70 @@ async def parse_all_regions_from_config() -> dict:
     # Семафор для контроля параллельности
     semaphore = asyncio.Semaphore(max_parallel_regions)
     
-    async def process_region_with_retry_and_semaphore(region_key: str):
-        """
-        Обработка региона с retry и пересозданием сессии
-        
-        Семафор держится на всё время retry (не занимает дополнительный слот)
-        """
-        async with semaphore:
-            region_config = settings.get_region(region_key)
-            
-            for attempt in range(1, region_retry_max_attempts + 1):
-                try:
-                    logger.info(f"\n{'='*70}")
-                    if attempt > 1:
-                        logger.info(f"🔄 Регион: {region_config['name']} (повторная попытка {attempt}/{region_retry_max_attempts})")
-                    else:
-                        logger.info(f"Регион: {region_config['name']}")
-                    logger.info(f"{'='*70}")
-                    
-                    # Парсинг всех судов региона
-                    region_stats = await process_region_all_courts(
-                        parser=parser,
-                        settings=settings,
-                        region_key=region_key,
-                        court_types=court_types,
-                        year=year,
-                        start_from=start_from,
-                        max_number=max_number,
-                        max_consecutive_failures=max_consecutive_failures,
-                        delay_between_requests=delay_between_requests,
-                        limit_cases=limit_cases_per_region
-                    )
-                    
-                    # Успех → обновляем статистику
-                    async with stats_lock:
-                        total_stats['regions_processed'] += 1
-                        total_stats['total_queries'] += region_stats['total_queries']
-                        total_stats['total_target_cases'] += region_stats['total_target_cases']
-                        total_stats['total_related_cases'] += region_stats['total_related_cases']
-                        total_stats['total_cases_saved'] += region_stats['total_cases_saved']
-                    
-                    return region_stats
-                
-                except Exception as e:
-                    if attempt < region_retry_max_attempts:
-                        logger.warning(
-                            f"⚠️ Регион {region_config['name']} завершился с ошибкой "
-                            f"(попытка {attempt}/{region_retry_max_attempts})"
-                        )
-                        logger.warning(f"   Ошибка: {e}")
-                        logger.info(f"   Пересоздаю HTTP сессию и повторяю через {region_retry_delay} сек...")
-                        
-                        # Пересоздание сессии
-                        await parser.session_manager.create_session()
-                        await asyncio.sleep(region_retry_delay)
-                    else:
-                        # Последняя попытка failed
-                        logger.error(
-                            f"❌ Регион {region_config['name']} failed после "
-                            f"{region_retry_max_attempts} попыток"
-                        )
-                        logger.error(f"   Финальная ошибка: {e}")
-                        logger.error(traceback.format_exc())
-                        
-                        async with stats_lock:
-                            total_stats['regions_failed'] += 1
-                        
-                        return None
-    
     # Создаём парсер один раз
     async with CourtParser() as parser:
-        # Создаём задачи для всех регионов
-        tasks = [
-            process_region_with_retry_and_semaphore(region_key)
-            for region_key in regions_to_process
-        ]
         
-        # Запускаем все задачи (семафор ограничит параллельность)
-        results = await asyncio.gather(*tasks, return_exceptions=True)
+        async def process_region_with_retry(region_key: str):
+            """Обработка региона с retry"""
+            async with semaphore:
+                region_config = settings.get_region(region_key)
+                
+                for attempt in range(1, region_retry_max_attempts + 1):
+                    try:
+                        logger.info(f"\n{'='*70}")
+                        if attempt > 1:
+                            logger.info(f"🔄 Регион: {region_config['name']} (попытка {attempt}/{region_retry_max_attempts})")
+                        else:
+                            logger.info(f"Регион: {region_config['name']}")
+                        logger.info(f"{'='*70}")
+                        
+                        # Парсинг всех судов региона
+                        region_stats = await process_region_all_courts(
+                            parser=parser,
+                            settings=settings,
+                            region_key=region_key,
+                            court_types=court_types,
+                            year=year,
+                            start_from=start_from,
+                            max_number=max_number,
+                            max_consecutive_empty=max_consecutive_empty,
+                            delay_between_requests=delay_between_requests,
+                            limit_cases=limit_cases_per_region
+                        )
+                        
+                        # Успех → обновляем статистику
+                        async with stats_lock:
+                            total_stats['regions_processed'] += 1
+                            total_stats['total_queries'] += region_stats['total_queries']
+                            total_stats['total_cases_saved'] += region_stats['total_cases_saved']
+                        
+                        return region_stats
+                    
+                    except Exception as e:
+                        if attempt < region_retry_max_attempts:
+                            logger.warning(f"⚠️ Регион {region_config['name']}: ошибка (попытка {attempt})")
+                            logger.warning(f"   {e}")
+                            await parser.session_manager.create_session()
+                            await asyncio.sleep(region_retry_delay)
+                        else:
+                            logger.error(f"❌ Регион {region_config['name']} failed")
+                            logger.error(traceback.format_exc())
+                            async with stats_lock:
+                                total_stats['regions_failed'] += 1
+                            return None
+        
+        # Запускаем все регионы
+        tasks = [process_region_with_retry(r) for r in regions_to_process]
+        await asyncio.gather(*tasks, return_exceptions=True)
     
-    # Общая статистика
+    # Итоговая статистика
     logger.info("\n" + "=" * 70)
     logger.info("ОБЩАЯ СТАТИСТИКА:")
     logger.info(f"  Обработано регионов: {total_stats['regions_processed']}")
     if total_stats['regions_failed'] > 0:
         logger.info(f"  Регионов с ошибками: {total_stats['regions_failed']}")
-    logger.info(f"  Всего запросов к серверу: {total_stats['total_queries']}")
-    logger.info(f"  Найдено целевых дел: {total_stats['total_target_cases']}")
-    logger.info(f"  Найдено связанных дел: {total_stats['total_related_cases']}")
-    logger.info(f"  Всего сохранено дел: {total_stats['total_cases_saved']}")
-    
-    if total_stats['total_queries'] > 0:
-        avg_per_query = total_stats['total_cases_saved'] / total_stats['total_queries']
-        logger.info(f"  Среднее дел на запрос: {avg_per_query:.1f}")
-    
+    logger.info(f"  Всего запросов: {total_stats['total_queries']}")
+    logger.info(f"  Всего сохранено: {total_stats['total_cases_saved']}")
     logger.info("=" * 70)
     
     return total_stats
@@ -2679,39 +2986,11 @@ async def process_region_all_courts(
     year: str,
     start_from: int,
     max_number: int,
-    max_consecutive_failures: int,
+    max_consecutive_empty: int,
     delay_between_requests: float,
     limit_cases: Optional[int] = None
 ) -> dict:
-    """
-    Обработка всех судов региона ПОСЛЕДОВАТЕЛЬНО
-    
-    Args:
-        parser: экземпляр CourtParser
-        settings: экземпляр Settings
-        region_key: ключ региона ('astana', 'almaty', ...)
-        court_types: список типов судов (['smas', 'appellate'])
-        year: год ('2025')
-        start_from: начальный номер дела (1)
-        max_number: конечный номер дела (9999)
-        max_consecutive_failures: лимит неудач подряд (50)
-        delay_between_requests: задержка между запросами (2.0)
-        limit_cases: лимит дел для тестирования (None = без лимита)
-    
-    Returns:
-        {
-            'region_key': 'astana',
-            'courts_processed': 2,
-            'total_queries': 100,
-            'total_target_cases': 10,
-            'total_related_cases': 90,
-            'total_cases_saved': 100,
-            'courts_stats': {
-                'smas': {...},
-                'appellate': {...}
-            }
-        }
-    """
+    """Обработка всех судов региона"""
     logger = setup_logger('main', level='INFO')
     region_config = settings.get_region(region_key)
     
@@ -2719,19 +2998,19 @@ async def process_region_all_courts(
         'region_key': region_key,
         'courts_processed': 0,
         'total_queries': 0,
-        'total_target_cases': 0,
-        'total_related_cases': 0,
         'total_cases_saved': 0,
         'courts_stats': {}
     }
     
-    # ПОСЛЕДОВАТЕЛЬНАЯ обработка судов
     for court_key in court_types:
-        court_config = region_config['courts'][court_key]
+        court_config = region_config['courts'].get(court_key)
+        if not court_config:
+            logger.warning(f"⚠️ Суд {court_key} не найден в регионе {region_key}")
+            continue
+            
         logger.info(f"\n📍 Суд: {court_config['name']}")
         
         try:
-            # Парсинг одного суда
             court_stats = await parse_court(
                 parser=parser,
                 settings=settings,
@@ -2740,37 +3019,27 @@ async def process_region_all_courts(
                 year=year,
                 start_from=start_from,
                 max_number=max_number,
-                max_consecutive_failures=max_consecutive_failures,
+                max_consecutive_empty=max_consecutive_empty,
                 delay_between_requests=delay_between_requests,
                 limit_cases=limit_cases
             )
             
-            # Обновление статистики региона
             region_stats['courts_processed'] += 1
             region_stats['total_queries'] += court_stats['queries_made']
-            region_stats['total_target_cases'] += court_stats['target_cases_found']
-            region_stats['total_related_cases'] += court_stats['related_cases_found']
-            region_stats['total_cases_saved'] += court_stats['total_cases_saved']
+            region_stats['total_cases_saved'] += court_stats['cases_saved']
             region_stats['courts_stats'][court_key] = court_stats
             
         except Exception as e:
-            logger.error(f"❌ Ошибка парсинга суда {court_key}: {e}")
+            logger.error(f"❌ Ошибка суда {court_key}: {e}")
             logger.error(traceback.format_exc())
             continue
     
     # Итоги региона
     logger.info(f"\n{'-'*70}")
     logger.info(f"ИТОГИ РЕГИОНА {region_config['name']}:")
-    logger.info(f"  Обработано судов: {region_stats['courts_processed']}/{len(court_types)}")
-    logger.info(f"  Запросов к серверу: {region_stats['total_queries']}")
-    logger.info(f"  Найдено целевых дел: {region_stats['total_target_cases']}")
-    logger.info(f"  Найдено связанных дел: {region_stats['total_related_cases']}")
-    logger.info(f"  Всего сохранено дел: {region_stats['total_cases_saved']}")
-    
-    if region_stats['total_queries'] > 0:
-        target_rate = (region_stats['total_target_cases'] / region_stats['total_queries'] * 100)
-        logger.info(f"  Процент целевых дел: {target_rate:.1f}%")
-    
+    logger.info(f"  Судов: {region_stats['courts_processed']}/{len(court_types)}")
+    logger.info(f"  Запросов: {region_stats['total_queries']}")
+    logger.info(f"  Сохранено: {region_stats['total_cases_saved']}")
     logger.info(f"{'-'*70}")
     
     return region_stats
@@ -2784,128 +3053,107 @@ async def parse_court(
     year: str,
     start_from: int,
     max_number: int,
-    max_consecutive_failures: int,
+    max_consecutive_empty: int,
     delay_between_requests: float,
     limit_cases: Optional[int] = None
 ) -> dict:
-    """
-    Парсинг одного суда (последовательно по делам)
-    
-    Args:
-        parser: экземпляр CourtParser
-        settings: экземпляр Settings
-        region_key: ключ региона ('astana')
-        court_key: ключ суда ('smas')
-        year: год ('2025')
-        start_from: начальный номер дела (1)
-        max_number: конечный номер дела (9999)
-        max_consecutive_failures: лимит неудач подряд (50)
-        delay_between_requests: задержка между запросами (2.0)
-        limit_cases: лимит дел для тестирования (None = без лимита)
-    
-    Returns:
-        {
-            'queries_made': 100,
-            'target_cases_found': 10,
-            'related_cases_found': 90,
-            'total_cases_saved': 100,
-            'consecutive_failures': 0
-        }
-    """
+    """Парсинг одного суда"""
     logger = setup_logger('main', level='INFO')
+    court_config = settings.get_court(region_key, court_key)
     
     stats = {
         'queries_made': 0,
-        'target_cases_found': 0,
-        'related_cases_found': 0,
-        'total_cases_saved': 0,
-        'consecutive_failures': 0
+        'cases_saved': 0,
+        'consecutive_empty': 0
     }
     
-    current_number = start_from
+    # Определяем стартовый номер
+    last_in_db = await parser.db_manager.get_last_sequence_number(
+        region_key, court_key, year, settings
+    )
+    
+    if last_in_db > 0:
+        actual_start = last_in_db + 1
+        logger.info(f"📥 Последний в БД: {last_in_db}")
+        logger.info(f"▶️  Продолжаю с: {actual_start}")
+    else:
+        actual_start = start_from
+        logger.info(f"📥 БД пуста, старт с: {actual_start}")
+    
+    if actual_start > max_number:
+        logger.info(f"✅ Все номера до {max_number} уже спарсены")
+        return stats
+    
+    current_number = actual_start
     
     while current_number <= max_number:
-        # Проверка лимита дел
+        # Проверка лимитов
         if limit_cases and stats['queries_made'] >= limit_cases:
-            logger.info(f"🔒 Достигнут лимит дел ({limit_cases}), завершаю суд")
+            logger.info(f"🔒 Лимит запросов ({limit_cases})")
             break
         
-        # Проверка лимита неудач
-        if stats['consecutive_failures'] >= max_consecutive_failures:
-            logger.info(f"Достигнут лимит неудач ({max_consecutive_failures}), завершаю суд")
+        if stats['consecutive_empty'] >= max_consecutive_empty:
+            logger.info(f"🛑 Лимит пустых ({max_consecutive_empty}), стоп")
             break
         
-        # Поиск дела
+        # Поиск
         result = await parser.search_and_save(
             region_key=region_key,
             court_key=court_key,
-            case_number=str(current_number),
+            sequence_number=current_number,
             year=year
         )
         
         stats['queries_made'] += 1
         
-        if result['success']:
-            # Успех
-            stats['total_cases_saved'] += result['total_saved']
-            
-            if result['target_found']:
-                stats['target_cases_found'] += 1
-            
-            stats['related_cases_found'] += result['related_saved']
-            stats['consecutive_failures'] = 0
-        else:
-            # Неудача
-            stats['consecutive_failures'] += 1
+        # Результат
+        if result['success'] and result.get('saved'):
+            stats['cases_saved'] += 1
+            stats['consecutive_empty'] = 0
+        elif result.get('error') == 'no_results':
+            stats['consecutive_empty'] += 1
         
-        # Периодическая статистика
+        # Прогресс
         if stats['queries_made'] % 10 == 0:
             logger.info(
-                f"📊 Прогресс: запросов {stats['queries_made']}, "
-                f"найдено целевых {stats['target_cases_found']}, "
-                f"всего сохранено {stats['total_cases_saved']}"
+                f"📊 #{current_number} | "
+                f"Запросов: {stats['queries_made']} | "
+                f"Сохранено: {stats['cases_saved']} | "
+                f"Пустых: {stats['consecutive_empty']}"
             )
         
         current_number += 1
-        
-        # Задержка между запросами
         await asyncio.sleep(delay_between_requests)
+    
+    # Итоги
+    logger.info(f"\n{'-'*70}")
+    logger.info(f"ИТОГИ {court_config['name']}:")
+    logger.info(f"  Диапазон: {actual_start}-{current_number - 1}")
+    logger.info(f"  Запросов: {stats['queries_made']}")
+    logger.info(f"  Сохранено: {stats['cases_saved']}")
+    logger.info(f"{'-'*70}")
     
     return stats
 
 
 async def update_cases_history():
-    """
-    Режим обновления истории дел
-    """
+    """Режим обновления истории дел"""
     logger = setup_logger('main', level='INFO')
     
-    # Загрузка настроек
     settings = Settings()
     update_config = settings.update_settings
     
     if not update_config.get('enabled'):
-        logger.warning("⚠️ Update Mode отключен в config.json")
+        logger.warning("⚠️ Update Mode отключен")
         return
     
     logger.info("\n" + "=" * 70)
-    logger.info("РЕЖИМ ОБНОВЛЕНИЯ ИСТОРИИ ДЕЛ")
-    logger.info("=" * 70)
-    logger.info(f"Интервал обновления: {update_config['update_interval_days']} дней")
-    logger.info(f"Фильтр по ответчику: {update_config['filters']['defendant_keywords']}")
-    logger.info(f"Исключить события: {update_config['filters']['exclude_event_types']}")
+    logger.info("РЕЖИМ ОБНОВЛЕНИЯ")
     logger.info("=" * 70)
     
-    stats = {
-        'checked': 0,
-        'updated': 0,
-        'no_changes': 0,
-        'errors': 0
-    }
+    stats = {'checked': 0, 'updated': 0, 'errors': 0}
     
-    # ИЗМЕНЕНО: создаём парсер С ФЛАГОМ Update Mode
-    async with CourtParser(update_mode=True) as parser:
-        # Получение списка дел для обновления
+    async with CourtParser() as parser:
         cases_to_update = await parser.db_manager.get_cases_for_update({
             'defendant_keywords': update_config['filters']['defendant_keywords'],
             'exclude_event_types': update_config['filters']['exclude_event_types'],
@@ -2916,131 +3164,76 @@ async def update_cases_history():
             logger.info("✅ Нет дел для обновления")
             return
         
-        logger.info(f"\n📋 Найдено дел для обновления: {len(cases_to_update)}")
-        logger.info(f"Начинаю проверку...\n")
+        logger.info(f"📋 Дел для обновления: {len(cases_to_update)}")
         
         text_processor = TextProcessor()
         
         for i, case_number in enumerate(cases_to_update, 1):
             try:
-                # Распарсить полный номер дела
                 case_info = text_processor.find_region_and_court_by_case_number(
-                    case_number, 
-                    settings.regions
+                    case_number, settings.regions
                 )
                 
                 if not case_info:
-                    logger.error(f"❌ Не удалось распарсить номер: {case_number}")
                     stats['errors'] += 1
                     continue
                 
-                # Вызов БЕЗ параметра update_mode (автоматически используется self.update_mode)
                 result = await parser.search_and_save(
                     region_key=case_info['region_key'],
                     court_key=case_info['court_key'],
-                    case_number=case_info['sequence'],
+                    sequence_number=int(case_info['sequence']),
                     year=case_info['year']
                 )
                 
                 stats['checked'] += 1
                 
-                # КРИТИЧЕСКАЯ ЛОГИКА
                 if result['success']:
-                    # УСПЕХ: пометить как обновлённое
                     await parser.db_manager.mark_case_as_updated(case_number)
-                    
-                    if result['total_saved'] > 0:
+                    if result.get('saved'):
                         stats['updated'] += 1
-                        logger.info(f"✅ [{i}/{len(cases_to_update)}] {case_number}: +{result['total_saved']} событий")
-                    else:
-                        stats['no_changes'] += 1
-                        logger.debug(f"⚪ [{i}/{len(cases_to_update)}] {case_number}: без изменений")
                 else:
-                    # НЕУДАЧА: НЕ помечать (last_updated_at остаётся старым)
                     stats['errors'] += 1
-                    logger.warning(f"⚠️ [{i}/{len(cases_to_update)}] {case_number}: ошибка")
                 
-                # Периодическая статистика
-                if stats['checked'] % 10 == 0:
-                    logger.info(
-                        f"\n📊 Прогресс: {stats['checked']}/{len(cases_to_update)} "
-                        f"(обновлено: {stats['updated']}, без изменений: {stats['no_changes']}, ошибок: {stats['errors']})\n"
-                    )
-                
-                # Задержка между запросами
                 await asyncio.sleep(2)
                 
             except Exception as e:
-                # ИСКЛЮЧЕНИЕ: НЕ помечать
                 stats['errors'] += 1
-                logger.error(f"❌ [{i}/{len(cases_to_update)}] Ошибка обновления {case_number}: {e}")
-                continue
+                logger.error(f"❌ {case_number}: {e}")
     
-    # Итоговая статистика
-    logger.info("\n" + "=" * 70)
-    logger.info("ИТОГИ ОБНОВЛЕНИЯ:")
-    logger.info(f"  Проверено дел: {stats['checked']}")
-    logger.info(f"  Обновлено (новые события): {stats['updated']}")
-    logger.info(f"  Без изменений: {stats['no_changes']}")
-    logger.info(f"  Ошибок: {stats['errors']}")
-    
-    if stats['errors'] > 0:
-        logger.warning(
-            f"\n⚠️ {stats['errors']} дел не обновились и будут проверены при следующем запуске"
-        )
-    
-    logger.info("=" * 70)
+    logger.info(f"\nИТОГИ: проверено {stats['checked']}, обновлено {stats['updated']}, ошибок {stats['errors']}")
 
 
 async def main():
-    """
-    Главная функция - запуск парсинга согласно config.json
-    """
+    """Главная функция"""
     logger = setup_logger('main', level='INFO')
     
     logger.info("\n" + "=" * 70)
-    logger.info("ПАРСЕР СУДЕБНЫХ ДЕЛ КАЗАХСТАНА")
-    logger.info("=" * 70)
-    logger.info("Версия: 2.0.0")
-    logger.info("Режим: Боевой (настройки из config.json)")
+    logger.info("ПАРСЕР СУДЕБНЫХ ДЕЛ КАЗАХСТАНА v2.0")
     logger.info("=" * 70)
     
     try:
-        # Проверка режима запуска
         if '--mode' in sys.argv:
-            mode_index = sys.argv.index('--mode')
-            if mode_index + 1 < len(sys.argv):
-                mode = sys.argv[mode_index + 1]
-                
-                if mode == 'update':
-                    # РЕЖИМ ОБНОВЛЕНИЯ
-                    await update_cases_history()
-                    logger.info("\n✅ Обновление завершено")
-                    return 0
-                else:
-                    logger.error(f"❌ Неизвестный режим: {mode}")
-                    logger.info("Доступные режимы: update")
-                    return 1
+            idx = sys.argv.index('--mode')
+            if idx + 1 < len(sys.argv) and sys.argv[idx + 1] == 'update':
+                await update_cases_history()
+                return 0
         
-        # По умолчанию: Full Scan Mode
-        stats = await parse_all_regions_from_config()
-        
-        logger.info("\n✅ Парсер завершил работу успешно")
+        await parse_all_regions_from_config()
+        logger.info("\n✅ Завершено")
         return 0
     
     except KeyboardInterrupt:
-        logger.warning("\n🛑 Прервано пользователем")
+        logger.warning("\n🛑 Прервано")
         return 1
     
     except Exception as e:
-        logger.critical(f"\n💥 Критическая ошибка: {e}")
+        logger.critical(f"\n💥 Ошибка: {e}")
         logger.critical(traceback.format_exc())
         return 1
 
 
 if __name__ == "__main__":
-    exit_code = asyncio.run(main())
-    sys.exit(exit_code)
+    sys.exit(asyncio.run(main()))
 
 # ============================================================================
 # ТОЧКА ВХОДА

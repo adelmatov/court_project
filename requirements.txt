@@ -1,5 +1,5 @@
 # Court Parser Dependencies
-# Generated: 2025-10-19 00:11:17
+# Generated: 2025-11-30 01:20:58
 
 # Core dependencies
 requests>=2.31.0

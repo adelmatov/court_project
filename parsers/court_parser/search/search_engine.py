@@ -15,71 +15,62 @@ class SearchEngine:
         self.base_url = base_url
         self.logger = get_logger('search_engine')
     
-    async def search_case(self, session: aiohttp.ClientSession,
-                 viewstate: str, region_id: str, court_id: str,
-                 year: str, full_case_number: str,
-                 form_ids: Dict[str, str],
-                 extract_sequence: bool = False) -> str:  # ← ДОБАВЛЕН параметр
+    async def search_case(
+        self, 
+        session: aiohttp.ClientSession,
+        viewstate: str, 
+        region_id: str, 
+        court_id: str,
+        year: str, 
+        sequence_number: int,
+        form_ids: Dict[str, str]
+    ) -> str:
         """
-        Поиск дела
+        Поиск дела по порядковому номеру
         
         Args:
-            full_case_number: полный номер дела (например, "6294-25-00-4/215")
-            extract_sequence: 
-                False (default) - передать полный номер в FormData (Full Scan Mode)
-                True - передать только порядковый номер в FormData (Update Mode)
+            sequence_number: порядковый номер (1, 2, 3, ...)
         
         Returns:
             HTML с результатами
         """
-        # Отправка поискового запроса
         await self._send_search_request(
             session, viewstate, region_id, court_id,
-            year, full_case_number, form_ids, extract_sequence  # ← ДОБАВЛЕН параметр
+            year, sequence_number, form_ids
         )
         
-        # Небольшая задержка для обработки на сервере
         await asyncio.sleep(0.5)
         
-        # Получение результатов
         results_html = await self._get_results(session)
         
-        self.logger.debug(f"Поиск выполнен для номера: {full_case_number}")
+        self.logger.debug(f"Поиск выполнен для номера: {sequence_number}")
         return results_html
     
-    async def _send_search_request(self, session: aiohttp.ClientSession,
-                      viewstate: str, region_id: str, court_id: str,
-                      year: str, full_case_number: str,
-                      form_ids: Dict[str, str],
-                      extract_sequence: bool = False):
+    async def _send_search_request(
+        self, 
+        session: aiohttp.ClientSession,
+        viewstate: str, 
+        region_id: str, 
+        court_id: str,
+        year: str, 
+        sequence_number: int,
+        form_ids: Dict[str, str]
+    ):
         """
         Отправка поискового запроса
         
-        Args:
-            extract_sequence: 
-                False - передать полный номер в FormData (Full Scan Mode)
-                True - передать только порядковый номер в FormData (Update Mode)
-        
-        Raises:
-            aiohttp.ClientError: при HTTP 500, 502, 503, 504 (retriable)
-            NonRetriableError: при HTTP 400, 401, 403, 404 (non-retriable)
+        В edit-num всегда передаётся только порядковый номер
         """
         url = f"{self.base_url}/form/lawsuit/index.xhtml"
         form_base = form_ids.get('form_base', 'j_idt45:j_idt46')
-        search_button = f'{form_base}:j_idt83'
         
-        # КЛЮЧЕВАЯ ЛОГИКА: Выбор что передавать в FormData
-        if extract_sequence:
-            # Update Mode: только порядковый номер
-            if '/' in full_case_number:
-                search_number = full_case_number.split('/')[-1]  # "215"
-            else:
-                search_number = full_case_number
-            self.logger.debug(f"Update Mode: извлечён порядковый {search_number} из {full_case_number}")
-        else:
-            # Full Scan Mode: полный номер
-            search_number = full_case_number  # "6294-25-00-4/1"
-            self.logger.debug(f"Full Scan Mode: используется полный номер {search_number}")
+        search_button = form_ids.get('search_button')
+        if not search_button:
+            search_button = f'{form_base}:j_idt83'
+            self.logger.warning(f"Fallback ID кнопки: {search_button}")
+        
+        # Всегда передаём только порядковый номер
+        search_number = str(sequence_number)
         
         data = {
             form_base: form_base,
@@ -88,7 +79,7 @@ class SearchEngine:
             f'{form_base}:edit-court': court_id,
             f'{form_base}:edit-year': year,
             f'{form_base}:edit-iin': '',
-            f'{form_base}:edit-num': search_number,  # ← Зависит от режима!
+            f'{form_base}:edit-num': search_number,
             f'{form_base}:edit-fio': '',
             'javax.faces.ViewState': viewstate,
             'javax.faces.source': search_button,
@@ -102,95 +93,50 @@ class SearchEngine:
             'javax.faces.partial.ajax': 'true'
         }
         
-        # Логирование для отладки
-        self.logger.debug(f"🔍 Поиск дела:")
-        self.logger.debug(f"   Регион ID: {region_id}")
-        self.logger.debug(f"   Суд ID: {court_id}")
-        self.logger.debug(f"   Год: {year}")
-        self.logger.debug(f"   Полный номер: {full_case_number}")
-        self.logger.debug(f"   В FormData: {search_number}")
+        self.logger.debug(f"🔍 Поиск: регион={region_id}, суд={court_id}, год={year}, номер={search_number}")
         
         headers = self._get_ajax_headers()
         
         try:
             async with session.post(url, data=data, headers=headers) as response:
-                # ОБРАБОТКА HTTP СТАТУСОВ
-                
-                # Постоянные ошибки (non-retriable)
                 if response.status in [400, 401, 403, 404]:
-                    self.logger.error(f"HTTP {response.status} при отправке поиска")
-                    raise NonRetriableError(f"HTTP {response.status}: Постоянная ошибка")
+                    raise NonRetriableError(f"HTTP {response.status}")
                 
-                # Временные ошибки сервера (retriable)
                 if response.status in [500, 502, 503, 504]:
-                    self.logger.warning(f"HTTP {response.status}: Временная ошибка сервера")
-                    raise aiohttp.ClientError(f"HTTP {response.status}: Сервер недоступен")
+                    raise aiohttp.ClientError(f"HTTP {response.status}")
                 
-                # Другие ошибки
                 if response.status != 200:
-                    self.logger.error(f"HTTP {response.status} при отправке поиска")
-                    raise aiohttp.ClientError(f"HTTP {response.status}: Неожиданная ошибка")
+                    raise aiohttp.ClientError(f"HTTP {response.status}")
                 
                 await response.text()
         
         except (aiohttp.ClientError, NonRetriableError):
-            # Пробрасываем исключения для retry
             raise
-        
         except Exception as e:
-            # Неожиданная ошибка
-            self.logger.error(f"Неожиданная ошибка при поиске: {e}")
             raise aiohttp.ClientError(f"Ошибка поиска: {e}")
     
     async def _get_results(self, session: aiohttp.ClientSession) -> str:
-        """
-        Получение страницы с результатами
-        
-        Raises:
-            aiohttp.ClientError: при HTTP 500, 502, 503, 504 (retriable)
-            NonRetriableError: при HTTP 400, 401, 403, 404 (non-retriable)
-        
-        Returns:
-            HTML страницы с результатами
-        """
+        """Получение страницы с результатами"""
         url = f"{self.base_url}/lawsuit/lawsuitList.xhtml"
         headers = self._get_headers()
         
         try:
             async with session.get(url, headers=headers) as response:
-                # ОБРАБОТКА HTTP СТАТУСОВ
-                
-                # Постоянные ошибки (non-retriable)
                 if response.status in [400, 401, 403, 404]:
-                    self.logger.error(f"HTTP {response.status} при получении результатов")
-                    raise NonRetriableError(f"HTTP {response.status}: Постоянная ошибка")
+                    raise NonRetriableError(f"HTTP {response.status}")
                 
-                # Временные ошибки сервера (retriable)
                 if response.status in [500, 502, 503, 504]:
-                    self.logger.warning(f"HTTP {response.status}: Временная ошибка сервера")
-                    raise aiohttp.ClientError(f"HTTP {response.status}: Сервер недоступен")
+                    raise aiohttp.ClientError(f"HTTP {response.status}")
                 
-                # Другие ошибки
                 if response.status != 200:
-                    self.logger.error(f"HTTP {response.status} при получении результатов")
-                    raise aiohttp.ClientError(f"HTTP {response.status}: Неожиданная ошибка")
+                    raise aiohttp.ClientError(f"HTTP {response.status}")
                 
                 return await response.text()
         
         except (aiohttp.ClientError, NonRetriableError):
-            # Пробрасываем исключения для retry
             raise
-        
         except Exception as e:
-            # Неожиданная ошибка
-            self.logger.error(f"Неожиданная ошибка при получении результатов: {e}")
             raise aiohttp.ClientError(f"Ошибка получения результатов: {e}")
-        
-        async with session.get(url, headers=headers) as response:
-            if response.status != 200:
-                raise Exception(f"HTTP {response.status} при получении результатов")
-            
-            return await response.text()
     
     def _get_headers(self) -> Dict[str, str]:
         """Базовые заголовки"""

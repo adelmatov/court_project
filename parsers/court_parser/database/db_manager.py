@@ -253,16 +253,6 @@ class DatabaseManager:
     async def get_cases_for_update(self, filters: Dict) -> List[str]:
         """
         Получить номера дел для обновления
-        
-        Args:
-            filters: {
-                'defendant_keywords': ['доход'],
-                'exclude_event_types': ['Завершение дела', ...],
-                'update_interval_days': 2
-            }
-        
-        Returns:
-            ['6294-25-00-4/215', '6294-25-00-4/450', ...]
         """
         defendant_keywords = filters.get('defendant_keywords', [])
         exclude_events = filters.get('exclude_event_types', [])
@@ -270,7 +260,7 @@ class DatabaseManager:
         
         # Построение SQL запроса
         query = """
-            SELECT DISTINCT c.case_number
+            SELECT DISTINCT c.case_number, c.case_date
             FROM cases c
         """
         
@@ -285,7 +275,6 @@ class DatabaseManager:
                 JOIN parties p ON cp.party_id = p.id
             """
             
-            # OR логика для нескольких ключевых слов
             keyword_conditions = []
             for keyword in defendant_keywords:
                 keyword_conditions.append(f"p.name ILIKE ${param_counter}")
@@ -330,6 +319,7 @@ class DatabaseManager:
         async with self.pool.acquire() as conn:
             rows = await conn.fetch(query, *params)
         
+        # Извлекаем только номера дел
         case_numbers = [row['case_number'] for row in rows]
         
         self.logger.info(f"Найдено дел для обновления: {len(case_numbers)}")
@@ -422,3 +412,153 @@ class DatabaseManager:
         )
         
         return sequence_numbers
+    
+    async def get_last_sequence_number(
+        self, 
+        region_key: str, 
+        court_key: str, 
+        year: str,
+        settings
+    ) -> int:
+        """
+        Получить последний (максимальный) порядковый номер дела для региона/суда/года
+        
+        Args:
+            region_key: ключ региона ('astana')
+            court_key: ключ суда ('smas', 'appellate')
+            year: год ('2025')
+            settings: экземпляр Settings
+        
+        Returns:
+            Максимальный порядковый номер или 0 если дел нет
+        
+        Example:
+            >>> last = await db.get_last_sequence_number('astana', 'smas', '2025', settings)
+            >>> last
+            1075
+        """
+        region_config = settings.get_region(region_key)
+        court_config = settings.get_court(region_key, court_key)
+        
+        # Формируем префикс номера дела
+        kato = region_config['kato_code']
+        instance = court_config['instance_code']
+        year_short = year[-2:]
+        case_type = court_config['case_type_code']
+        
+        prefix = f"{kato}{instance}-{year_short}-00-{case_type}/"
+        
+        query = """
+            SELECT case_number
+            FROM cases
+            WHERE case_number LIKE $1
+        """
+        
+        async with self.pool.acquire() as conn:
+            rows = await conn.fetch(query, f"{prefix}%")
+        
+        if not rows:
+            self.logger.info(f"Дел для {region_key}/{court_key}/{year} не найдено, начинаем с 1")
+            return 0
+        
+        # Извлекаем максимальный порядковый номер
+        max_sequence = 0
+        
+        for row in rows:
+            case_number = row['case_number']
+            if '/' in case_number:
+                try:
+                    seq_str = case_number.split('/')[-1]
+                    seq_num = int(seq_str)
+                    if seq_num > max_sequence:
+                        max_sequence = seq_num
+                except (ValueError, IndexError):
+                    continue
+        
+        self.logger.info(
+            f"Последний номер для {region_key}/{court_key}/{year}: {max_sequence}"
+        )
+        
+        return max_sequence
+    
+    def get_smas_instance_codes(self, settings) -> Set[str]:
+        """
+        Собрать все instance_code для судов СМАС из конфигурации
+        
+        Returns:
+            {'94', '93', ...}
+        """
+        smas_codes = set()
+        
+        for region_key, region_config in settings.regions.items():
+            courts = region_config.get('courts', {})
+            smas_court = courts.get('smas')
+            
+            if smas_court and smas_court.get('instance_code'):
+                smas_codes.add(smas_court['instance_code'])
+        
+        self.logger.debug(f"СМАС instance_codes: {smas_codes}")
+        return smas_codes
+    
+    async def get_smas_cases_without_judge(
+        self, 
+        settings,
+        interval_days: int = 2
+    ) -> List[str]:
+        """
+        Получить номера дел СМАС без назначенного судьи
+        
+        Args:
+            settings: экземпляр Settings для получения instance_codes
+            interval_days: интервал проверки (общий для update mode)
+        
+        Returns:
+            ['7194-25-00-4/123', '7594-25-00-4/456', ...]
+        """
+        # Получаем все instance_code для СМАС
+        smas_codes = self.get_smas_instance_codes(settings)
+        
+        if not smas_codes:
+            self.logger.warning("Не найдены instance_codes для СМАС в конфиге")
+            return []
+        
+        # Формируем условия для SQL
+        # Номер дела: "7194-25-00-4/123" → court_code = "7194" → instance = "94"
+        # Паттерн: символы 3-4 в court_code (индексы 2-3 в номере до первого дефиса)
+        # SQL: SUBSTRING(case_number FROM 3 FOR 2)
+        
+        # Строим условие для проверки instance_code
+        code_conditions = []
+        params = []
+        param_counter = 1
+        
+        for code in smas_codes:
+            code_conditions.append(f"SUBSTRING(case_number FROM 3 FOR 2) = ${param_counter}")
+            params.append(code)
+            param_counter += 1
+        
+        codes_where = f"({' OR '.join(code_conditions)})"
+        
+        query = f"""
+            SELECT case_number
+            FROM cases
+            WHERE 
+                judge_id IS NULL
+                AND {codes_where}
+                AND (
+                    last_updated_at IS NULL
+                    OR last_updated_at < NOW() - INTERVAL '{interval_days} days'
+                )
+            ORDER BY case_date DESC
+        """
+        
+        async with self.pool.acquire() as conn:
+            rows = await conn.fetch(query, *params)
+        
+        case_numbers = [row['case_number'] for row in rows]
+        
+        self.logger.info(
+            f"Найдено дел СМАС без судьи: {len(case_numbers)}"
+        )
+        
+        return case_numbers

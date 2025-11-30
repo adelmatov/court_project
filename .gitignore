@@ -57,6 +57,9 @@ screenshots/
 parsers/court_parser/test.py
 parsers/court_parser/test2_bot.py
 parsers/court_parser/text_test.py
+parsers/court_parser/test_form_ids.py
+parsers/court_parser/test_search.py
+parsers/court_parser/test_smas_methods.py
 
 # Config files with secrets (если содержит пароли)
 parsers/court_parser/config.json
