@@ -180,49 +180,49 @@ class TextProcessor:
             'sequence': match.group(5)
         }
 
-@staticmethod
-def find_region_and_court_by_case_number(case_number: str, regions_config: Dict) -> Optional[Dict]:
-    """
-    Определить region_key и court_key по номеру дела
-    
-    Args:
-        case_number: полный номер дела "6294-25-00-4/215"
-        regions_config: конфигурация регионов из settings
-    
-    Returns:
-        {
-            'region_key': 'astana',
-            'court_key': 'smas',
-            'year': '2025',
-            'sequence': '215'
-        }
-    """
-    parsed = TextProcessor.parse_full_case_number(case_number)
-    if not parsed:
-        return None
-    
-    # Извлекаем код суда (КАТО + инстанция)
-    court_code = parsed['court_code']
-    case_type = parsed['case_type']
-    
-    # Ищем регион и суд по коду
-    for region_key, region_config in regions_config.items():
-        kato = region_config['kato_code']
+    @staticmethod
+    def find_region_and_court_by_case_number(case_number: str, regions_config: Dict) -> Optional[Dict]:
+        """
+        Определить region_key и court_key по номеру дела
         
-        for court_key, court_config in region_config['courts'].items():
-            instance = court_config['instance_code']
-            full_code = f"{kato}{instance}"
+        Args:
+            case_number: полный номер дела "6294-25-00-4/215"
+            regions_config: конфигурация регионов из settings
+        
+        Returns:
+            {
+                'region_key': 'astana',
+                'court_key': 'smas',
+                'year': '2025',
+                'sequence': '215'
+            }
+        """
+        parsed = TextProcessor.parse_full_case_number(case_number)
+        if not parsed:
+            return None
+        
+        # Извлекаем код суда (КАТО + инстанция)
+        court_code = parsed['court_code']
+        case_type = parsed['case_type']
+        
+        # Ищем регион и суд по коду
+        for region_key, region_config in regions_config.items():
+            kato = region_config['kato_code']
             
-            if court_code == full_code and court_config['case_type_code'] == case_type:
-                # Восстанавливаем полный год из короткого
-                year_short = int(parsed['year_short'])
-                year = f"20{year_short:02d}"
+            for court_key, court_config in region_config['courts'].items():
+                instance = court_config['instance_code']
+                full_code = f"{kato}{instance}"
                 
-                return {
-                    'region_key': region_key,
-                    'court_key': court_key,
-                    'year': year,
-                    'sequence': parsed['sequence']
-                }
-    
-    return None
+                if court_code == full_code and court_config['case_type_code'] == case_type:
+                    # Восстанавливаем полный год из короткого
+                    year_short = int(parsed['year_short'])
+                    year = f"20{year_short:02d}"
+                    
+                    return {
+                        'region_key': region_key,
+                        'court_key': court_key,
+                        'year': year,
+                        'sequence': parsed['sequence']
+                    }
+        
+        return None

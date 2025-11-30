@@ -11,19 +11,34 @@ from utils.logger import get_logger
 
 
 class FormHandler:
-    """Обработчик поисковой формы"""
+    """Обработчик поисковой формы с кешированием ID"""
     
     def __init__(self, base_url: str):
         self.base_url = base_url
         self.logger = get_logger('form_handler')
+        
+        # Кеш ID формы (извлекается один раз за сессию)
+        self._cached_form_ids: Optional[Dict[str, str]] = None
+        self._cache_initialized: bool = False
+    
+    def reset_cache(self):
+        """
+        Сброс кеша ID формы
+        
+        Вызывать при:
+        - Переавторизации
+        - Ошибках, связанных с невалидными ID
+        """
+        self._cached_form_ids = None
+        self._cache_initialized = False
+        self.logger.debug("Кеш ID формы сброшен")
     
     async def prepare_search_form(self, session: aiohttp.ClientSession) -> tuple:
         """
         Подготовка формы поиска
         
-        Raises:
-            aiohttp.ClientError: при HTTP 500, 502, 503, 504 (retriable)
-            NonRetriableError: при HTTP 400, 401, 403, 404 (non-retriable)
+        - ViewState: извлекается КАЖДЫЙ раз (уникален для каждого запроса)
+        - Form IDs: извлекаются ОДИН раз и кешируются
         
         Returns:
             (viewstate, form_ids)
@@ -33,47 +48,43 @@ class FormHandler:
         
         try:
             async with session.get(url, headers=headers) as response:
-                # ОБРАБОТКА HTTP СТАТУСОВ
-                
-                # Постоянные ошибки
+                # Обработка HTTP ошибок
                 if response.status in [400, 401, 403, 404]:
-                    self.logger.error(f"HTTP {response.status} при загрузке формы")
                     raise NonRetriableError(f"HTTP {response.status}: Постоянная ошибка")
                 
-                # Временные ошибки
                 if response.status in [500, 502, 503, 504]:
-                    self.logger.warning(f"HTTP {response.status}: Временная ошибка сервера")
                     raise aiohttp.ClientError(f"HTTP {response.status}: Сервер недоступен")
                 
-                # Другие ошибки
                 if response.status != 200:
-                    self.logger.error(f"HTTP {response.status} при загрузке формы")
                     raise aiohttp.ClientError(f"HTTP {response.status}: Неожиданная ошибка")
                 
                 html = await response.text()
-                viewstate = self._extract_viewstate(html)
-                form_ids = self._extract_form_ids(html)
                 
-                self.logger.debug("Форма поиска подготовлена")
-                return viewstate, form_ids
+                # ViewState — всегда извлекаем заново
+                viewstate = self._extract_viewstate(html)
+                
+                # Form IDs — извлекаем только один раз
+                if not self._cache_initialized:
+                    self._cached_form_ids = self._extract_form_ids(html)
+                    self._cache_initialized = True
+                    
+                    self.logger.info("📋 ID формы извлечены и закешированы:")
+                    for key, value in self._cached_form_ids.items():
+                        self.logger.info(f"   {key}: {value}")
+                
+                return viewstate, self._cached_form_ids
         
         except (aiohttp.ClientError, NonRetriableError):
             raise
         
         except Exception as e:
-            self.logger.error(f"Неожиданная ошибка при подготовке формы: {e}")
+            self.logger.error(f"Ошибка подготовки формы: {e}")
             raise aiohttp.ClientError(f"Ошибка подготовки формы: {e}")
     
     async def select_region(self, session: aiohttp.ClientSession, 
-                      viewstate: str, region_id: str, 
-                      form_ids: Dict[str, str]):
-        """
-        Выбор региона в форме
-        
-        Raises:
-            aiohttp.ClientError: при retriable ошибках
-            NonRetriableError: при non-retriable ошибках
-        """
+                           viewstate: str, region_id: str, 
+                           form_ids: Dict[str, str]):
+        """Выбор региона в форме"""
         url = f"{self.base_url}/form/lawsuit/index.xhtml"
         form_base = form_ids.get('form_base', 'j_idt45:j_idt46')
         
@@ -102,22 +113,14 @@ class FormHandler:
         
         try:
             async with session.post(url, data=data, headers=headers) as response:
-                # ОБРАБОТКА HTTP СТАТУСОВ
-                
-                # Постоянные ошибки
                 if response.status in [400, 401, 403, 404]:
-                    self.logger.error(f"HTTP {response.status} при выборе региона")
-                    raise NonRetriableError(f"HTTP {response.status}: Постоянная ошибка")
+                    raise NonRetriableError(f"HTTP {response.status}")
                 
-                # Временные ошибки
                 if response.status in [500, 502, 503, 504]:
-                    self.logger.warning(f"HTTP {response.status}: Временная ошибка сервера")
-                    raise aiohttp.ClientError(f"HTTP {response.status}: Сервер недоступен")
+                    raise aiohttp.ClientError(f"HTTP {response.status}")
                 
-                # Другие ошибки
                 if response.status != 200:
-                    self.logger.error(f"HTTP {response.status} при выборе региона")
-                    raise aiohttp.ClientError(f"HTTP {response.status}: Неожиданная ошибка")
+                    raise aiohttp.ClientError(f"HTTP {response.status}")
                 
                 self.logger.debug(f"Регион выбран: {region_id}")
         
@@ -125,7 +128,6 @@ class FormHandler:
             raise
         
         except Exception as e:
-            self.logger.error(f"Неожиданная ошибка при выборе региона: {e}")
             raise aiohttp.ClientError(f"Ошибка выбора региона: {e}")
     
     def _extract_viewstate(self, html: str) -> Optional[str]:
@@ -133,7 +135,7 @@ class FormHandler:
         parser = HTMLParser(html)
         viewstate_input = parser.css_first('input[name="javax.faces.ViewState"]')
         
-        if viewstate_input:
+        if viewstate_input and viewstate_input.attributes:
             return viewstate_input.attributes.get('value')
         return None
     
@@ -144,7 +146,7 @@ class FormHandler:
         
         # Поиск базового ID формы
         form = parser.css_first('form')
-        if form and form.attributes.get('id'):
+        if form and form.attributes and form.attributes.get('id'):
             ids['form_id'] = form.attributes['id']
         
         # Поиск полей формы
@@ -153,14 +155,46 @@ class FormHandler:
         for field in field_mappings:
             elements = parser.css(f'[id*="{field}"]')
             for element in elements:
-                if element.attributes.get('id'):
+                if element.attributes and element.attributes.get('id'):
                     ids[field] = element.attributes['id']
                     name = element.attributes.get('name', '')
                     if ':' in name:
                         ids['form_base'] = ':'.join(name.split(':')[:-1])
                     break
         
+        # Извлечение ID кнопки поиска
+        search_button = self._extract_search_button_id(html, ids.get('form_base', ''))
+        if search_button:
+            ids['search_button'] = search_button
+        else:
+            self.logger.warning("ID кнопки поиска не найден, будет использован fallback")
+        
         return ids
+    
+    def _extract_search_button_id(self, html: str, form_base: str) -> Optional[str]:
+        """
+        Извлечение ID кнопки поиска из RichFaces скрипта
+        
+        Ищет паттерн: goNext = function(...) { RichFaces.ajax("ID", ...)
+        """
+        import re
+        
+        pattern = r'goNext\s*=\s*function\s*\([^)]*\)\s*\{\s*RichFaces\.ajax\s*\(\s*["\']([^"\']+)["\']'
+        match = re.search(pattern, html)
+        
+        if match:
+            button_id = match.group(1)
+            
+            # Валидация: ID должен начинаться с form_base
+            if form_base and not button_id.startswith(form_base):
+                self.logger.warning(
+                    f"ID '{button_id}' не соответствует form_base '{form_base}'"
+                )
+                return None
+            
+            return button_id
+        
+        return None
     
     def _get_headers(self) -> Dict[str, str]:
         """Базовые заголовки"""
