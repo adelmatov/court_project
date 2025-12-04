@@ -1,11 +1,9 @@
-# parsers/court_parser/core/parser.py
 """
 Главный класс парсера с retry и восстановлением
 """
-
+from typing import Dict, Any, Optional, List, Tuple
 import asyncio
 import aiohttp
-from typing import Optional, Dict, List, Any, Set
 
 from config.settings import Settings
 from core.session import SessionManager
@@ -18,6 +16,7 @@ from database.models import CaseData, SearchResult
 from utils.text_processor import TextProcessor
 from utils.logger import get_logger
 from utils.retry import RetryStrategy, RetryConfig, NonRetriableError
+from utils.constants import CaseStatus
 
 class CourtParser:
     """Главный класс парсера"""
@@ -61,6 +60,55 @@ class CourtParser:
         
         self.logger = get_logger('court_parser')
         self.logger.info("🚀 Парсер инициализирован")
+
+    async def search_case_by_number(self, case_number: str) -> Tuple[Optional[str], List[CaseData]]:
+        """
+        Поиск дела по номеру
+        
+        Args:
+            case_number: полный номер дела (например '7599-25-00-4а/215')
+        
+        Returns:
+            (results_html, parsed_cases) — HTML для документов и список дел
+            (None, []) — если не удалось определить регион
+        """
+        # Определяем регион и суд по номеру дела
+        case_info = self.text_processor.find_region_and_court_by_case_number(
+            case_number, self.settings.regions
+        )
+        
+        if not case_info:
+            self.logger.warning(f"⚠️ Не удалось определить регион: {case_number}")
+            return None, []
+        
+        region_config = self.settings.get_region(case_info['region_key'])
+        court_config = self.settings.get_court(case_info['region_key'], case_info['court_key'])
+        
+        # Поиск через форму
+        async with self.form_lock:
+            session = await self.session_manager.get_session()
+            
+            viewstate, form_ids = await self.form_handler.prepare_search_form(session)
+            
+            await self.form_handler.select_region(
+                session, viewstate, region_config['id'], form_ids
+            )
+            
+            await asyncio.sleep(1)
+            
+            results_html = await self.search_engine.search_case(
+                session, viewstate,
+                region_config['id'],
+                court_config['id'],
+                case_info['year'],
+                int(case_info['sequence']),
+                form_ids
+            )
+        
+        # Парсинг
+        cases = self.results_parser.parse(results_html)
+        
+        return results_html, cases
     
     async def initialize(self):
         """Инициализация"""
@@ -179,29 +227,16 @@ class CourtParser:
         
         self.logger.info(f"🔍 Ищу дело: {target_case_number}")
         
-        # Работа с формой
-        async with self.form_lock:
-            session = await self.session_manager.get_session()
-            
-            viewstate, form_ids = await self.form_handler.prepare_search_form(session)
-            
-            await self.form_handler.select_region(
-                session, viewstate, region_config['id'], form_ids
-            )
-            
-            await asyncio.sleep(1)
-            
-            results_html = await self.search_engine.search_case(
-                session, viewstate, 
-                region_config['id'], 
-                court_config['id'],
-                year, 
-                sequence_number,
-                form_ids
-            )
+        # Используем общий метод поиска
+        results_html, cases = await self.search_case_by_number(target_case_number)
         
-        # Парсинг результатов
-        cases = self.results_parser.parse(results_html)
+        if results_html is None:
+            return {
+                'success': False,
+                'saved': False,
+                'case_number': target_case_number,
+                'error': CaseStatus.REGION_NOT_FOUND
+            }
         
         if not cases:
             self.logger.info(f"❌ Ничего не найдено: {target_case_number}")
@@ -209,7 +244,7 @@ class CourtParser:
                 'success': False,
                 'saved': False,
                 'case_number': target_case_number,
-                'error': 'no_results'
+                'error': CaseStatus.NO_RESULTS
             }
         
         # Выбор дела для сохранения
@@ -223,13 +258,13 @@ class CourtParser:
                 'success': False,
                 'saved': False,
                 'case_number': target_case_number,
-                'error': 'target_not_found'
+                'error': CaseStatus.TARGET_NOT_FOUND
             }
         
         # Сохранение
         save_result = await self.db_manager.save_case(case_to_save)
         
-        if save_result['status'] in ['saved', 'updated']:
+        if save_result['status'] in [CaseStatus.SAVED, CaseStatus.UPDATED]:
             judge_info = "✅ судья" if case_to_save.judge else "⚠️ без судьи"
             parties = len(case_to_save.plaintiffs) + len(case_to_save.defendants)
             events = len(case_to_save.events)
@@ -242,14 +277,15 @@ class CourtParser:
             return {
                 'success': True,
                 'saved': True,
-                'case_number': case_to_save.case_number
+                'case_number': case_to_save.case_number,
+                'results_html': results_html  # Добавляем для документов
             }
         
         return {
             'success': False,
             'saved': False,
             'case_number': target_case_number,
-            'error': 'save_failed'
+            'error': CaseStatus.SAVE_FAILED
         }
     
     def _select_case_to_save(
@@ -260,31 +296,19 @@ class CourtParser:
     ) -> Optional[CaseData]:
         """
         Выбор дела для сохранения по точному совпадению номера
-        
-        Args:
-            cases: список найденных дел
-            court_key: тип суда ('smas', 'appellate')
-            target_case_number: целевой номер дела
-        
-        Returns:
-            CaseData или None
         """
-        # Единая логика для всех типов судов:
-        # ищем точное совпадение номера дела
-        for case in cases:
-            if case.case_number == target_case_number:
-                return case
+        result = next(
+            (case for case in cases if case.case_number == target_case_number), 
+            None
+        )
         
-        # Если не нашли — логируем что вернул сервер
-        if cases:
+        if result is None and cases:
             self.logger.debug(
-                f"Получено {len(cases)} дел, "
-                f"целевое {target_case_number} не найдено"
+                f"Получено {len(cases)} дел, целевое {target_case_number} не найдено: "
+                f"{[c.case_number for c in cases]}"
             )
-            for case in cases:
-                self.logger.debug(f"  - {case.case_number}")
         
-        return None
+        return result
     
     async def _handle_session_recovery(self, error: Exception) -> bool:
         """Восстановление сессии"""

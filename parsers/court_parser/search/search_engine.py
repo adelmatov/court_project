@@ -1,11 +1,13 @@
 """
 Поисковый движок
 """
+from typing import Dict
 import asyncio
 import aiohttp
-from typing import Dict, Optional
+
 from utils.logger import get_logger
 from utils.retry import NonRetriableError
+from utils.http_utils import HttpHeaders
 
 
 class SearchEngine:
@@ -140,18 +142,8 @@ class SearchEngine:
     
     def _get_headers(self) -> Dict[str, str]:
         """Базовые заголовки"""
-        return {
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
-            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
-            'Accept-Language': 'ru,en;q=0.9'
-        }
-    
+        return HttpHeaders.get_base()
+
     def _get_ajax_headers(self) -> Dict[str, str]:
         """AJAX заголовки"""
-        headers = self._get_headers()
-        headers.update({
-            'Accept': '*/*',
-            'Content-Type': 'application/x-www-form-urlencoded;charset=UTF-8',
-            'Faces-Request': 'partial/ajax'
-        })
-        return headers
+        return HttpHeaders.get_ajax()

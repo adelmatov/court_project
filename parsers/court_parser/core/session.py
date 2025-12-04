@@ -1,11 +1,10 @@
-# parsers/court_parser/core/session.py
 """
 Управление HTTP сессиями с retry
 """
-
+from typing import Dict, Any, Optional
 import ssl
+import asyncio
 import aiohttp
-from typing import Optional, Dict, Any
 
 from utils.logger import get_logger
 from utils.retry import RetryStrategy, RetryConfig, CircuitBreaker, NonRetriableError
@@ -53,7 +52,7 @@ class SessionManager:
             return await self.create_session()
         return self.session
     
-    async def request(self, method: str, url: str, **kwargs) -> aiohttp.ClientResponse:
+    async def request(self, method: str, url: str, **kwargs) -> Dict[str, Any]:
         """
         HTTP запрос с автоматическим retry
         
@@ -63,7 +62,7 @@ class SessionManager:
             **kwargs: параметры для aiohttp
         
         Returns:
-            aiohttp.ClientResponse
+            {'status': int, 'text': str, 'headers': dict}
         
         Raises:
             NonRetriableError: если ошибка не подлежит retry (400, 401, 404, etc)
@@ -73,29 +72,42 @@ class SessionManager:
         # Получаем retry config
         http_retry_config = self.retry_config.get('http_request', {})
         
-        if not http_retry_config:
-            # Нет конфига - выполняем без retry
-            return await session.request(method, url, **kwargs)
-        
-        # Retry стратегия
-        retry_cfg = RetryConfig(http_retry_config)
-        strategy = RetryStrategy(retry_cfg, self.circuit_breaker)
-        
-        async def _do_request():
+        async def _do_request() -> Dict[str, Any]:
             async with session.request(method, url, **kwargs) as response:
+                # Читаем данные ДО выхода из контекстного менеджера
+                text = await response.text()
+                
                 # Проверка на non-retriable статусы
                 if response.status in [400, 401, 403, 404]:
                     raise NonRetriableError(f"HTTP {response.status}")
                 
                 # Проверка на retriable статусы
-                if strategy.is_retriable_status(response.status):
+                if http_retry_config and response.status in http_retry_config.get('retriable_status_codes', [500, 502, 503, 504]):
                     raise aiohttp.ClientError(f"HTTP {response.status}")
                 
-                # Успех
-                return response
+                return {
+                    'status': response.status,
+                    'text': text,
+                    'headers': dict(response.headers)
+                }
+        
+        if not http_retry_config:
+            return await _do_request()
+        
+        # Retry стратегия
+        retry_cfg = RetryConfig(http_retry_config)
+        strategy = RetryStrategy(retry_cfg, self.circuit_breaker)
         
         error_context = f"{method} {url}"
         return await strategy.execute_with_retry(_do_request, error_context=error_context)
+
+    async def get(self, url: str, **kwargs) -> Dict[str, Any]:
+        """GET запрос с retry"""
+        return await self.request('GET', url, **kwargs)
+
+    async def post(self, url: str, **kwargs) -> Dict[str, Any]:
+        """POST запрос с retry"""
+        return await self.request('POST', url, **kwargs)
     
     async def get(self, url: str, **kwargs) -> aiohttp.ClientResponse:
         """GET запрос с retry"""

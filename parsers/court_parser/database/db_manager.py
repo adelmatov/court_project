@@ -1,13 +1,14 @@
 """
 Менеджер базы данных
 """
+from typing import Dict, Any, Optional, List, Set
 import asyncpg
-from typing import Dict, List, Optional, Any, Set
 
 from database.models import CaseData, EventData
 from utils.text_processor import TextProcessor
 from utils.validators import DataValidator
 from utils.logger import get_logger
+from utils.constants import PartyRole
 
 
 class DatabaseManager:
@@ -118,13 +119,13 @@ class DatabaseManager:
         for plaintiff in case_data.plaintiffs:
             if self.validator.validate_party_name(plaintiff):
                 party_id = await self._get_or_create_party(conn, plaintiff)
-                await self._link_party_to_case(conn, case_id, party_id, 'plaintiff')
+                await self._link_party_to_case(conn, case_id, party_id, PartyRole.PLAINTIFF)
         
         # Ответчики
         for defendant in case_data.defendants:
             if self.validator.validate_party_name(defendant):
                 party_id = await self._get_or_create_party(conn, defendant)
-                await self._link_party_to_case(conn, case_id, party_id, 'defendant')
+                await self._link_party_to_case(conn, case_id, party_id, PartyRole.DEFENDANT)
     
     async def _save_events(self, conn: asyncpg.Connection, 
                          case_id: int, events: List[EventData]):
@@ -562,3 +563,215 @@ class DatabaseManager:
         )
         
         return case_numbers
+    
+
+    # Docs processing:
+
+    async def get_document_keys(self, case_id: int) -> set:
+        """Получить ключи уже скачанных документов"""
+        async with self.pool.acquire() as conn:
+            rows = await conn.fetch(
+                "SELECT doc_date, doc_name FROM case_documents WHERE case_id = $1",
+                case_id
+            )
+        return {f"{r['doc_date'].isoformat()}|{ r['doc_name']}" for r in rows}
+
+    async def save_documents(self, case_id: int, documents: List[Dict]) -> int:
+        """Сохранить информацию о документах"""
+        if not documents:
+            return 0
+        saved = 0
+        async with self.pool.acquire() as conn:
+            for doc in documents:
+                try:
+                    await conn.execute("""
+                        INSERT INTO case_documents (case_id, doc_date, doc_name, file_path, downloaded_at)
+                        VALUES ($1, $2, $3, $4, CURRENT_TIMESTAMP)
+                        ON CONFLICT (case_id, doc_date, doc_name) DO UPDATE
+                        SET file_path = EXCLUDED.file_path, downloaded_at = CURRENT_TIMESTAMP
+                    """, case_id, doc['doc_date'], doc['doc_name'], doc['file_path'])
+                    saved += 1
+                except Exception as e:
+                    self.logger.error(f"Ошибка сохранения документа: {e}")
+        return saved
+
+    async def get_cases_pending_documents(self, limit: int = None) -> List[Dict]:
+        """Получить дела для скачивания документов"""
+        query = """
+            SELECT id, case_number FROM cases
+            WHERE documents_pending = TRUE
+            ORDER BY case_date DESC
+        """
+        if limit:
+            query += f" LIMIT {limit}"
+        async with self.pool.acquire() as conn:
+            rows = await conn.fetch(query)
+        return [{'id': r['id'], 'case_number': r['case_number']} for r in rows]
+
+    async def mark_documents_downloaded(self, case_id: int):
+        """Пометить что документы скачаны"""
+        async with self.pool.acquire() as conn:
+            await conn.execute("""
+                UPDATE cases SET documents_pending = FALSE, documents_checked_at = CURRENT_TIMESTAMP
+                WHERE id = $1
+            """, case_id)
+
+    async def mark_case_for_documents(self, case_id: int):
+        """Пометить дело для скачивания документов"""
+        async with self.pool.acquire() as conn:
+            await conn.execute(
+                "UPDATE cases SET documents_pending = TRUE WHERE id = $1", case_id
+            )
+
+    async def get_cases_for_documents(self, filters: Dict, limit: int = None) -> List[Dict]:
+        """
+        Получить дела для скачивания документов
+        
+        Использует ту же логику фильтрации, что и get_cases_for_update
+        """
+        defendant_keywords = filters.get('defendant_keywords', [])
+        exclude_events = filters.get('exclude_event_types', [])
+        interval_days = filters.get('check_interval_days', 7)
+        
+        query = """
+            SELECT DISTINCT c.id, c.case_number, c.case_date, c.documents_checked_at
+            FROM cases c
+        """
+        
+        conditions = []
+        params = []
+        param_counter = 1
+        
+        # ФИЛЬТР 1: По ответчику (если указан)
+        if defendant_keywords:
+            query += """
+                JOIN case_parties cp ON c.id = cp.case_id AND cp.party_role = 'defendant'
+                JOIN parties p ON cp.party_id = p.id
+            """
+            
+            keyword_conditions = []
+            for keyword in defendant_keywords:
+                keyword_conditions.append(f"p.name ILIKE ${param_counter}")
+                params.append(f'%{keyword}%')
+                param_counter += 1
+            
+            conditions.append(f"({' OR '.join(keyword_conditions)})")
+        
+        # ФИЛЬТР 2: Исключить дела с определёнными событиями
+        if exclude_events:
+            placeholders = ', '.join([f'${i}' for i in range(param_counter, param_counter + len(exclude_events))])
+            
+            conditions.append(f"""
+                NOT EXISTS (
+                    SELECT 1 
+                    FROM case_events ce
+                    JOIN event_types et ON ce.event_type_id = et.id
+                    WHERE ce.case_id = c.id
+                    AND et.name IN ({placeholders})
+                )
+            """)
+            
+            params.extend(exclude_events)
+            param_counter += len(exclude_events)
+        
+        # ФИЛЬТР 3: Документы не проверялись или проверялись давно
+        conditions.append(f"""
+            (
+                c.documents_checked_at IS NULL 
+                OR c.documents_checked_at < NOW() - INTERVAL '{interval_days} days'
+            )
+        """)
+        
+        # Собираем WHERE
+        if conditions:
+            query += " WHERE " + " AND ".join(conditions)
+        
+        # Сортировка (все колонки есть в SELECT)
+        query += " ORDER BY c.documents_checked_at NULLS FIRST, c.case_date DESC"
+        
+        if limit:
+            query += f" LIMIT {limit}"
+        
+        async with self.pool.acquire() as conn:
+            rows = await conn.fetch(query, *params)
+        
+        self.logger.info(f"Дел для скачивания документов: {len(rows)}")
+        return [{'id': r['id'], 'case_number': r['case_number']} for r in rows]
+    
+    async def get_case_id(self, case_number: str) -> Optional[int]:
+        """Получить ID дела по номеру"""
+        async with self.pool.acquire() as conn:
+            row = await conn.fetchrow(
+                "SELECT id FROM cases WHERE case_number = $1",
+                case_number
+            )
+            return row['id'] if row else None
+        
+    async def update_case(self, case_data: CaseData) -> Dict[str, Any]:
+        """
+        Обновление дела (события, судья)
+        
+        Returns:
+            {'case_id': int, 'events_added': int}
+        """
+        try:
+            async with self.pool.acquire() as conn:
+                # 1. Получаем case_id
+                case_id = await conn.fetchval(
+                    "SELECT id FROM cases WHERE case_number = $1",
+                    case_data.case_number
+                )
+                
+                if not case_id:
+                    # Дело не найдено — создаём новое
+                    result = await self.save_case(case_data)
+                    return {
+                        'case_id': result.get('case_id'),
+                        'events_added': len(case_data.events)
+                    }
+                
+                # 2. Обновляем судью (если появился)
+                if case_data.judge:
+                    judge_id = await self._get_or_create_judge(conn, case_data.judge)
+                    await conn.execute(
+                        "UPDATE cases SET judge_id = $1, updated_at = CURRENT_TIMESTAMP WHERE id = $2",
+                        judge_id, case_id
+                    )
+                
+                # 3. Получаем существующие события
+                existing_events = await conn.fetch("""
+                    SELECT et.name, ce.event_date 
+                    FROM case_events ce
+                    JOIN event_types et ON ce.event_type_id = et.id
+                    WHERE ce.case_id = $1
+                """, case_id)
+                
+                existing_keys = {
+                    f"{row['name']}|{row['event_date'].isoformat()}" 
+                    for row in existing_events
+                }
+                
+                # 4. Добавляем новые события
+                events_added = 0
+                for event in case_data.events:
+                    event_key = f"{event.event_type}|{event.event_date.isoformat()}"
+                    if event_key not in existing_keys:
+                        event_type_id = await self._get_or_create_event_type(conn, event.event_type)
+                        await conn.execute("""
+                            INSERT INTO case_events (case_id, event_type_id, event_date)
+                            VALUES ($1, $2, $3)
+                            ON CONFLICT DO NOTHING
+                        """, case_id, event_type_id, event.event_date)
+                        events_added += 1
+                
+                # 5. Обновляем метку времени
+                await conn.execute(
+                    "UPDATE cases SET last_updated_at = CURRENT_TIMESTAMP WHERE id = $1",
+                    case_id
+                )
+                
+                return {'case_id': case_id, 'events_added': events_added}
+        
+        except Exception as e:
+            self.logger.error(f"Ошибка обновления дела {case_data.case_number}: {e}")
+            return {'case_id': None, 'events_added': 0}

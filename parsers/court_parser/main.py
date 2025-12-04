@@ -1,22 +1,21 @@
 """
 Точка входа парсера
 """
-import asyncio
 import sys
-from typing import Optional, List
+import asyncio
 import traceback
+from typing import List, Optional
 
 from core.parser import CourtParser
 from config.settings import Settings
+from search.document_handler import DocumentHandler
 from utils.logger import setup_logger
-from utils.text_processor import TextProcessor
 
 
 async def parse_all_regions_from_config() -> dict:
     """Парсинг всех регионов согласно настройкам из config.json"""
     logger = setup_logger('main', level='INFO')
     
-    # Загрузка настроек
     settings = Settings()
     ps = settings.parsing_settings
     
@@ -28,11 +27,9 @@ async def parse_all_regions_from_config() -> dict:
     delay_between_requests = ps.get('delay_between_requests', 2)
     max_parallel_regions = ps.get('max_parallel_regions', 1)
     
-    # Настройки retry на уровне региона
     region_retry_max_attempts = ps.get('region_retry_max_attempts', 3)
     region_retry_delay = ps.get('region_retry_delay_seconds', 5)
     
-    # ЛИМИТЫ ДЛЯ ТЕСТИРОВАНИЯ
     limit_regions = settings.get_limit_regions()
     limit_cases_per_region = settings.get_limit_cases_per_region()
     
@@ -55,10 +52,8 @@ async def parse_all_regions_from_config() -> dict:
     
     logger.info("=" * 70)
     
-    # Получение списка регионов
     all_regions = settings.get_target_regions()
     
-    # Применение лимита регионов
     if limit_regions:
         regions_to_process = all_regions[:limit_regions]
         logger.info(f"Обрабатываю {len(regions_to_process)} из {len(all_regions)} регионов")
@@ -66,7 +61,6 @@ async def parse_all_regions_from_config() -> dict:
         regions_to_process = all_regions
         logger.info(f"Обрабатываю все {len(regions_to_process)} регионов")
     
-    # Общая статистика
     total_stats = {
         'regions_processed': 0,
         'regions_failed': 0,
@@ -75,14 +69,11 @@ async def parse_all_regions_from_config() -> dict:
     }
     stats_lock = asyncio.Lock()
     
-    # Семафор для контроля параллельности
     semaphore = asyncio.Semaphore(max_parallel_regions)
     
-    # Создаём парсер один раз
     async with CourtParser() as parser:
         
         async def process_region_with_retry(region_key: str):
-            """Обработка региона с retry"""
             async with semaphore:
                 region_config = settings.get_region(region_key)
                 
@@ -95,7 +86,6 @@ async def parse_all_regions_from_config() -> dict:
                             logger.info(f"Регион: {region_config['name']}")
                         logger.info(f"{'='*70}")
                         
-                        # Парсинг всех судов региона
                         region_stats = await process_region_all_courts(
                             parser=parser,
                             settings=settings,
@@ -109,7 +99,6 @@ async def parse_all_regions_from_config() -> dict:
                             limit_cases=limit_cases_per_region
                         )
                         
-                        # Успех → обновляем статистику
                         async with stats_lock:
                             total_stats['regions_processed'] += 1
                             total_stats['total_queries'] += region_stats['total_queries']
@@ -130,11 +119,9 @@ async def parse_all_regions_from_config() -> dict:
                                 total_stats['regions_failed'] += 1
                             return None
         
-        # Запускаем все регионы
         tasks = [process_region_with_retry(r) for r in regions_to_process]
         await asyncio.gather(*tasks, return_exceptions=True)
     
-    # Итоговая статистика
     logger.info("\n" + "=" * 70)
     logger.info("ОБЩАЯ СТАТИСТИКА:")
     logger.info(f"  Обработано регионов: {total_stats['regions_processed']}")
@@ -203,7 +190,6 @@ async def process_region_all_courts(
             logger.error(traceback.format_exc())
             continue
     
-    # Итоги региона
     logger.info(f"\n{'-'*70}")
     logger.info(f"ИТОГИ РЕГИОНА {region_config['name']}:")
     logger.info(f"  Судов: {region_stats['courts_processed']}/{len(court_types)}")
@@ -226,15 +212,8 @@ async def parse_court(
     delay_between_requests: float,
     limit_cases: Optional[int] = None
 ) -> dict:
-    """
-    Парсинг одного суда
-    
-    Логика:
-    1. Заполнение пропусков в уже пройденном диапазоне
-    2. Сбор новых дел от последнего номера
-    """
+    """Парсинг одного суда"""
     logger = setup_logger('main', level='INFO')
-    court_config = settings.get_court(region_key, court_key)
     
     stats = {
         'missing_found': 0,
@@ -244,10 +223,6 @@ async def parse_court(
         'new_saved': 0,
         'consecutive_empty': 0
     }
-    
-    # ════════════════════════════════════════════════════════════════════
-    # АНАЛИЗ БД
-    # ════════════════════════════════════════════════════════════════════
     
     existing = await parser.db_manager.get_existing_case_numbers(
         region_key, court_key, year, settings
@@ -261,12 +236,8 @@ async def parse_court(
     logger.info(f"   Существующих номеров: {len(existing)}")
     logger.info(f"   Последний номер: {last_in_db}")
     
-    # ════════════════════════════════════════════════════════════════════
     # ШАГ 1: Заполнение пропусков
-    # ════════════════════════════════════════════════════════════════════
-    
     if last_in_db > 0:
-        # Вычисляем пропущенные номера
         full_range = set(range(start_from, last_in_db + 1))
         missing = sorted(full_range - existing)
         stats['missing_found'] = len(missing)
@@ -277,14 +248,7 @@ async def parse_court(
             logger.info(f"{'─' * 70}")
             logger.info(f"📋 Пропущено номеров: {len(missing)}")
             
-            if len(missing) <= 20:
-                logger.info(f"   Номера: {missing}")
-            else:
-                logger.info(f"   Первые 10: {missing[:10]}")
-                logger.info(f"   Последние 10: {missing[-10:]}")
-            
             for i, seq_num in enumerate(missing, 1):
-                # Проверка лимита
                 if limit_cases:
                     total_queries = stats['missing_filled'] + stats['missing_not_found'] + stats['new_queries']
                     if total_queries >= limit_cases:
@@ -300,12 +264,9 @@ async def parse_court(
                 
                 if result['success'] and result.get('saved'):
                     stats['missing_filled'] += 1
-                    status = "✅"
                 else:
                     stats['missing_not_found'] += 1
-                    status = "❌"
                 
-                # Прогресс каждые 10 или в конце
                 if i % 10 == 0 or i == len(missing):
                     logger.info(
                         f"   [{i}/{len(missing)}] "
@@ -314,21 +275,11 @@ async def parse_court(
                     )
                 
                 await asyncio.sleep(delay_between_requests)
-            
-            logger.info(f"\n   Итого пропусков: заполнено {stats['missing_filled']}, "
-                       f"не найдено {stats['missing_not_found']}")
-        else:
-            logger.info(f"   Пропусков нет ✓")
     
-    # ════════════════════════════════════════════════════════════════════
     # ШАГ 2: Сбор новых дел
-    # ════════════════════════════════════════════════════════════════════
-    
     actual_start = last_in_db + 1 if last_in_db > 0 else start_from
     
-    if actual_start > max_number:
-        logger.info(f"✅ Все номера до {max_number} уже обработаны")
-    else:
+    if actual_start <= max_number:
         logger.info(f"\n{'─' * 70}")
         logger.info(f"ШАГ 2: Сбор новых дел")
         logger.info(f"{'─' * 70}")
@@ -337,7 +288,6 @@ async def parse_court(
         current_number = actual_start
         
         while current_number <= max_number:
-            # Проверка лимита
             if limit_cases:
                 total_queries = (stats['missing_filled'] + stats['missing_not_found'] + 
                                stats['new_queries'])
@@ -345,7 +295,6 @@ async def parse_court(
                     logger.info(f"🔒 Лимит запросов ({limit_cases})")
                     break
             
-            # Проверка consecutive_empty
             if stats['consecutive_empty'] >= max_consecutive_empty:
                 logger.info(f"🛑 Лимит пустых подряд ({max_consecutive_empty}), стоп")
                 break
@@ -364,8 +313,9 @@ async def parse_court(
                 stats['consecutive_empty'] = 0
             elif result.get('error') == 'no_results':
                 stats['consecutive_empty'] += 1
+            elif result.get('error') == 'target_not_found' and court_key != 'smas':
+                stats['consecutive_empty'] += 1
             
-            # Прогресс каждые 10 запросов
             if stats['new_queries'] % 10 == 0:
                 logger.info(
                     f"   #{current_number} | "
@@ -377,229 +327,217 @@ async def parse_court(
             current_number += 1
             await asyncio.sleep(delay_between_requests)
     
-    # ════════════════════════════════════════════════════════════════════
-    # ИТОГИ
-    # ════════════════════════════════════════════════════════════════════
-    
     total_saved = stats['missing_filled'] + stats['new_saved']
     total_queries = (stats['missing_filled'] + stats['missing_not_found'] + 
                     stats['new_queries'])
     
-    logger.info(f"\n{'═' * 70}")
-    logger.info(f"ИТОГИ {court_config['name']}:")
-    logger.info(f"  Пропусков найдено: {stats['missing_found']}")
-    logger.info(f"  Пропусков заполнено: {stats['missing_filled']}")
-    logger.info(f"  Новых дел собрано: {stats['new_saved']}")
-    logger.info(f"  Всего сохранено: {total_saved}")
-    logger.info(f"  Всего запросов: {total_queries}")
-    logger.info(f"{'═' * 70}")
-    
-    # Возвращаем статистику в формате, совместимом с вызывающим кодом
     return {
         'queries_made': total_queries,
         'cases_saved': total_saved,
         'consecutive_empty': stats['consecutive_empty'],
-        'missing_found': stats['missing_found'],
-        'missing_filled': stats['missing_filled']
+        'missing_filled': stats['missing_filled'],
+        'new_saved': stats['new_saved']
     }
 
 
 async def update_cases_history():
     """
-    Режим обновления истории дел
-    
-    Этап 1: Дела СМАС без судьи (приоритет)
-    Этап 2: Дела по ключевым словам
+    Режим обновления: события + документы
     """
     logger = setup_logger('main', level='INFO')
     
     settings = Settings()
-    update_config = settings.update_settings
+    update_config = settings.config.get('update_settings', {})
+    docs_config = settings.config.get('documents_settings', {})
     
-    if not update_config.get('enabled'):
-        logger.warning("⚠️ Update Mode отключен")
+    if not update_config.get('enabled', True):
+        logger.warning("⚠️ Update Mode отключен в настройках")
         return
     
     interval_days = update_config.get('update_interval_days', 2)
+    filters = update_config.get('filters', {})
+    
+    storage_dir = docs_config.get('storage_dir', './documents')
+    download_delay = docs_config.get('download_delay', 2.0)
     
     logger.info("\n" + "=" * 70)
-    logger.info("РЕЖИМ ОБНОВЛЕНИЯ")
+    logger.info("РЕЖИМ ОБНОВЛЕНИЯ: СОБЫТИЯ + ДОКУМЕНТЫ")
+    logger.info("=" * 70)
+    logger.info(f"Интервал: {interval_days} дней")
+    if filters.get('defendant_keywords'):
+        logger.info(f"Фильтр по ответчику: {filters['defendant_keywords']}")
+    if filters.get('exclude_event_types'):
+        logger.info(f"Исключить события: {filters['exclude_event_types']}")
     logger.info("=" * 70)
     
     stats = {
-        'stage1_checked': 0,
-        'stage1_updated': 0,
-        'stage1_errors': 0,
-        'stage2_checked': 0,
-        'stage2_updated': 0,
-        'stage2_errors': 0
+        'cases_updated': 0,
+        'events_added': 0,
+        'documents_downloaded': 0,
+        'errors': 0,
+        'skipped': 0
     }
     
     async with CourtParser() as parser:
-        text_processor = TextProcessor()
-        
-        # ════════════════════════════════════════════════════════════════
-        # ЭТАП 1: Дела СМАС без судьи
-        # ════════════════════════════════════════════════════════════════
-        
-        logger.info("\n" + "-" * 70)
-        logger.info("ЭТАП 1: Дела СМАС без судьи")
-        logger.info("-" * 70)
-        
-        smas_cases = await parser.db_manager.get_smas_cases_without_judge(
-            settings=settings,
-            interval_days=interval_days
+        doc_handler = DocumentHandler(
+            base_url=settings.base_url,
+            storage_dir=storage_dir,
+            regions_config=settings.regions
         )
         
-        if smas_cases:
-            logger.info(f"📋 Дел СМАС без судьи: {len(smas_cases)}")
-            
-            for i, case_number in enumerate(smas_cases, 1):
-                try:
-                    case_info = text_processor.find_region_and_court_by_case_number(
-                        case_number, settings.regions
-                    )
-                    
-                    if not case_info:
-                        logger.warning(f"⚠️ Не удалось определить регион: {case_number}")
-                        stats['stage1_errors'] += 1
-                        continue
-                    
-                    logger.info(f"[{i}/{len(smas_cases)}] {case_number}")
-                    
-                    result = await parser.search_and_save(
-                        region_key=case_info['region_key'],
-                        court_key=case_info['court_key'],
-                        sequence_number=int(case_info['sequence']),
-                        year=case_info['year']
-                    )
-                    
-                    stats['stage1_checked'] += 1
-                    
-                    if result['success']:
-                        await parser.db_manager.mark_case_as_updated(case_number)
-                        if result.get('saved'):
-                            stats['stage1_updated'] += 1
-                            logger.info(f"   ✅ Судья обновлён")
-                    else:
-                        stats['stage1_errors'] += 1
-                        logger.warning(f"   ⚠️ {result.get('error', 'unknown')}")
-                    
-                    await asyncio.sleep(2)
-                    
-                except Exception as e:
-                    stats['stage1_errors'] += 1
-                    logger.error(f"❌ {case_number}: {e}")
-        else:
-            logger.info("✅ Нет дел СМАС без судьи")
+        # Этап 1: Дела СМАС без судьи
+        logger.info("\n📋 Этап 1: Дела СМАС без судьи...")
+        smas_cases = await parser.db_manager.get_smas_cases_without_judge(settings, interval_days)
+        logger.info(f"   Найдено: {len(smas_cases)}")
         
-        logger.info(f"\nИтоги этапа 1: проверено {stats['stage1_checked']}, "
-                   f"обновлено {stats['stage1_updated']}, ошибок {stats['stage1_errors']}")
+        for case_number in smas_cases:
+            result = await _process_single_case(
+                parser, doc_handler, case_number, download_delay, logger
+            )
+            _update_stats(stats, result)
         
-        # ════════════════════════════════════════════════════════════════
-        # ЭТАП 2: Дела по ключевым словам
-        # ════════════════════════════════════════════════════════════════
-        
-        logger.info("\n" + "-" * 70)
-        logger.info("ЭТАП 2: Дела по ключевым словам")
-        logger.info("-" * 70)
-        
+        # Этап 2: Дела по ключевым словам
+        logger.info(f"\n📋 Этап 2: Дела по ключевым словам...")
         keyword_cases = await parser.db_manager.get_cases_for_update({
-            'defendant_keywords': update_config['filters']['defendant_keywords'],
-            'exclude_event_types': update_config['filters']['exclude_event_types'],
+            'defendant_keywords': filters.get('defendant_keywords', []),
+            'exclude_event_types': filters.get('exclude_event_types', []),
             'update_interval_days': interval_days
         })
+        logger.info(f"   Найдено: {len(keyword_cases)}")
         
-        if keyword_cases:
-            logger.info(f"📋 Дел по ключевым словам: {len(keyword_cases)}")
-            
-            for i, case_number in enumerate(keyword_cases, 1):
-                try:
-                    case_info = text_processor.find_region_and_court_by_case_number(
-                        case_number, settings.regions
-                    )
-                    
-                    if not case_info:
-                        logger.warning(f"⚠️ Не удалось определить регион: {case_number}")
-                        stats['stage2_errors'] += 1
-                        continue
-                    
-                    logger.info(f"[{i}/{len(keyword_cases)}] {case_number}")
-                    
-                    result = await parser.search_and_save(
-                        region_key=case_info['region_key'],
-                        court_key=case_info['court_key'],
-                        sequence_number=int(case_info['sequence']),
-                        year=case_info['year']
-                    )
-                    
-                    stats['stage2_checked'] += 1
-                    
-                    if result['success']:
-                        await parser.db_manager.mark_case_as_updated(case_number)
-                        if result.get('saved'):
-                            stats['stage2_updated'] += 1
-                    else:
-                        stats['stage2_errors'] += 1
-                    
-                    await asyncio.sleep(2)
-                    
-                except Exception as e:
-                    stats['stage2_errors'] += 1
-                    logger.error(f"❌ {case_number}: {e}")
-        else:
-            logger.info("✅ Нет дел для обновления по ключевым словам")
-        
-        logger.info(f"\nИтоги этапа 2: проверено {stats['stage2_checked']}, "
-                   f"обновлено {stats['stage2_updated']}, ошибок {stats['stage2_errors']}")
+        for case_number in keyword_cases:
+            result = await _process_single_case(
+                parser, doc_handler, case_number, download_delay, logger
+            )
+            _update_stats(stats, result)
     
-    # ════════════════════════════════════════════════════════════════════
-    # ОБЩИЕ ИТОГИ
-    # ════════════════════════════════════════════════════════════════════
-    
-    total_checked = stats['stage1_checked'] + stats['stage2_checked']
-    total_updated = stats['stage1_updated'] + stats['stage2_updated']
-    total_errors = stats['stage1_errors'] + stats['stage2_errors']
-    
+    # Итоги
     logger.info("\n" + "=" * 70)
-    logger.info("ОБЩИЕ ИТОГИ UPDATE MODE:")
-    logger.info(f"  Этап 1 (СМАС без судьи): {stats['stage1_checked']} проверено, "
-               f"{stats['stage1_updated']} обновлено")
-    logger.info(f"  Этап 2 (ключевые слова): {stats['stage2_checked']} проверено, "
-               f"{stats['stage2_updated']} обновлено")
-    logger.info(f"  ВСЕГО: {total_checked} проверено, {total_updated} обновлено, "
-               f"{total_errors} ошибок")
+    logger.info("ИТОГИ ОБНОВЛЕНИЯ:")
+    logger.info(f"  Обновлено дел: {stats['cases_updated']}")
+    logger.info(f"  Добавлено событий: {stats['events_added']}")
+    logger.info(f"  Скачано документов: {stats['documents_downloaded']}")
+    logger.info(f"  Пропущено: {stats['skipped']}")
+    logger.info(f"  Ошибок: {stats['errors']}")
     logger.info("=" * 70)
 
 
-async def main():
+async def _process_single_case(parser, doc_handler, case_number: str, delay: float, logger) -> dict:
+    """Обработка одного дела: обновление событий + документы"""
+    result = {'updated': False, 'events_added': 0, 'documents': 0, 'error': False}
+    
+    try:
+        logger.info(f"   🔄 {case_number}")
+        
+        # 1. Поиск на сайте
+        results_html, cases = await parser.search_case_by_number(case_number)
+        
+        if not results_html or not cases:
+            logger.warning(f"      ⚠️ Не найдено на сайте")
+            result['skipped'] = True
+            return result
+        
+        # 2. Найти целевое дело
+        target_case = next((c for c in cases if c.case_number == case_number), None)
+        
+        if not target_case or target_case.result_index is None:
+            logger.warning(f"      ⚠️ Индекс не определён")
+            result['skipped'] = True
+            return result
+        
+        # 3. Обновление событий в БД
+        save_result = await parser.db_manager.update_case(target_case)
+        
+        if save_result.get('events_added', 0) > 0:
+            result['events_added'] = save_result['events_added']
+            result['updated'] = True
+            logger.info(f"      ✅ +{result['events_added']} событий")
+        
+        # 4. Скачивание документов
+        case_id = save_result.get('case_id') or await parser.db_manager.get_case_id(case_number)
+        
+        if case_id:
+            session = await parser.session_manager.get_session()
+            existing_keys = await parser.db_manager.get_document_keys(case_id)
+            
+            downloaded = await doc_handler.fetch_all_documents(
+                session=session,
+                results_html=results_html,
+                case_number=case_number,
+                case_index=target_case.result_index,
+                existing_keys=existing_keys,
+                delay=delay
+            )
+            
+            if downloaded:
+                await parser.db_manager.save_documents(case_id, downloaded)
+                result['documents'] = len(downloaded)
+                result['updated'] = True
+                logger.info(f"      📎 +{len(downloaded)} документов")
+            
+            await parser.db_manager.mark_documents_downloaded(case_id)
+        
+        await asyncio.sleep(delay)
+        
+    except Exception as e:
+        logger.error(f"      ❌ {case_number}: {e}")
+        result['error'] = True
+    
+    return result
+
+
+def _update_stats(stats: dict, result: dict):
+    """Обновить общую статистику"""
+    if result.get('error'):
+        stats['errors'] += 1
+    elif result.get('skipped'):
+        stats['skipped'] += 1
+    elif result.get('updated'):
+        stats['cases_updated'] += 1
+        stats['events_added'] += result.get('events_added', 0)
+        stats['documents_downloaded'] += result.get('documents', 0)
+    else:
+        stats['skipped'] += 1
+
+
+def main():
     """Главная функция"""
     logger = setup_logger('main', level='INFO')
     
     logger.info("\n" + "=" * 70)
-    logger.info("ПАРСЕР СУДЕБНЫХ ДЕЛ КАЗАХСТАНА v2.0")
+    logger.info("ПАРСЕР СУДЕБНЫХ ДЕЛ КАЗАХСТАНА v2.1")
     logger.info("=" * 70)
     
+    # Парсинг аргументов
+    mode = 'parse'
+    
+    if '--mode' in sys.argv:
+        idx = sys.argv.index('--mode')
+        if idx + 1 < len(sys.argv):
+            mode = sys.argv[idx + 1]
+    
     try:
-        if '--mode' in sys.argv:
-            idx = sys.argv.index('--mode')
-            if idx + 1 < len(sys.argv) and sys.argv[idx + 1] == 'update':
-                await update_cases_history()
-                return 0
+        if mode == 'parse':
+            asyncio.run(parse_all_regions_from_config())
         
-        await parse_all_regions_from_config()
-        logger.info("\n✅ Завершено")
-        return 0
-    
+        elif mode == 'update':
+            asyncio.run(update_cases_history())
+        
+        else:
+            logger.error(f"❌ Неизвестный режим: {mode}")
+            logger.info("Доступные режимы:")
+            logger.info("  --mode parse   (по умолчанию)")
+            logger.info("  --mode update  (события + документы)")
+            sys.exit(1)
+            
     except KeyboardInterrupt:
-        logger.warning("\n🛑 Прервано")
-        return 1
-    
+        logger.warning("\n⚠️ Прервано пользователем")
+        sys.exit(0)
     except Exception as e:
         logger.critical(f"\n💥 Ошибка: {e}")
-        logger.critical(traceback.format_exc())
-        return 1
+        logger.debug(traceback.format_exc())
+        sys.exit(1)
 
 
-if __name__ == "__main__":
-    sys.exit(asyncio.run(main()))
+if __name__ == '__main__':
+    main()
