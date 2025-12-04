@@ -1,13 +1,15 @@
 """
 Работа с поисковой формой
 """
-import asyncio
-import aiohttp
 from typing import Dict, Optional
+import asyncio
+import re
+import aiohttp
 from selectolax.parser import HTMLParser
-from utils.retry import NonRetriableError
 
 from utils.logger import get_logger
+from utils.retry import NonRetriableError
+from utils.http_utils import HttpHeaders, ViewStateExtractor
 
 
 class FormHandler:
@@ -20,6 +22,7 @@ class FormHandler:
         # Кеш ID формы (извлекается один раз за сессию)
         self._cached_form_ids: Optional[Dict[str, str]] = None
         self._cache_initialized: bool = False
+        self._cache_lock: asyncio.Lock = asyncio.Lock()
     
     def reset_cache(self):
         """
@@ -63,14 +66,15 @@ class FormHandler:
                 # ViewState — всегда извлекаем заново
                 viewstate = self._extract_viewstate(html)
                 
-                # Form IDs — извлекаем только один раз
-                if not self._cache_initialized:
-                    self._cached_form_ids = self._extract_form_ids(html)
-                    self._cache_initialized = True
-                    
-                    self.logger.info("📋 ID формы извлечены и закешированы:")
-                    for key, value in self._cached_form_ids.items():
-                        self.logger.info(f"   {key}: {value}")
+                # Form IDs — извлекаем только один раз (с блокировкой)
+                async with self._cache_lock:
+                    if not self._cache_initialized:
+                        self._cached_form_ids = self._extract_form_ids(html)
+                        self._cache_initialized = True
+                        
+                        self.logger.info("📋 ID формы извлечены и закешированы:")
+                        for key, value in self._cached_form_ids.items():
+                            self.logger.info(f"   {key}: {value}")
                 
                 return viewstate, self._cached_form_ids
         
@@ -80,6 +84,20 @@ class FormHandler:
         except Exception as e:
             self.logger.error(f"Ошибка подготовки формы: {e}")
             raise aiohttp.ClientError(f"Ошибка подготовки формы: {e}")
+
+    def reset_cache(self):
+        """
+        Сброс кеша ID формы
+        
+        Вызывать при:
+        - Переавторизации
+        - Ошибках, связанных с невалидными ID
+        """
+        # Примечание: этот метод синхронный, но безопасен
+        # т.к. просто сбрасывает флаги (атомарные операции в Python)
+        self._cached_form_ids = None
+        self._cache_initialized = False
+        self.logger.debug("Кеш ID формы сброшен")
     
     async def select_region(self, session: aiohttp.ClientSession, 
                            viewstate: str, region_id: str, 
@@ -132,12 +150,7 @@ class FormHandler:
     
     def _extract_viewstate(self, html: str) -> Optional[str]:
         """Извлечение ViewState"""
-        parser = HTMLParser(html)
-        viewstate_input = parser.css_first('input[name="javax.faces.ViewState"]')
-        
-        if viewstate_input and viewstate_input.attributes:
-            return viewstate_input.attributes.get('value')
-        return None
+        return ViewStateExtractor.extract(html)
     
     def _extract_form_ids(self, html: str) -> Dict[str, str]:
         """Извлечение ID элементов формы"""
@@ -198,18 +211,8 @@ class FormHandler:
     
     def _get_headers(self) -> Dict[str, str]:
         """Базовые заголовки"""
-        return {
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
-            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
-            'Accept-Language': 'ru,en;q=0.9'
-        }
-    
+        return HttpHeaders.get_base()
+
     def _get_ajax_headers(self) -> Dict[str, str]:
         """AJAX заголовки"""
-        headers = self._get_headers()
-        headers.update({
-            'Accept': '*/*',
-            'Content-Type': 'application/x-www-form-urlencoded;charset=UTF-8',
-            'Faces-Request': 'partial/ajax'
-        })
-        return headers
+        return HttpHeaders.get_ajax()

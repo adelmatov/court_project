@@ -1,6 +1,7 @@
 """
 Парсинг HTML результатов
 """
+import re
 from typing import List, Optional
 from selectolax.parser import HTMLParser
 
@@ -25,7 +26,7 @@ class ResultsParser:
         """
         Парсинг HTML с результатами
         
-        Возвращает: список найденных дел
+        Возвращает: список найденных дел с result_index
         """
         parser = HTMLParser(html)
         
@@ -72,11 +73,14 @@ class ResultsParser:
         return results
     
     def _parse_row(self, row) -> Optional[CaseData]:
-        """Парсинг одной строки таблицы"""
+        """Парсинг одной строки таблицы с извлечением result_index"""
         cells = row.css('td')
         
         if len(cells) < 4:
             return None
+        
+        # Извлечение result_index из onclick атрибута строки
+        result_index = self._extract_result_index(row)
         
         # Ячейка 1: Номер дела и дата
         case_number, case_date = self.extractor.extract_case_info(cells[0])
@@ -98,5 +102,42 @@ class ResultsParser:
             judge=judge,
             plaintiffs=plaintiffs,
             defendants=defendants,
-            events=events
+            events=events,
+            result_index=result_index
         )
+    
+    def _extract_result_index(self, row) -> Optional[int]:
+        """
+        Извлечение индекса из onclick атрибута строки
+        
+        Пример: onclick="viewSelectedLawsuit(1);" → 1
+        """
+        if not row.attributes:
+            return None
+        
+        onclick = row.attributes.get('onclick', '')
+        
+        # Паттерн: viewSelectedLawsuit(N)
+        match = re.search(r'viewSelectedLawsuit\s*\(\s*(\d+)\s*\)', onclick)
+        
+        if match:
+            return int(match.group(1))
+        
+        return None
+    
+    def find_case_index(self, cases: List[CaseData], target_case_number: str) -> Optional[int]:
+        """
+        Найти result_index для конкретного номера дела
+        
+        Args:
+            cases: список распарсенных дел
+            target_case_number: искомый номер дела
+        
+        Returns:
+            result_index или None если не найдено
+        """
+        for case in cases:
+            if case.case_number == target_case_number:
+                return case.result_index
+        
+        return None

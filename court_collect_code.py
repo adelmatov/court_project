@@ -1,8 +1,11 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-Скрипт для сборки всех модулей парсера в один файл
+Скрипт для сборки всех модулей парсера в один текстовый файл
 Автоматически собирает все .py файлы и ресурсы из папки court_parser
+
+ВАЖНО: Результат сборки — это НЕ исполняемый файл парсера,
+а текстовый файл для анализа ИИ, содержащий весь код проекта.
 """
 import sys
 import os
@@ -45,7 +48,7 @@ EXCLUDE_DIRS = [
     '.venv',
 ]
 
-# Расширения для исключения (убрали .html если нужны шаблоны)
+# Расширения для исключения
 EXCLUDE_EXTENSIONS = [
     '.log',
     '.pyc',
@@ -68,76 +71,70 @@ BINARY_EXTENSIONS = [
     '.ico',
 ]
 
-HEADER = '''#!/usr/bin/env python3
-# -*- coding: utf-8 -*-
-"""
-Объединенный файл парсера суда
-Дата сборки: {build_date}
 
-Этот файл содержит все модули проекта, объединенные в один файл.
-Для запуска: python court_parser_unified.py
-"""
+HEADER = '''################################################################################
+#
+#                    СБОРКА КОДА ПАРСЕРА СУДЕБНЫХ ДЕЛ
+#
+################################################################################
+#
+# Дата сборки: {build_date}
+# 
+# ⚠️  ВАЖНО: ЭТО НЕ ИСПОЛНЯЕМЫЙ ФАЙЛ!
+#
+# Это текстовый файл, содержащий весь исходный код проекта court_parser,
+# собранный из отдельных модулей в один файл для удобства анализа.
+#
+# Назначение:
+#   - Предоставить ИИ полную картину кодовой базы
+#   - Упростить code review и анализ архитектуры
+#   - Документировать текущее состояние проекта
+#
+# Структура проекта:
+#   parsers/court_parser/
+#   ├── utils/          - Утилиты (логирование, retry, валидация)
+#   ├── config/         - Конфигурация и настройки
+#   ├── auth/           - Авторизация на сайте
+#   ├── database/       - Работа с PostgreSQL
+#   ├── parsing/        - Парсинг HTML
+#   ├── search/         - Поисковые запросы
+#   ├── core/           - Главный класс парсера
+#   └── main.py         - Точка входа
+#
+# Для запуска парсера используйте оригинальные файлы:
+#   python parsers/court_parser/main.py
+#
+################################################################################
 
-# ============================================================================
-# СТАНДАРТНЫЕ БИБЛИОТЕКИ
-# ============================================================================
-import os
-import sys
-import json
-import time
-import logging
-import base64
-from datetime import datetime
-from pathlib import Path
-from typing import Optional, Dict, List, Any
 
 '''
 
-RESOURCES_SECTION = '''
-# ============================================================================
-# ВСТРОЕННЫЕ РЕСУРСЫ
-# ============================================================================
-
-_EMBEDDED_RESOURCES = {resources_dict}
-
-def get_embedded_resource(name: str) -> str:
-    """Получить встроенный ресурс по имени"""
-    return _EMBEDDED_RESOURCES.get(name, "")
-
-def get_embedded_json(name: str) -> dict:
-    """Получить встроенный JSON как словарь"""
-    content = _EMBEDDED_RESOURCES.get(name, "{{}}")
-    return json.loads(content)
-
-def get_embedded_binary(name: str) -> bytes:
-    """Получить бинарный ресурс (декодирует из base64)"""
-    content = _EMBEDDED_RESOURCES.get(name, "")
-    return base64.b64decode(content) if content else b""
+RESOURCES_HEADER = '''
+################################################################################
+# ВСТРОЕННЫЕ РЕСУРСЫ (config.json и др.)
+################################################################################
 
 '''
 
 MODULE_SEPARATOR = '''
 
-# ============================================================================
-# МОДУЛЬ: {module_name}
-# ============================================================================
+################################################################################
+# ФАЙЛ: {module_name}
+################################################################################
+
 '''
 
 FOOTER = '''
 
-# ============================================================================
-# ТОЧКА ВХОДА
-# ============================================================================
-
-if __name__ == '__main__':
-    try:
-        main()
-    except KeyboardInterrupt:
-        print("\\n⚠️  Прервано пользователем")
-        sys.exit(0)
-    except Exception as e:
-        print(f"❌ Критическая ошибка: {e}")
-        sys.exit(1)
+################################################################################
+#                           КОНЕЦ СБОРКИ
+################################################################################
+#
+# Всего файлов: {files_count}
+# Всего строк: {lines_count}
+# Размер: {file_size}
+#
+################################################################################
 '''
 
 
@@ -257,96 +254,49 @@ def read_file_content(filepath: Path) -> str:
         return ""
 
 
-def clean_content(content: str, filename: str) -> str:
-    """Очищает содержимое файла от ненужных элементов"""
-    lines = content.split('\n')
-    cleaned_lines = []
+def format_resource_content(resources: dict) -> str:
+    """Форматирует ресурсы для читаемого вывода"""
+    if not resources:
+        return ""
     
-    for i, line in enumerate(lines):
-        stripped = line.strip()
-        
-        if i < 3 and (stripped.startswith('#!') or stripped.startswith('# -*- coding:')):
-            continue
-        
-        # Пропускаем относительные импорты внутри проекта
-        if any(x in line for x in [
-            'from .', 'from ..', 
-            'from auth import', 'from auth.', 
-            'from config import', 'from config.',
-            'from core import', 'from core.',
-            'from database import', 'from database.',
-            'from parsing import', 'from parsing.',
-            'from search import', 'from search.',
-            'from utils import', 'from utils.'
-        ]):
-            cleaned_lines.append(f"# REMOVED IMPORT: {line}")
-            continue
-        
-        if filename == '__init__.py' and not stripped:
-            continue
-            
-        cleaned_lines.append(line)
+    output = []
+    output.append(RESOURCES_HEADER)
     
-    return '\n'.join(cleaned_lines)
-
-
-def extract_imports(content: str) -> tuple:
-    """Извлекает импорты из содержимого"""
-    lines = content.split('\n')
-    imports = []
-    code = []
-    in_docstring = False
-    docstring_char = None
-    skip_until_code = True
-    
-    for line in lines:
-        stripped = line.strip()
+    for name, content in sorted(resources.items()):
+        output.append(f"# --- {name} ---")
+        output.append("")
         
-        if '"""' in line or "'''" in line:
-            skip_until_code = False
-            if not in_docstring:
-                in_docstring = True
-                docstring_char = '"""' if '"""' in line else "'''"
-                code.append(line)
-                if line.count(docstring_char) >= 2:
-                    in_docstring = False
-            elif docstring_char in line:
-                in_docstring = False
-                code.append(line)
-            else:
-                code.append(line)
-            continue
-            
-        if in_docstring:
-            code.append(line)
-            continue
-        
-        if skip_until_code and (not stripped or stripped.startswith('#')):
-            continue
-            
-        if stripped.startswith('import ') or stripped.startswith('from '):
-            skip_until_code = False
-            if not any(x in stripped for x in [
-                'from .', 'from ..', 
-                'from auth', 'from config', 'from core', 
-                'from database', 'from parsing', 'from search', 'from utils'
-            ]):
-                imports.append(line)
+        # Для JSON форматируем красиво
+        if name.endswith('.json'):
+            try:
+                parsed = json.loads(content)
+                formatted = json.dumps(parsed, ensure_ascii=False, indent=2)
+                # Добавляем комментарий перед каждой строкой для читаемости
+                for line in formatted.split('\n'):
+                    output.append(f"# {line}")
+            except json.JSONDecodeError:
+                output.append(f"# {content}")
         else:
-            skip_until_code = False
-            code.append(line)
+            # Для остальных файлов просто добавляем как комментарии
+            for line in content.split('\n'):
+                output.append(f"# {line}")
+        
+        output.append("")
+        output.append("")
     
-    return '\n'.join(imports), '\n'.join(code)
+    return '\n'.join(output)
 
 
-def build_unified_file(output_file: str = 'court_parser_unified.py'):
-    """Собирает все модули в один файл"""
+def build_unified_file(output_file: str = 'court_parser_full_code.txt'):
+    """Собирает все модули в один текстовый файл"""
     
     print("=" * 70)
-    print("🔨 СБОРКА ПРОЕКТА COURT PARSER")
+    print("🔨 СБОРКА КОДА ПРОЕКТА COURT PARSER")
     print("=" * 70)
     print(f"📁 Рабочая директория: {os.getcwd()}")
-    print(f"📂 Директория парсера: {PARSER_DIR}\n")
+    print(f"📂 Директория парсера: {PARSER_DIR}")
+    print(f"📄 Выходной файл: {output_file}")
+    print()
     
     base_path = Path('.') / PARSER_DIR
     
@@ -373,7 +323,6 @@ def build_unified_file(output_file: str = 'court_parser_unified.py'):
     # ============================================
     # СБОР PYTHON МОДУЛЕЙ
     # ============================================
-    all_imports = set()
     all_code = []
     files_processed = 0
     
@@ -409,63 +358,49 @@ def build_unified_file(output_file: str = 'court_parser_unified.py'):
             if not content:
                 continue
             
-            content = clean_content(content, filename)
-            imports, code = extract_imports(content)
+            # Формируем полный путь для заголовка
+            if module_name:
+                full_module_name = f"{PARSER_DIR}/{module_name}/{filename}"
+            else:
+                full_module_name = f"{PARSER_DIR}/{filename}"
             
-            if imports:
-                for imp in imports.split('\n'):
-                    imp = imp.strip()
-                    if imp and not imp.startswith('#'):
-                        all_imports.add(imp)
-            
-            code_stripped = code.strip()
-            if code_stripped and not (filename == '__init__.py' and len(code_stripped) < 50):
-                if module_name:
-                    full_module_name = f"{PARSER_DIR}/{module_name}/{filename}"
-                else:
-                    full_module_name = f"{PARSER_DIR}/{filename}"
-                
-                all_code.append(MODULE_SEPARATOR.format(module_name=full_module_name))
-                all_code.append(code_stripped)
+            all_code.append(MODULE_SEPARATOR.format(module_name=full_module_name))
+            all_code.append(content.rstrip())
     
     # ============================================
     # ЗАПИСЬ ИТОГОВОГО ФАЙЛА
     # ============================================
     print(f"\n✍️  Запись в файл: {output_file}")
-
-    print(f"DEBUG: resources = {resources}")
-    print(f"DEBUG: len(resources) = {len(resources)}")
-    print(f"DEBUG: bool(resources) = {bool(resources)}")
     
     try:
         with open(output_file, 'w', encoding='utf-8') as f:
             # Заголовок
             f.write(HEADER.format(build_date=datetime.now().strftime('%Y-%m-%d %H:%M:%S')))
             
-            # Внешние импорты
-            if all_imports:
-                f.write('\n# Внешние библиотеки\n')
-                f.write('\n'.join(sorted(all_imports)))
-                f.write('\n')
-            
-            # Встроенные ресурсы
+            # Встроенные ресурсы (как комментарии для читаемости)
             if resources:
-                print("DEBUG: Вхожу в блок записи ресурсов")
-                # Экранируем для безопасной вставки
-                resources_repr = json.dumps(resources, ensure_ascii=False, indent=2)
-                print(f"DEBUG: resources_repr[:200] = {resources_repr[:200]}")
-                f.write(RESOURCES_SECTION.format(resources_dict=resources_repr))
-                print("DEBUG: Ресурсы записаны")
-            else:
-                print("DEBUG: resources ПУСТОЙ, пропускаю")
+                f.write(format_resource_content(resources))
             
             # Код модулей
             f.write('\n'.join(all_code))
             
-            # Футер
-            f.write(FOOTER)
+            # Подсчёт статистики для футера
+            f.flush()
         
         # Статистика
+        file_size = os.path.getsize(output_file)
+        with open(output_file, 'r', encoding='utf-8') as f:
+            lines_count = len(f.readlines())
+        
+        # Дописываем футер с актуальной статистикой
+        with open(output_file, 'a', encoding='utf-8') as f:
+            f.write(FOOTER.format(
+                files_count=files_processed,
+                lines_count=f"{lines_count:,}",
+                file_size=f"{file_size:,} байт ({file_size/1024:.1f} KB)"
+            ))
+        
+        # Пересчитываем после добавления футера
         file_size = os.path.getsize(output_file)
         with open(output_file, 'r', encoding='utf-8') as f:
             lines_count = len(f.readlines())
@@ -480,10 +415,12 @@ def build_unified_file(output_file: str = 'court_parser_unified.py'):
         print(f"   📄 Обработано Python файлов: {files_processed}")
         print(f"   📦 Встроено ресурсов: {len(resources)}")
         print(f"   📝 Строк кода: {lines_count:,}")
-        print(f"   📦 Уникальных импортов: {len(all_imports)}")
-        print(f"   💾 Размер файла: {file_size:,} байт ({file_size/1024:.2f} KB)")
+        print(f"   💾 Размер файла: {file_size:,} байт ({file_size/1024:.1f} KB)")
         print(f"   🔐 SHA-256: {file_hash[:32]}...")
         print(f"{'=' * 70}")
+        print()
+        print("💡 Этот файл предназначен для анализа ИИ, а не для запуска!")
+        print(f"   Для запуска парсера используйте: python {PARSER_DIR}/main.py")
         
         return True
         
@@ -496,12 +433,17 @@ def build_unified_file(output_file: str = 'court_parser_unified.py'):
 
 def main():
     """Главная функция"""
-    output_file = 'court_parser_unified.py'
+    # Выходной файл — текстовый, не .py
+    output_file = 'court_parser_ full_code.txt'
+    
+    # Проверяем аргументы командной строки
+    if len(sys.argv) > 1:
+        output_file = sys.argv[1]
+    
     success = build_unified_file(output_file)
     
     if success:
-        print(f"\n🎉 Готово! Используйте файл: {output_file}")
-        print(f"💡 Запуск: python {output_file}")
+        print(f"\n🎉 Готово! Файл для анализа: {output_file}")
         return 0
     else:
         print("\n❌ Сборка завершилась с ошибками")

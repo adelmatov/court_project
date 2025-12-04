@@ -1,89 +1,707 @@
-#!/usr/bin/env python3
-# -*- coding: utf-8 -*-
+################################################################################
+#
+#                    СБОРКА КОДА ПАРСЕРА СУДЕБНЫХ ДЕЛ
+#
+################################################################################
+#
+# Дата сборки: 2025-12-04 21:09:30
+# 
+# ⚠️  ВАЖНО: ЭТО НЕ ИСПОЛНЯЕМЫЙ ФАЙЛ!
+#
+# Это текстовый файл, содержащий весь исходный код проекта court_parser,
+# собранный из отдельных модулей в один файл для удобства анализа.
+#
+# Назначение:
+#   - Предоставить ИИ полную картину кодовой базы
+#   - Упростить code review и анализ архитектуры
+#   - Документировать текущее состояние проекта
+#
+# Структура проекта:
+#   parsers/court_parser/
+#   ├── utils/          - Утилиты (логирование, retry, валидация)
+#   ├── config/         - Конфигурация и настройки
+#   ├── auth/           - Авторизация на сайте
+#   ├── database/       - Работа с PostgreSQL
+#   ├── parsing/        - Парсинг HTML
+#   ├── search/         - Поисковые запросы
+#   ├── core/           - Главный класс парсера
+#   └── main.py         - Точка входа
+#
+# Для запуска парсера используйте оригинальные файлы:
+#   python parsers/court_parser/main.py
+#
+################################################################################
+
+
+
+################################################################################
+# ВСТРОЕННЫЕ РЕСУРСЫ (config.json и др.)
+################################################################################
+
+
+# --- config.json ---
+
+# {
+#   "auth": {
+#     "login": "941208351468",
+#     "password": "1234Poker!",
+#     "user_name": "ДЕЛЬМАТОВ АЛМАЗ УРАЗГАЛИЕВИЧ"
+#   },
+#   "base_url": "https://office.sud.kz",
+#   "database": {
+#     "dbname": "court",
+#     "user": "postgres",
+#     "password": "admin",
+#     "host": "localhost",
+#     "port": 5432
+#   },
+#   "parsing_settings": {
+#     "year": "2025",
+#     "court_types": [
+#       "smas",
+#       "appellate"
+#     ],
+#     "start_from": 1,
+#     "max_number": 9999,
+#     "max_consecutive_empty": 5,
+#     "max_consecutive_failures": 5,
+#     "max_parallel_regions": 3,
+#     "delay_between_requests": 0,
+#     "region_retry_max_attempts": 3,
+#     "region_retry_delay_seconds": 5,
+#     "limit_regions": 1,
+#     "limit_cases_per_region": null,
+#     "target_regions": null
+#   },
+#   "regions": {
+#     "astana": {
+#       "id": "2",
+#       "name": "город Астана",
+#       "kato_code": "71",
+#       "courts": {
+#         "smas": {
+#           "id": "413",
+#           "name": "Специализированный межрайонный административный суд города Астаны",
+#           "instance_code": "94",
+#           "case_type_code": "4"
+#         },
+#         "appellate": {
+#           "id": "2",
+#           "name": "Суд города Астаны",
+#           "instance_code": "99",
+#           "case_type_code": "4а"
+#         }
+#       }
+#     },
+#     "almaty": {
+#       "id": "3",
+#       "name": "город Алматы",
+#       "kato_code": "75",
+#       "courts": {
+#         "smas": {
+#           "id": "414",
+#           "name": "Специализированный межрайонный административный суд города Алматы",
+#           "instance_code": "94",
+#           "case_type_code": "4"
+#         },
+#         "appellate": {
+#           "id": "13",
+#           "name": "Алматинский городской суд",
+#           "instance_code": "99",
+#           "case_type_code": "4а"
+#         }
+#       }
+#     },
+#     "shymkent": {
+#       "id": "19",
+#       "name": "город Шымкент",
+#       "kato_code": "52",
+#       "courts": {
+#         "smas": {
+#           "id": "415",
+#           "name": "Специализированный межрайонный административный суд города Шымкента",
+#           "instance_code": "94",
+#           "case_type_code": "4"
+#         },
+#         "appellate": {
+#           "id": "383",
+#           "name": "Суд города Шымкента",
+#           "instance_code": "99",
+#           "case_type_code": "4а"
+#         }
+#       }
+#     },
+#     "akmola": {
+#       "id": "4",
+#       "name": "Акмолинская область",
+#       "kato_code": "11",
+#       "courts": {
+#         "smas": {
+#           "id": "416",
+#           "name": "Специализированный межрайонный административный суд Акмолинской области",
+#           "instance_code": "94",
+#           "case_type_code": "4"
+#         },
+#         "appellate": {
+#           "id": "29",
+#           "name": "Акмолинский областной суд",
+#           "instance_code": "99",
+#           "case_type_code": "4а"
+#         }
+#       }
+#     },
+#     "aktobe": {
+#       "id": "5",
+#       "name": "Актюбинская область",
+#       "kato_code": "15",
+#       "courts": {
+#         "smas": {
+#           "id": "417",
+#           "name": "Специализированный межрайонный административный суд Актюбинской области",
+#           "instance_code": "94",
+#           "case_type_code": "4"
+#         },
+#         "appellate": {
+#           "id": "55",
+#           "name": "Актюбинский областной суд",
+#           "instance_code": "99",
+#           "case_type_code": "4а"
+#         }
+#       }
+#     },
+#     "almaty_region": {
+#       "id": "6",
+#       "name": "Алматинская область",
+#       "kato_code": "19",
+#       "courts": {
+#         "smas": {
+#           "id": "430",
+#           "name": "Специализированный межрайонный административный суд Алматинской области",
+#           "instance_code": "93",
+#           "case_type_code": "4"
+#         },
+#         "appellate": {
+#           "id": "75",
+#           "name": "Алматинский областной суд",
+#           "instance_code": "99",
+#           "case_type_code": "4а"
+#         }
+#       }
+#     },
+#     "atyrau": {
+#       "id": "7",
+#       "name": "Атырауская область",
+#       "kato_code": "23",
+#       "courts": {
+#         "smas": {
+#           "id": "419",
+#           "name": "Специализированный межрайонный административный суд Атырауской области",
+#           "instance_code": "94",
+#           "case_type_code": "4"
+#         },
+#         "appellate": {
+#           "id": "105",
+#           "name": "Атырауский областной суд",
+#           "instance_code": "99",
+#           "case_type_code": "4а"
+#         }
+#       }
+#     },
+#     "vko": {
+#       "id": "8",
+#       "name": "Восточно-Казахстанская область",
+#       "kato_code": "63",
+#       "courts": {
+#         "smas": {
+#           "id": "420",
+#           "name": "Специализированный межрайонный административный суд Восточно-Казахстанской области",
+#           "instance_code": "94",
+#           "case_type_code": "4"
+#         },
+#         "appellate": {
+#           "id": "119",
+#           "name": "Восточно-Казахстанский областной суд",
+#           "instance_code": "99",
+#           "case_type_code": "4а"
+#         }
+#       }
+#     },
+#     "zhambyl": {
+#       "id": "9",
+#       "name": "Жамбылская область",
+#       "kato_code": "31",
+#       "courts": {
+#         "smas": {
+#           "id": "421",
+#           "name": "Специализированный межрайонный административный суд Жамбылской области",
+#           "instance_code": "94",
+#           "case_type_code": "4"
+#         },
+#         "appellate": {
+#           "id": "158",
+#           "name": "Жамбылский областной суд",
+#           "instance_code": "99",
+#           "case_type_code": "4а"
+#         }
+#       }
+#     },
+#     "zko": {
+#       "id": "10",
+#       "name": "Западно-Казахстанская область",
+#       "kato_code": "27",
+#       "courts": {
+#         "smas": {
+#           "id": "422",
+#           "name": "Специализированный межрайонный административный суд Западно-Казахстанской области",
+#           "instance_code": "94",
+#           "case_type_code": "4"
+#         },
+#         "appellate": {
+#           "id": "175",
+#           "name": "Западно-Казахстанский областной суд",
+#           "instance_code": "99",
+#           "case_type_code": "4а"
+#         }
+#       }
+#     },
+#     "karaganda": {
+#       "id": "11",
+#       "name": "Карагандинская область",
+#       "kato_code": "35",
+#       "courts": {
+#         "smas": {
+#           "id": "423",
+#           "name": "Специализированный межрайонный административный суд Карагандинской области",
+#           "instance_code": "94",
+#           "case_type_code": "4"
+#         },
+#         "appellate": {
+#           "id": "199",
+#           "name": "Карагандинский областной суд",
+#           "instance_code": "99",
+#           "case_type_code": "4а"
+#         }
+#       }
+#     },
+#     "kostanay": {
+#       "id": "12",
+#       "name": "Костанайская область",
+#       "kato_code": "39",
+#       "courts": {
+#         "smas": {
+#           "id": "424",
+#           "name": "Специализированный межрайонный административный суд Костанайской области",
+#           "instance_code": "94",
+#           "case_type_code": "4"
+#         },
+#         "appellate": {
+#           "id": "237",
+#           "name": "Костанайский областной суд",
+#           "instance_code": "99",
+#           "case_type_code": "4а"
+#         }
+#       }
+#     },
+#     "kyzylorda": {
+#       "id": "13",
+#       "name": "Кызылординская область",
+#       "kato_code": "43",
+#       "courts": {
+#         "smas": {
+#           "id": "425",
+#           "name": "Специализированный межрайонный административный суд Кызылординской области",
+#           "instance_code": "94",
+#           "case_type_code": "4"
+#         },
+#         "appellate": {
+#           "id": "266",
+#           "name": "Кызылординский областной суд",
+#           "instance_code": "99",
+#           "case_type_code": "4а"
+#         }
+#       }
+#     },
+#     "mangystau": {
+#       "id": "14",
+#       "name": "Мангистауская область",
+#       "kato_code": "47",
+#       "courts": {
+#         "smas": {
+#           "id": "426",
+#           "name": "Специализированный межрайонный административный суд Мангистауской области",
+#           "instance_code": "94",
+#           "case_type_code": "4"
+#         },
+#         "appellate": {
+#           "id": "281",
+#           "name": "Мангистауский областной суд",
+#           "instance_code": "99",
+#           "case_type_code": "4а"
+#         }
+#       }
+#     },
+#     "pavlodar": {
+#       "id": "15",
+#       "name": "Павлодарская область",
+#       "kato_code": "55",
+#       "courts": {
+#         "smas": {
+#           "id": "427",
+#           "name": "Специализированный межрайонный административный суд Павлодарской области",
+#           "instance_code": "94",
+#           "case_type_code": "4"
+#         },
+#         "appellate": {
+#           "id": "295",
+#           "name": "Павлодарский областной суд",
+#           "instance_code": "99",
+#           "case_type_code": "4а"
+#         }
+#       }
+#     },
+#     "sko": {
+#       "id": "16",
+#       "name": "Северо-Казахстанская область",
+#       "kato_code": "59",
+#       "courts": {
+#         "smas": {
+#           "id": "428",
+#           "name": "Специализированный межрайонный административный суд Северо-Казахстанской области",
+#           "instance_code": "94",
+#           "case_type_code": "4"
+#         },
+#         "appellate": {
+#           "id": "316",
+#           "name": "Северо-Казахстанский областной суд",
+#           "instance_code": "99",
+#           "case_type_code": "4а"
+#         }
+#       }
+#     },
+#     "turkestan": {
+#       "id": "17",
+#       "name": "Туркестанская область",
+#       "kato_code": "51",
+#       "courts": {
+#         "smas": {
+#           "id": "429",
+#           "name": "Специализированный межрайонный административный суд Туркестанской области",
+#           "instance_code": "94",
+#           "case_type_code": "4"
+#         },
+#         "appellate": {
+#           "id": "340",
+#           "name": "Туркестанский областной суд",
+#           "instance_code": "99",
+#           "case_type_code": "4а"
+#         }
+#       }
+#     },
+#     "ulytau": {
+#       "id": "20",
+#       "name": "Область Ұлытау",
+#       "kato_code": "62",
+#       "courts": {
+#         "smas": {
+#           "id": "482",
+#           "name": "Специализированный межрайонный административный суд области Ұлытау",
+#           "instance_code": "94",
+#           "case_type_code": "4"
+#         },
+#         "appellate": {
+#           "id": "476",
+#           "name": "Суд области Ұлытау",
+#           "instance_code": "00",
+#           "case_type_code": "4а"
+#         }
+#       }
+#     },
+#     "abay": {
+#       "id": "21",
+#       "name": "Область Абай",
+#       "kato_code": "10",
+#       "courts": {
+#         "smas": {
+#           "id": "467",
+#           "name": "Специализированный межрайонный административный суд области Абай",
+#           "instance_code": "94",
+#           "case_type_code": "4"
+#         },
+#         "appellate": {
+#           "id": "456",
+#           "name": "Суд области Абай",
+#           "instance_code": "00",
+#           "case_type_code": "4а"
+#         }
+#       }
+#     },
+#     "zhetysu": {
+#       "id": "22",
+#       "name": "Область Жетісу",
+#       "kato_code": "33",
+#       "courts": {
+#         "smas": {
+#           "id": "450",
+#           "name": "Специализированный межрайонный административный суд области Жетісу",
+#           "instance_code": "94",
+#           "case_type_code": "4"
+#         },
+#         "appellate": {
+#           "id": "437",
+#           "name": "Суд области Жетісу",
+#           "instance_code": "00",
+#           "case_type_code": "4а"
+#         }
+#       }
+#     }
+#   },
+#   "retry_settings": {
+#     "http_request": {
+#       "max_attempts": 3,
+#       "initial_delay": 1.0,
+#       "backoff_multiplier": 2.0,
+#       "max_delay": 30.0,
+#       "jitter": true,
+#       "retriable_status_codes": [
+#         500,
+#         502,
+#         503,
+#         504
+#       ],
+#       "retriable_exceptions": [
+#         "TimeoutError",
+#         "ClientError",
+#         "ServerDisconnectedError"
+#       ]
+#     },
+#     "authentication": {
+#       "max_attempts": 5,
+#       "initial_delay": 2.0,
+#       "backoff_multiplier": 2.0,
+#       "max_delay": 60.0,
+#       "create_new_session": true,
+#       "retriable_on_auth_check_fail": true
+#     },
+#     "search_case": {
+#       "max_attempts": 3,
+#       "delay": 3.0,
+#       "backoff": "linear",
+#       "save_failed_html": true
+#     },
+#     "rate_limit": {
+#       "default_wait": 60,
+#       "respect_retry_after_header": true,
+#       "slow_down_multiplier": 2.0,
+#       "slow_down_duration": 600
+#     },
+#     "circuit_breaker": {
+#       "enabled": true,
+#       "failure_threshold": 20,
+#       "recovery_timeout": 300,
+#       "half_open_max_attempts": 3
+#     },
+#     "session_recovery": {
+#       "reauth_on_401": true,
+#       "max_reauth_attempts": 2
+#     }
+#   },
+#   "update_settings": {
+#     "enabled": true,
+#     "update_interval_days": 2,
+#     "filters": {
+#       "defendant_keywords": [
+#         "доход"
+#       ],
+#       "exclude_event_types": [
+#         "Отправлено в архив",
+#         "Завершение дела",
+#         "Решение вступило в силу"
+#       ]
+#     }
+#   },
+#   "documents_settings": {
+#     "enabled": true,
+#     "storage_dir": "./documents",
+#     "download_delay": 2.0,
+#     "max_per_session": 100,
+#     "filters": {
+#       "defendant_keywords": [
+#         "доход"
+#       ],
+#       "exclude_event_types": [
+#         "Отправлено в архив",
+#         "Завершение дела",
+#         "Решение вступило в силу"
+#       ],
+#       "check_interval_days": 7
+#     }
+#   }
+# }
+
+
+
+################################################################################
+# ФАЙЛ: parsers/court_parser/utils/__init__.py
+################################################################################
+
+
 """
-Объединенный файл парсера суда
-Дата сборки: 2025-11-30 12:12:43
+Утилиты парсера
+"""
+from utils.logger import setup_logger, get_logger
+from utils.text_processor import TextProcessor
+from utils.validators import DataValidator, ValidationError
+from utils.retry import (
+    RetryStrategy, 
+    RetryConfig, 
+    CircuitBreaker,
+    RetryableError,
+    NonRetriableError,
+    CircuitBreakerOpenError
+)
 
-Этот файл содержит все модули проекта, объединенные в один файл.
-Для запуска: python court_parser_unified.py
+# Опционально экспортируем (для удобства, если понадобятся)
+from utils.constants import PartyRole, CaseStatus, HttpStatus
+from utils.http_utils import HttpHeaders, ViewStateExtractor, AjaxRequestBuilder
+
+
+################################################################################
+# ФАЙЛ: parsers/court_parser/utils/constants.py
+################################################################################
+
+
+"""
+Константы приложения
 """
 
-# ============================================================================
-# СТАНДАРТНЫЕ БИБЛИОТЕКИ
-# ============================================================================
-import os
-import sys
-import json
-import time
-import logging
-import base64
-from datetime import datetime
-from pathlib import Path
-from typing import Optional, Dict, List, Any
+
+class PartyRole:
+    """Роли сторон в деле"""
+    PLAINTIFF = 'plaintiff'
+    DEFENDANT = 'defendant'
 
 
-# Внешние библиотеки
-from dataclasses import dataclass, field
-from datetime import date
-from datetime import datetime
-from datetime import datetime, date
-from datetime import datetime, timedelta
-from functools import wraps
-from pathlib import Path
-from selectolax.parser import HTMLParser
-from typing import Callable, Any, Optional, List, Type
-from typing import Dict, Any, Optional
-from typing import Dict, Any, Optional, List
-from typing import Dict, List, Optional, Any, Set
+class CaseStatus:
+    """Статусы результата операций с делом"""
+    SAVED = 'saved'
+    UPDATED = 'updated'
+    ERROR = 'error'
+    NO_RESULTS = 'no_results'
+    TARGET_NOT_FOUND = 'target_not_found'
+    REGION_NOT_FOUND = 'region_not_found'
+    SAVE_FAILED = 'save_failed'
+
+
+class HttpStatus:
+    """HTTP статусы для обработки"""
+    RETRIABLE = frozenset({500, 502, 503, 504})
+    NON_RETRIABLE = frozenset({400, 401, 403, 404})
+
+
+################################################################################
+# ФАЙЛ: parsers/court_parser/utils/http_utils.py
+################################################################################
+
+
+# parsers/court_parser/utils/http_utils.py
+"""
+Общие HTTP утилиты
+"""
+
 from typing import Dict, Optional
-from typing import List, Optional
-from typing import List, Optional, Dict
-from typing import List, Tuple, Optional
-from typing import Optional, Dict, Any
-from typing import Optional, Dict, List, Any, Set
-from typing import Optional, List
-import aiohttp
-import asyncio
-import asyncpg
-import json
-import logging
-import random
-import re
-import ssl
-import sys
-import traceback
-
-# ============================================================================
-# ВСТРОЕННЫЕ РЕСУРСЫ
-# ============================================================================
-
-_EMBEDDED_RESOURCES = {
-  "config.json": "{\n    \"auth\": {\n        \"login\": \"941208351468\",\n        \"password\": \"1234Poker!\",\n        \"user_name\": \"ДЕЛЬМАТОВ АЛМАЗ УРАЗГАЛИЕВИЧ\"\n    },\n    \"base_url\": \"https://office.sud.kz\",\n    \"database\": {\n        \"dbname\": \"court\",\n        \"user\": \"postgres\",\n        \"password\": \"admin\",\n        \"host\": \"localhost\",\n        \"port\": 5432\n    },\n    \"parsing_settings\": {\n        \"year\": \"2025\",\n        \"court_types\": [\"smas\"],\n        \"start_from\": 1,\n        \"max_number\": 9999,\n        \"max_consecutive_empty\": 5,\n        \"max_consecutive_failures\": 5,\n        \"max_parallel_regions\": 3,\n        \"delay_between_requests\": 1.7,\n        \n        \"region_retry_max_attempts\": 3,\n        \"region_retry_delay_seconds\": 5,\n        \n        \"limit_regions\": 1,\n        \"limit_cases_per_region\": null,\n        \"target_regions\": [\"almaty\"]\n    },\n    \"regions\": {\n        \"astana\": {\n            \"id\": \"2\",\n            \"name\": \"город Астана\",\n            \"kato_code\": \"71\",\n            \"courts\": {\n                \"smas\": {\n                    \"id\": \"413\",\n                    \"name\": \"Специализированный межрайонный административный суд города Астаны\",\n                    \"instance_code\": \"94\",\n                    \"case_type_code\": \"4\"\n                },\n                \"appellate\": {\n                    \"id\": \"2\",\n                    \"name\": \"Суд города Астаны\",\n                    \"instance_code\": \"99\",\n                    \"case_type_code\": \"4а\"\n                }\n            }\n        },\n        \"almaty\": {\n            \"id\": \"3\",\n            \"name\": \"город Алматы\",\n            \"kato_code\": \"75\",\n            \"courts\": {\n                \"smas\": {\n                    \"id\": \"414\",\n                    \"name\": \"Специализированный межрайонный административный суд города Алматы\",\n                    \"instance_code\": \"94\",\n                    \"case_type_code\": \"4\"\n                },\n                \"appellate\": {\n                    \"id\": \"13\",\n                    \"name\": \"Алматинский городской суд\",\n                    \"instance_code\": \"99\",\n                    \"case_type_code\": \"4а\"\n                }\n            }\n        },\n        \"shymkent\": {\n            \"id\": \"19\",\n            \"name\": \"город Шымкент\",\n            \"kato_code\": \"52\",\n            \"courts\": {\n                \"smas\": {\n                    \"id\": \"415\",\n                    \"name\": \"Специализированный межрайонный административный суд города Шымкента\",\n                    \"instance_code\": \"94\",\n                    \"case_type_code\": \"4\"\n                },\n                \"appellate\": {\n                    \"id\": \"383\",\n                    \"name\": \"Суд города Шымкента\",\n                    \"instance_code\": \"99\",\n                    \"case_type_code\": \"4а\"\n                }\n            }\n        },\n        \"akmola\": {\n            \"id\": \"4\",\n            \"name\": \"Акмолинская область\",\n            \"kato_code\": \"11\",\n            \"courts\": {\n                \"smas\": {\n                    \"id\": \"416\",\n                    \"name\": \"Специализированный межрайонный административный суд Акмолинской области\",\n                    \"instance_code\": \"94\",\n                    \"case_type_code\": \"4\"\n                },\n                \"appellate\": {\n                    \"id\": \"29\",\n                    \"name\": \"Акмолинский областной суд\",\n                    \"instance_code\": \"99\",\n                    \"case_type_code\": \"4а\"\n                }\n            }\n        },\n        \"aktobe\": {\n            \"id\": \"5\",\n            \"name\": \"Актюбинская область\",\n            \"kato_code\": \"15\",\n            \"courts\": {\n                \"smas\": {\n                    \"id\": \"417\",\n                    \"name\": \"Специализированный межрайонный административный суд Актюбинской области\",\n                    \"instance_code\": \"94\",\n                    \"case_type_code\": \"4\"\n                },\n                \"appellate\": {\n                    \"id\": \"55\",\n                    \"name\": \"Актюбинский областной суд\",\n                    \"instance_code\": \"99\",\n                    \"case_type_code\": \"4а\"\n                }\n            }\n        },\n        \"almaty_region\": {\n            \"id\": \"6\",\n            \"name\": \"Алматинская область\",\n            \"kato_code\": \"19\",\n            \"courts\": {\n                \"smas\": {\n                    \"id\": \"430\",\n                    \"name\": \"Специализированный межрайонный административный суд Алматинской области\",\n                    \"instance_code\": \"93\",\n                    \"case_type_code\": \"4\"\n                },\n                \"appellate\": {\n                    \"id\": \"75\",\n                    \"name\": \"Алматинский областной суд\",\n                    \"instance_code\": \"99\",\n                    \"case_type_code\": \"4а\"\n                }\n            }\n        },\n        \"atyrau\": {\n            \"id\": \"7\",\n            \"name\": \"Атырауская область\",\n            \"kato_code\": \"23\",\n            \"courts\": {\n                \"smas\": {\n                    \"id\": \"419\",\n                    \"name\": \"Специализированный межрайонный административный суд Атырауской области\",\n                    \"instance_code\": \"94\",\n                    \"case_type_code\": \"4\"\n                },\n                \"appellate\": {\n                    \"id\": \"105\",\n                    \"name\": \"Атырауский областной суд\",\n                    \"instance_code\": \"99\",\n                    \"case_type_code\": \"4а\"\n                }\n            }\n        },\n        \"vko\": {\n            \"id\": \"8\",\n            \"name\": \"Восточно-Казахстанская область\",\n            \"kato_code\": \"63\",\n            \"courts\": {\n                \"smas\": {\n                    \"id\": \"420\",\n                    \"name\": \"Специализированный межрайонный административный суд Восточно-Казахстанской области\",\n                    \"instance_code\": \"94\",\n                    \"case_type_code\": \"4\"\n                },\n                \"appellate\": {\n                    \"id\": \"119\",\n                    \"name\": \"Восточно-Казахстанский областной суд\",\n                    \"instance_code\": \"99\",\n                    \"case_type_code\": \"4а\"\n                }\n            }\n        },\n        \"zhambyl\": {\n            \"id\": \"9\",\n            \"name\": \"Жамбылская область\",\n            \"kato_code\": \"31\",\n            \"courts\": {\n                \"smas\": {\n                    \"id\": \"421\",\n                    \"name\": \"Специализированный межрайонный административный суд Жамбылской области\",\n                    \"instance_code\": \"94\",\n                    \"case_type_code\": \"4\"\n                },\n                \"appellate\": {\n                    \"id\": \"158\",\n                    \"name\": \"Жамбылский областной суд\",\n                    \"instance_code\": \"99\",\n                    \"case_type_code\": \"4а\"\n                }\n            }\n        },\n        \"zko\": {\n            \"id\": \"10\",\n            \"name\": \"Западно-Казахстанская область\",\n            \"kato_code\": \"27\",\n            \"courts\": {\n                \"smas\": {\n                    \"id\": \"422\",\n                    \"name\": \"Специализированный межрайонный административный суд Западно-Казахстанской области\",\n                    \"instance_code\": \"94\",\n                    \"case_type_code\": \"4\"\n                },\n                \"appellate\": {\n                    \"id\": \"175\",\n                    \"name\": \"Западно-Казахстанский областной суд\",\n                    \"instance_code\": \"99\",\n                    \"case_type_code\": \"4а\"\n                }\n            }\n        },\n        \"karaganda\": {\n            \"id\": \"11\",\n            \"name\": \"Карагандинская область\",\n            \"kato_code\": \"35\",\n            \"courts\": {\n                \"smas\": {\n                    \"id\": \"423\",\n                    \"name\": \"Специализированный межрайонный административный суд Карагандинской области\",\n                    \"instance_code\": \"94\",\n                    \"case_type_code\": \"4\"\n                },\n                \"appellate\": {\n                    \"id\": \"199\",\n                    \"name\": \"Карагандинский областной суд\",\n                    \"instance_code\": \"99\",\n                    \"case_type_code\": \"4а\"\n                }\n            }\n        },\n        \"kostanay\": {\n            \"id\": \"12\",\n            \"name\": \"Костанайская область\",\n            \"kato_code\": \"39\",\n            \"courts\": {\n                \"smas\": {\n                    \"id\": \"424\",\n                    \"name\": \"Специализированный межрайонный административный суд Костанайской области\",\n                    \"instance_code\": \"94\",\n                    \"case_type_code\": \"4\"\n                },\n                \"appellate\": {\n                    \"id\": \"237\",\n                    \"name\": \"Костанайский областной суд\",\n                    \"instance_code\": \"99\",\n                    \"case_type_code\": \"4а\"\n                }\n            }\n        },\n        \"kyzylorda\": {\n            \"id\": \"13\",\n            \"name\": \"Кызылординская область\",\n            \"kato_code\": \"43\",\n            \"courts\": {\n                \"smas\": {\n                    \"id\": \"425\",\n                    \"name\": \"Специализированный межрайонный административный суд Кызылординской области\",\n                    \"instance_code\": \"94\",\n                    \"case_type_code\": \"4\"\n                },\n                \"appellate\": {\n                    \"id\": \"266\",\n                    \"name\": \"Кызылординский областной суд\",\n                    \"instance_code\": \"99\",\n                    \"case_type_code\": \"4а\"\n                }\n            }\n        },\n        \"mangystau\": {\n            \"id\": \"14\",\n            \"name\": \"Мангистауская область\",\n            \"kato_code\": \"47\",\n            \"courts\": {\n                \"smas\": {\n                    \"id\": \"426\",\n                    \"name\": \"Специализированный межрайонный административный суд Мангистауской области\",\n                    \"instance_code\": \"94\",\n                    \"case_type_code\": \"4\"\n                },\n                \"appellate\": {\n                    \"id\": \"281\",\n                    \"name\": \"Мангистауский областной суд\",\n                    \"instance_code\": \"99\",\n                    \"case_type_code\": \"4а\"\n                }\n            }\n        },\n        \"pavlodar\": {\n            \"id\": \"15\",\n            \"name\": \"Павлодарская область\",\n            \"kato_code\": \"55\",\n            \"courts\": {\n                \"smas\": {\n                    \"id\": \"427\",\n                    \"name\": \"Специализированный межрайонный административный суд Павлодарской области\",\n                    \"instance_code\": \"94\",\n                    \"case_type_code\": \"4\"\n                },\n                \"appellate\": {\n                    \"id\": \"295\",\n                    \"name\": \"Павлодарский областной суд\",\n                    \"instance_code\": \"99\",\n                    \"case_type_code\": \"4а\"\n                }\n            }\n        },\n        \"sko\": {\n            \"id\": \"16\",\n            \"name\": \"Северо-Казахстанская область\",\n            \"kato_code\": \"59\",\n            \"courts\": {\n                \"smas\": {\n                    \"id\": \"428\",\n                    \"name\": \"Специализированный межрайонный административный суд Северо-Казахстанской области\",\n                    \"instance_code\": \"94\",\n                    \"case_type_code\": \"4\"\n                },\n                \"appellate\": {\n                    \"id\": \"316\",\n                    \"name\": \"Северо-Казахстанский областной суд\",\n                    \"instance_code\": \"99\",\n                    \"case_type_code\": \"4а\"\n                }\n            }\n        },\n        \"turkestan\": {\n            \"id\": \"17\",\n            \"name\": \"Туркестанская область\",\n            \"kato_code\": \"51\",\n            \"courts\": {\n                \"smas\": {\n                    \"id\": \"429\",\n                    \"name\": \"Специализированный межрайонный административный суд Туркестанской области\",\n                    \"instance_code\": \"94\",\n                    \"case_type_code\": \"4\"\n                },\n                \"appellate\": {\n                    \"id\": \"340\",\n                    \"name\": \"Туркестанский областной суд\",\n                    \"instance_code\": \"99\",\n                    \"case_type_code\": \"4а\"\n                }\n            }\n        },\n        \"ulytau\": {\n            \"id\": \"20\",\n            \"name\": \"Область Ұлытау\",\n            \"kato_code\": \"62\",\n            \"courts\": {\n                \"smas\": {\n                    \"id\": \"482\",\n                    \"name\": \"Специализированный межрайонный административный суд области Ұлытау\",\n                    \"instance_code\": \"94\",\n                    \"case_type_code\": \"4\"\n                },\n                \"appellate\": {\n                    \"id\": \"476\",\n                    \"name\": \"Суд области Ұлытау\",\n                    \"instance_code\": \"00\",\n                    \"case_type_code\": \"4а\"\n                }\n            }\n        },\n        \"abay\": {\n            \"id\": \"21\",\n            \"name\": \"Область Абай\",\n            \"kato_code\": \"10\",\n            \"courts\": {\n                \"smas\": {\n                    \"id\": \"467\",\n                    \"name\": \"Специализированный межрайонный административный суд области Абай\",\n                    \"instance_code\": \"94\",\n                    \"case_type_code\": \"4\"\n                },\n                \"appellate\": {\n                    \"id\": \"456\",\n                    \"name\": \"Суд области Абай\",\n                    \"instance_code\": \"00\",\n                    \"case_type_code\": \"4а\"\n                }\n            }\n        },\n        \"zhetysu\": {\n            \"id\": \"22\",\n            \"name\": \"Область Жетісу\",\n            \"kato_code\": \"33\",\n            \"courts\": {\n                \"smas\": {\n                    \"id\": \"450\",\n                    \"name\": \"Специализированный межрайонный административный суд области Жетісу\",\n                    \"instance_code\": \"94\",\n                    \"case_type_code\": \"4\"\n                },\n                \"appellate\": {\n                    \"id\": \"437\",\n                    \"name\": \"Суд области Жетісу\",\n                    \"instance_code\": \"00\",\n                    \"case_type_code\": \"4а\"\n                }\n            }\n        }\n    },\n    \"retry_settings\": {\n        \"http_request\": {\n            \"max_attempts\": 3,\n            \"initial_delay\": 1.0,\n            \"backoff_multiplier\": 2.0,\n            \"max_delay\": 30.0,\n            \"jitter\": true,\n            \"retriable_status_codes\": [500, 502, 503, 504],\n            \"retriable_exceptions\": [\"TimeoutError\", \"ClientError\", \"ServerDisconnectedError\"]\n        },\n        \"authentication\": {\n            \"max_attempts\": 5,\n            \"initial_delay\": 2.0,\n            \"backoff_multiplier\": 2.0,\n            \"max_delay\": 60.0,\n            \"create_new_session\": true,\n            \"retriable_on_auth_check_fail\": true\n        },\n        \"search_case\": {\n            \"max_attempts\": 3,\n            \"delay\": 3.0,\n            \"backoff\": \"linear\",\n            \"save_failed_html\": true\n        },\n        \"rate_limit\": {\n            \"default_wait\": 60,\n            \"respect_retry_after_header\": true,\n            \"slow_down_multiplier\": 2.0,\n            \"slow_down_duration\": 600\n        },\n        \"circuit_breaker\": {\n            \"enabled\": true,\n            \"failure_threshold\": 20,\n            \"recovery_timeout\": 300,\n            \"half_open_max_attempts\": 3\n        },\n        \"session_recovery\": {\n            \"reauth_on_401\": true,\n            \"max_reauth_attempts\": 2\n        }\n    },\n    \"update_settings\": {\n        \"enabled\": true,\n        \"update_interval_days\": 2,\n        \"filters\": {\n            \"defendant_keywords\": [\"доход\"],\n            \"exclude_event_types\": [\n                \"Отправлено в архив\",\n                \"Завершение дела\",\n                \"Решение вступило в силу\"\n            ]\n        }\n    }\n}"
-}
-
-def get_embedded_resource(name: str) -> str:
-    """Получить встроенный ресурс по имени"""
-    return _EMBEDDED_RESOURCES.get(name, "")
-
-def get_embedded_json(name: str) -> dict:
-    """Получить встроенный JSON как словарь"""
-    content = _EMBEDDED_RESOURCES.get(name, "{}")
-    return json.loads(content)
-
-def get_embedded_binary(name: str) -> bytes:
-    """Получить бинарный ресурс (декодирует из base64)"""
-    content = _EMBEDDED_RESOURCES.get(name, "")
-    return base64.b64decode(content) if content else b""
+from selectolax.parser import HTMLParser
 
 
+class HttpHeaders:
+    """Фабрика HTTP заголовков"""
+    
+    USER_AGENT = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
+    
+    @staticmethod
+    def get_base() -> Dict[str, str]:
+        """Базовые HTTP заголовки"""
+        return {
+            'User-Agent': HttpHeaders.USER_AGENT,
+            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
+            'Accept-Language': 'ru-RU,ru;q=0.9,en-US;q=0.8,en;q=0.7',
+            'Accept-Encoding': 'gzip, deflate, br',
+            'Connection': 'keep-alive',
+            'Cache-Control': 'no-cache',
+            'Pragma': 'no-cache',
+        }
+    
+    @staticmethod
+    def get_ajax() -> Dict[str, str]:
+        """AJAX заголовки для RichFaces"""
+        headers = HttpHeaders.get_base()
+        headers.update({
+            'Accept': '*/*',
+            'Content-Type': 'application/x-www-form-urlencoded; charset=UTF-8',
+            'Faces-Request': 'partial/ajax',
+            'X-Requested-With': 'XMLHttpRequest',  # ✅ Исправлено!
+        })
+        return headers
 
-# ============================================================================
-# МОДУЛЬ: parsers/court_parser/utils/logger.py
-# ============================================================================
+
+class ViewStateExtractor:
+    """Извлечение ViewState из HTML"""
+    
+    @staticmethod
+    def extract(html: str) -> Optional[str]:
+        """Извлечение ViewState из HTML"""
+        parser = HTMLParser(html)
+        viewstate_input = parser.css_first('input[name="javax.faces.ViewState"]')
+        
+        if viewstate_input and viewstate_input.attributes:
+            return viewstate_input.attributes.get('value')
+        return None
+
+
+class AjaxRequestBuilder:
+    """Построитель данных для AJAX запросов RichFaces"""
+    
+    @staticmethod
+    def build(
+        form_id: str,
+        ajax_id: str,
+        viewstate: str,
+        extra_params: Optional[Dict[str, str]] = None
+    ) -> Dict[str, str]:
+        """
+        Построить данные для partial/ajax запроса
+        """
+        data = {
+            form_id: form_id,
+            'javax.faces.ViewState': viewstate,
+            'javax.faces.source': ajax_id,
+            'javax.faces.partial.execute': f'{ajax_id} @component',
+            'javax.faces.partial.render': '@component',
+            'org.richfaces.ajax.component': ajax_id,
+            ajax_id: ajax_id,
+            'rfExt': 'null',
+            'AJAX:EVENTS_COUNT': '1',
+            'javax.faces.partial.ajax': 'true'
+        }
+        
+        if extra_params:
+            data.update(extra_params)
+        
+        return data
+
+
+################################################################################
+# ФАЙЛ: parsers/court_parser/utils/logger.py
+################################################################################
+
 
 """
 Простое логирование с цветным выводом
 """
+import logging
+import sys
+from datetime import datetime
+from pathlib import Path
+from logging.handlers import RotatingFileHandler
 
 
 # Цвета для консоли
@@ -109,28 +727,31 @@ class ColoredFormatter(logging.Formatter):
 
 
 def setup_logger(name: str, log_dir: str = "logs", level: str = "INFO") -> logging.Logger:
-    """Настройка логгера"""
+    """Настройка логгера с ротацией"""
     logger = logging.getLogger(name)
     logger.setLevel(logging.DEBUG)
-    logger.handlers.clear()
     
-    # Консольный вывод
-    console = logging.StreamHandler(sys.stdout)
-    console.setLevel(getattr(logging, level))
-    console.setFormatter(ColoredFormatter())
-    logger.addHandler(console)
-    
-    # Файловый вывод
-    Path(log_dir).mkdir(exist_ok=True)
-    file_handler = logging.FileHandler(
-        f"{log_dir}/parser.log",
-        encoding='utf-8'
-    )
-    file_handler.setLevel(logging.DEBUG)
-    file_handler.setFormatter(logging.Formatter(
-        '%(asctime)s [%(levelname)s] %(name)s: %(message)s'
-    ))
-    logger.addHandler(file_handler)
+    # Очищаем существующие handlers только если это новый логгер
+    if not logger.handlers:
+        # Консольный вывод
+        console = logging.StreamHandler(sys.stdout)
+        console.setLevel(getattr(logging, level))
+        console.setFormatter(ColoredFormatter())
+        logger.addHandler(console)
+        
+        # Файловый вывод с ротацией
+        Path(log_dir).mkdir(exist_ok=True)
+        file_handler = RotatingFileHandler(
+            f"{log_dir}/parser.log",
+            maxBytes=10 * 1024 * 1024,  # 10 MB
+            backupCount=5,
+            encoding='utf-8'
+        )
+        file_handler.setLevel(logging.DEBUG)
+        file_handler.setFormatter(logging.Formatter(
+            '%(asctime)s [%(levelname)s] %(name)s: %(message)s'
+        ))
+        logger.addHandler(file_handler)
     
     return logger
 
@@ -140,17 +761,24 @@ def get_logger(name: str) -> logging.Logger:
     return logging.getLogger(name)
 
 
-# ============================================================================
-# МОДУЛЬ: parsers/court_parser/utils/retry.py
-# ============================================================================
+################################################################################
+# ФАЙЛ: parsers/court_parser/utils/retry.py
+################################################################################
+
 
 """
 Гибкая система retry с поддержкой различных стратегий
 """
 
+import asyncio
+import random
+from typing import Callable, Any, Optional, List, Type
+from functools import wraps
+from datetime import datetime, timedelta
 
+import aiohttp
 
-# REMOVED IMPORT: from utils.logger import get_logger
+from utils.logger import get_logger
 
 
 class RetryableError(Exception):
@@ -426,13 +1054,17 @@ class RetryStrategy:
         raise RetryableError(f"Unexpected retry exhaustion") from last_exception
 
 
-# ============================================================================
-# МОДУЛЬ: parsers/court_parser/utils/text_processor.py
-# ============================================================================
+################################################################################
+# ФАЙЛ: parsers/court_parser/utils/text_processor.py
+################################################################################
+
 
 """
 Обработка и очистка текста
 """
+import re
+from datetime import datetime
+from typing import List, Optional, Dict
 
 
 class TextProcessor:
@@ -497,6 +1129,7 @@ class TextProcessor:
         'ТОО "Компания" ИВАНОВ' → ['ТОО "Компания"', 'ИВАНОВ']
         'Петров, Сидоров' → ['Петров', 'Сидоров']
         """
+        import re
         
         if not text.strip():
             return []
@@ -656,13 +1289,16 @@ class TextProcessor:
         return None
 
 
-# ============================================================================
-# МОДУЛЬ: parsers/court_parser/utils/validators.py
-# ============================================================================
+################################################################################
+# ФАЙЛ: parsers/court_parser/utils/validators.py
+################################################################################
+
 
 """
 Валидация данных
 """
+from typing import Dict, Any, Optional
+from datetime import datetime
 
 
 class ValidationError(Exception):
@@ -746,13 +1382,25 @@ class DataValidator:
         return True
 
 
-# ============================================================================
-# МОДУЛЬ: parsers/court_parser/config/settings.py
-# ============================================================================
+################################################################################
+# ФАЙЛ: parsers/court_parser/config/__init__.py
+################################################################################
+
+
+from .settings import Settings
+
+
+################################################################################
+# ФАЙЛ: parsers/court_parser/config/settings.py
+################################################################################
+
 
 """
 Загрузка и валидация конфигурации
 """
+import json
+from pathlib import Path
+from typing import Dict, Any, Optional, List
 
 
 class ConfigurationError(Exception):
@@ -854,18 +1502,32 @@ class Settings:
         return self.config.get('update_settings', {})
 
 
-# ============================================================================
-# МОДУЛЬ: parsers/court_parser/auth/authenticator.py
-# ============================================================================
+################################################################################
+# ФАЙЛ: parsers/court_parser/auth/__init__.py
+################################################################################
 
+
+from .authenticator import Authenticator
+
+
+################################################################################
+# ФАЙЛ: parsers/court_parser/auth/authenticator.py
+################################################################################
+
+
+# parsers/court_parser/auth/authenticator.py
 """
 Авторизация на сайте office.sud.kz
 """
 
+from typing import Dict, Optional
+import asyncio
+import aiohttp
+from selectolax.parser import HTMLParser
 
-
-# REMOVED IMPORT: from utils.logger import get_logger
-# REMOVED IMPORT: from utils.retry import RetryStrategy, RetryConfig, NonRetriableError
+from utils.logger import get_logger
+from utils.retry import RetryStrategy, RetryConfig, NonRetriableError, RetryableError
+from utils.http_utils import HttpHeaders, ViewStateExtractor
 
 
 class AuthenticationError(Exception):
@@ -883,45 +1545,33 @@ class Authenticator:
         self.password = auth_config['password']
         self.user_name = auth_config['user_name']
         self.logger = get_logger('authenticator')
-        
         self.retry_config = retry_config or {}
     
     async def authenticate(self, session_manager) -> bool:
-        """
-        Полный процесс авторизации с retry
-        
-        Args:
-            session_manager: SessionManager для создания новых сессий
-        """
+        """Полный процесс авторизации с retry"""
         auth_retry_config = self.retry_config.get('authentication', {})
         
         if not auth_retry_config:
-            # Без retry
             return await self._do_authenticate(session_manager)
         
-        # С retry
         retry_cfg = RetryConfig(auth_retry_config)
         strategy = RetryStrategy(retry_cfg)
-        
         create_new_session = auth_retry_config.get('create_new_session', True)
         
         async def _auth_with_session_reset():
             try:
                 return await self._do_authenticate(session_manager)
-            except Exception as e:
-                # При ошибке создаем новую сессию (если настроено)
+            except RetryableError:
                 if create_new_session:
                     self.logger.debug("Создаю новую сессию перед retry...")
                     await session_manager.create_session()
                 raise
         
         try:
-            result = await strategy.execute_with_retry(
+            return await strategy.execute_with_retry(
                 _auth_with_session_reset,
                 error_context="Авторизация"
             )
-            return result
-        
         except Exception as e:
             self.logger.error(f"❌ Авторизация не удалась: {e}")
             raise AuthenticationError(f"Не удалось авторизоваться: {e}") from e
@@ -932,112 +1582,70 @@ class Authenticator:
         
         self.logger.info("Начинаю авторизацию...")
         
-        # Этап 1: Главная страница
-        viewstate = await self._load_main_page(session)
-        await asyncio.sleep(1)
-        
-        # Этап 2: Смена языка
-        await self._switch_to_russian(session, viewstate)
+        # Этап 1: Загрузка страницы и извлечение данных формы
+        viewstate, form_ids = await self._load_login_page(session)
         await asyncio.sleep(0.5)
         
-        # Этап 3: Логин
-        await self._perform_login(session, viewstate)
+        # Этап 2: Отправка логина
+        await self._perform_login(session, viewstate, form_ids)
         await asyncio.sleep(0.5)
         
-        # Этап 4: Проверка
-        is_authenticated = await self._verify_authentication(session)
-        
-        if is_authenticated:
+        # Этап 3: Проверка
+        if await self._verify_authentication(session):
             self.logger.info("✅ Авторизация успешна")
             return True
-        else:
-            # Проверка не прошла - это может быть как временная, так и постоянная ошибка
-            retriable_on_fail = self.retry_config.get('authentication', {}).get(
-                'retriable_on_auth_check_fail', True
-            )
-            
-            if retriable_on_fail:
-                raise AuthenticationError("Проверка авторизации не пройдена")
-            else:
-                raise NonRetriableError("Проверка авторизации не пройдена (неверные учетные данные?)")
+        
+        raise RetryableError("Проверка авторизации не пройдена")
     
-    async def _load_main_page(self, session: aiohttp.ClientSession) -> Optional[str]:
-        """Загрузка главной страницы и извлечение ViewState"""
-        url = f"{self.base_url}/"
+    async def _load_login_page(self, session: aiohttp.ClientSession) -> tuple:
+        """Загрузка страницы логина и динамическое извлечение данных формы"""
+        url = f"{self.base_url}/index.xhtml?lang=ru"
         headers = self._get_base_headers()
         
-        async with session.get(url, headers=headers) as response:
-            if response.status != 200:
-                raise AuthenticationError(f"HTTP {response.status} при загрузке главной")
-            
-            html = await response.text()
-            viewstate = self._extract_viewstate(html)
-            
-            self.logger.debug("Главная страница загружена")
-            return viewstate
-    
-    async def _switch_to_russian(self, session: aiohttp.ClientSession, 
-                                 viewstate: Optional[str]):
-        """Смена языка на русский"""
-        url = f"{self.base_url}/index.xhtml"
-        
-        # Получаем текущую страницу для ID элементов
-        async with session.get(url, headers=self._get_base_headers()) as response:
-            html = await response.text()
-            current_viewstate = self._extract_viewstate(html)
-        
-        # Формируем данные для смены языка
-        data = {
-            'f_l_temp': 'f_l_temp',
-            'javax.faces.ViewState': current_viewstate or viewstate,
-            'javax.faces.source': 'f_l_temp:js_temp_1',
-            'javax.faces.partial.execute': 'f_l_temp:js_temp_1 @component',
-            'javax.faces.partial.render': '@component',
-            'param1': f'{self.base_url}/',
-            'org.richfaces.ajax.component': 'f_l_temp:js_temp_1',
-            'f_l_temp:js_temp_1': 'f_l_temp:js_temp_1',
-            'rfExt': 'null',
-            'AJAX:EVENTS_COUNT': '1',
-            'javax.faces.partial.ajax': 'true'
-        }
-        
-        headers = self._get_ajax_headers()
-        headers['Referer'] = f'{self.base_url}/'
-        
-        async with session.post(url, data=data, headers=headers) as response:
-            if response.status != 200:
-                raise AuthenticationError(f"HTTP {response.status} при смене языка")
-            
-            self.logger.debug("Язык переключен на русский")
+        try:
+            async with session.get(url, headers=headers) as response:
+                if response.status in [500, 502, 503, 504]:
+                    raise RetryableError(f"HTTP {response.status}")
+                if response.status != 200:
+                    raise RetryableError(f"HTTP {response.status}")
+                
+                html = await response.text()
+                
+                # Динамическое извлечение ViewState
+                viewstate = ViewStateExtractor.extract(html)
+                if not viewstate:
+                    raise RetryableError("ViewState не найден")
+                
+                # Динамическое извлечение ID формы
+                form_ids = self._extract_auth_form_ids(html)
+                
+                if not form_ids.get('form_base') or not form_ids.get('submit_button'):
+                    # Сохраняем для отладки
+                    with open("auth_form_not_found.html", "w", encoding="utf-8") as f:
+                        f.write(html)
+                    raise RetryableError(
+                        f"Форма авторизации не найдена. Извлечено: {form_ids}"
+                    )
+                
+                self.logger.info(f"📋 Форма: {form_ids['form_base']}, кнопка: {form_ids['submit_button']}")
+                return viewstate, form_ids
+                
+        except aiohttp.ClientError as e:
+            raise RetryableError(f"Сетевая ошибка: {e}")
     
     async def _perform_login(self, session: aiohttp.ClientSession, 
-                            viewstate: Optional[str]):
+                            viewstate: str, form_ids: Dict[str, str]):
         """Отправка логина и пароля"""
         url = f"{self.base_url}/index.xhtml"
         
-        # Получаем форму авторизации
-        async with session.get(url, headers=self._get_base_headers()) as response:
-            html = await response.text()
-            auth_ids = self._extract_auth_form_ids(html)
-            current_viewstate = self._extract_viewstate(html)
+        form_base = form_ids['form_base']
+        submit_button = form_ids['submit_button']
         
-        # Извлекаем ID элементов
-        form_base = auth_ids.get('form_base', 'j_idt82:auth')
-        submit_button = auth_ids.get('submit_button')
-        
-        # ВАЖНО: Если кнопка не найдена - используем дефолт
-        if not submit_button:
-            submit_button = f'{form_base}:j_idt89'
-            self.logger.warning(f"ID кнопки не найден, используется дефолт: {submit_button}")
-        else:
-            self.logger.debug(f"Используется ID кнопки: {submit_button}")
-        
-        # Формируем данные для логина
         data = {
             form_base: form_base,
             f'{form_base}:xin': self.login,
             f'{form_base}:password': self.password,
-            'javax.faces.ViewState': current_viewstate or viewstate,
+            'javax.faces.ViewState': viewstate,
             'javax.faces.source': submit_button,
             'javax.faces.partial.event': 'click',
             'javax.faces.partial.execute': f'{submit_button} @component',
@@ -1050,214 +1658,147 @@ class Authenticator:
         }
         
         headers = self._get_ajax_headers()
-        headers['Referer'] = f'{self.base_url}/index.xhtml'
+        headers['Referer'] = url
         
-        async with session.post(url, data=data, headers=headers) as response:
-            if response.status != 200:
-                raise AuthenticationError(f"HTTP {response.status} при отправке логина")
-            
-            self.logger.debug("Логин и пароль отправлены")
+        try:
+            async with session.post(url, data=data, headers=headers) as response:
+                if response.status in [400, 500, 502, 503, 504]:
+                    text = await response.text()
+                    self.logger.warning(f"HTTP {response.status} при логине: {text[:200]}")
+                    raise RetryableError(f"HTTP {response.status} при логине")
+                
+                if response.status != 200:
+                    raise RetryableError(f"HTTP {response.status}")
+                
+                self.logger.debug("Логин отправлен")
+                
+        except aiohttp.ClientError as e:
+            raise RetryableError(f"Сетевая ошибка: {e}")
     
     async def _verify_authentication(self, session: aiohttp.ClientSession) -> bool:
-        """
-        Проверка успешности авторизации
-        
-        Raises:
-            aiohttp.ClientError: при HTTP 502, 503, 504 (retriable ошибки)
-            NonRetriableError: при HTTP 401, 403 (постоянные ошибки)
-        
-        Returns:
-            True если авторизация успешна
-            False если не удалось определить (будет обработано в _do_authenticate)
-        """
+        """Проверка успешности авторизации"""
         url = f"{self.base_url}/form/proceedings/services.xhtml"
         
         try:
-            async with session.get(url, headers=self._get_base_headers()) as response:
-                # КРИТИЧЕСКОЕ ИСПРАВЛЕНИЕ: обработка HTTP ошибок
+            async with session.get(url, headers=self._get_base_headers(), 
+                                   allow_redirects=False) as response:
                 
-                # Постоянные ошибки (не авторизован)
+                if response.status in [301, 302, 303, 307, 308]:
+                    raise RetryableError("Редирект - не авторизован")
+                
                 if response.status in [401, 403]:
-                    self.logger.error(f"HTTP {response.status}: Неверные учетные данные")
-                    raise NonRetriableError(f"HTTP {response.status}: Авторизация отклонена сервером")
+                    raise NonRetriableError(f"HTTP {response.status}: Доступ запрещён")
                 
-                # Временные ошибки сервера (retry)
                 if response.status in [500, 502, 503, 504]:
-                    self.logger.warning(f"HTTP {response.status}: Временная ошибка сервера")
-                    raise aiohttp.ClientError(f"HTTP {response.status}: Сервер недоступен")
+                    raise RetryableError(f"HTTP {response.status}")
                 
-                # Успешный ответ
                 if response.status != 200:
-                    self.logger.error(f"HTTP {response.status} при проверке авторизации")
-                    return False
+                    raise RetryableError(f"HTTP {response.status}")
                 
                 html = await response.text()
                 
-                # Проверяем наличие элементов авторизованной страницы
-                checks = {
-                    'profile-context-menu': 'profile-context-menu' in html,
-                    'Выйти': 'Выйти' in html,
-                    'logout()': 'logout()' in html,
-                    'userInfo.xhtml': 'userInfo.xhtml' in html
-                }
+                # Признаки успешной авторизации
+                checks = [
+                    'profile-context-menu' in html,
+                    'Выйти' in html,
+                    'logout()' in html,
+                    'userInfo.xhtml' in html,
+                ]
                 
-                passed = sum(checks.values())
+                passed = sum(checks)
                 
-                if passed >= 3:  # Минимум 3 признака из 4
-                    self.logger.info(f"✅ Авторизация подтверждена ({passed}/4 проверок)")
+                if passed >= 2:
                     return True
                 
-                self.logger.error(f"❌ Авторизация не подтверждена ({passed}/4 проверок)")
+                # Если форма логина - точно не авторизован
+                if 'password' in html.lower() and 'xin' in html.lower():
+                    raise RetryableError("Обнаружена форма логина")
                 
-                # Сохраняем HTML для отладки
-                try:
-                    with open('failed_auth_debug.html', 'w', encoding='utf-8') as f:
-                        f.write(html)
-                    self.logger.info("HTML сохранён в failed_auth_debug.html")
-                except:
-                    pass
+                # Хотя бы 1 признак - принимаем
+                if passed >= 1:
+                    self.logger.warning(f"⚠️ Только {passed}/4 признаков, но принимаем")
+                    return True
                 
-                return False
-        
-        except (aiohttp.ClientError, NonRetriableError):
-            # Пробрасываем исключения дальше (для retry логики)
+                raise RetryableError(f"Нет признаков авторизации ({passed}/4)")
+                
+        except (RetryableError, NonRetriableError):
             raise
-        
-        except Exception as e:
-            # Неожиданная ошибка
-            self.logger.error(f"Неожиданная ошибка при проверке авторизации: {e}")
-            raise aiohttp.ClientError(f"Ошибка проверки авторизации: {e}")
-    
-    def _extract_viewstate(self, html: str) -> Optional[str]:
-        """Извлечение ViewState из HTML"""
-        parser = HTMLParser(html)
-        viewstate_input = parser.css_first('input[name="javax.faces.ViewState"]')
-        
-        if viewstate_input and viewstate_input.attributes:
-            return viewstate_input.attributes.get('value')
-        return None
+        except aiohttp.ClientError as e:
+            raise RetryableError(f"Сетевая ошибка: {e}")
     
     def _extract_auth_form_ids(self, html: str) -> Dict[str, str]:
-        """
-        Извлечение ID элементов формы авторизации
-        
-        Возвращает:
-            {
-                'form_base': 'j_idt82:auth',
-                'xin_field': 'j_idt82:auth:xin',
-                'password_field': 'j_idt82:auth:password',
-                'submit_button': 'j_idt82:auth:j_idt89'
-            }
-        """
+        """Динамическое извлечение ID элементов формы авторизации"""
         parser = HTMLParser(html)
         ids = {}
         
-        # 1. Поиск поля ИИН (input[type="email"])
-        xin_input = parser.css_first('input[type="email"]')
-        if xin_input and xin_input.attributes:
-            xin_name = xin_input.attributes.get('name', '') or ''
-            xin_id = xin_input.attributes.get('id', '') or ''
-            
-            ids['xin_field'] = xin_name or xin_id
-            
-            # Извлекаем базовый ID формы из имени поля
-            # Например: 'j_idt82:auth:xin' → 'j_idt82:auth'
-            if ':' in ids['xin_field']:
-                parts = ids['xin_field'].split(':')
-                ids['form_base'] = ':'.join(parts[:-1])
+        # 1. Ищем поле email (ИИН)
+        email_input = parser.css_first('input[type="email"]')
+        if email_input and email_input.attributes:
+            xin_name = email_input.attributes.get('name', '')
+            if ':' in xin_name:
+                # "j_idt72:auth:xin" → "j_idt72:auth"
+                ids['form_base'] = ':'.join(xin_name.split(':')[:-1])
+                ids['xin_field'] = xin_name
         
-        # 2. Поиск поля пароля (input[type="password"])
-        password_input = parser.css_first('input[type="password"]')
-        if password_input and password_input.attributes:
-            password_name = password_input.attributes.get('name', '') or ''
-            password_id = password_input.attributes.get('id', '') or ''
-            ids['password_field'] = password_name or password_id
-        
-        # 3. Поиск кнопки "Войти"
-        # Метод 1: По value="Войти" и type="submit"
-        submit_buttons = parser.css('input[type="submit"]')
-        
-        for button in submit_buttons:
-            if not button.attributes:
-                continue
-                
-            button_value = button.attributes.get('value', '')
-            if button_value is None:
-                button_value = ''
-            button_value = button_value.strip()
-            
-            button_id = button.attributes.get('id', '') or ''
-            button_name = button.attributes.get('name', '') or ''
-            
-            # Проверяем текст кнопки
-            if button_value.lower() in ['войти', 'login', 'кіру']:
-                ids['submit_button'] = button_name or button_id
-                self.logger.debug(f"Найдена кнопка входа: {ids['submit_button']}")
-                break
-        
-        # Метод 2: По классу button-primary (если первый не сработал)
-        if 'submit_button' not in ids:
-            primary_buttons = parser.css('.button-primary[type="submit"]')
-            if primary_buttons:
-                button = primary_buttons[0]
-                if button.attributes:
-                    button_id = button.attributes.get('id', '') or ''
-                    button_name = button.attributes.get('name', '') or ''
-                    ids['submit_button'] = button_name or button_id
-                    self.logger.debug(f"Найдена кнопка (по классу): {ids['submit_button']}")
-        
-        # Метод 3: По onclick с RichFaces.ajax (запасной)
-        if 'submit_button' not in ids:
-            ajax_elements = parser.css('[onclick*="RichFaces.ajax"]')
-            for elem in ajax_elements:
-                if not elem.attributes:
+        # 2. Ищем кнопку "Войти" в форме авторизации
+        if ids.get('form_base'):
+            for btn in parser.css('input[type="submit"]'):
+                if not btn.attributes:
                     continue
-                    
-                elem_id = elem.attributes.get('id', '') or ''
-                elem_name = elem.attributes.get('name', '') or ''
-                elem_type = elem.attributes.get('type', '') or ''
                 
-                # Проверяем что это submit кнопка формы авторизации
-                if 'auth' in (elem_id or elem_name) and elem_type == 'submit':
-                    ids['submit_button'] = elem_name or elem_id
-                    self.logger.debug(f"Найдена кнопка (через onclick): {ids['submit_button']}")
-                    break
+                btn_name = btn.attributes.get('name', '')
+                btn_value = btn.attributes.get('value', '')
+                btn_style = btn.attributes.get('style', '')
+                
+                # Пропускаем скрытые
+                if 'display: none' in btn_style or 'display:none' in btn_style:
+                    continue
+                
+                # Кнопка должна принадлежать форме авторизации
+                if ids['form_base'] in btn_name:
+                    # Предпочитаем кнопку "Войти"
+                    if btn_value == 'Войти':
+                        ids['submit_button'] = btn_name
+                        break
+                    # Или любую видимую кнопку формы
+                    elif 'submit_button' not in ids:
+                        ids['submit_button'] = btn_name
         
+        self.logger.debug(f"Извлечённые ID: {ids}")
         return ids
     
     def _get_base_headers(self) -> Dict[str, str]:
-        """Базовые HTTP заголовки"""
-        return {
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
-            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
-            'Accept-Language': 'ru,en;q=0.9',
-            'Cache-Control': 'no-cache'
-        }
-    
+        return HttpHeaders.get_base()
+
     def _get_ajax_headers(self) -> Dict[str, str]:
-        """AJAX заголовки"""
-        headers = self._get_base_headers()
-        headers.update({
-            'Accept': '*/*',
-            'Content-Type': 'application/x-www-form-urlencoded;charset=UTF-8',
-            'Faces-Request': 'partial/ajax',
-            'X-Requested-With': 'XMLHttpRequest'
-        })
-        return headers
+        return HttpHeaders.get_ajax()
 
 
-# ============================================================================
-# МОДУЛЬ: parsers/court_parser/database/db_manager.py
-# ============================================================================
+################################################################################
+# ФАЙЛ: parsers/court_parser/database/__init__.py
+################################################################################
+
+
+from .db_manager import DatabaseManager
+from .models import CaseData, EventData, SearchResult
+
+
+################################################################################
+# ФАЙЛ: parsers/court_parser/database/db_manager.py
+################################################################################
+
 
 """
 Менеджер базы данных
 """
+from typing import Dict, Any, Optional, List, Set
+import asyncpg
 
-# REMOVED IMPORT: from database.models import CaseData, EventData
-# REMOVED IMPORT: from utils.text_processor import TextProcessor
-# REMOVED IMPORT: from utils.validators import DataValidator
-# REMOVED IMPORT: from utils.logger import get_logger
+from database.models import CaseData, EventData
+from utils.text_processor import TextProcessor
+from utils.validators import DataValidator
+from utils.logger import get_logger
+from utils.constants import PartyRole
 
 
 class DatabaseManager:
@@ -1368,13 +1909,13 @@ class DatabaseManager:
         for plaintiff in case_data.plaintiffs:
             if self.validator.validate_party_name(plaintiff):
                 party_id = await self._get_or_create_party(conn, plaintiff)
-                await self._link_party_to_case(conn, case_id, party_id, 'plaintiff')
+                await self._link_party_to_case(conn, case_id, party_id, PartyRole.PLAINTIFF)
         
         # Ответчики
         for defendant in case_data.defendants:
             if self.validator.validate_party_name(defendant):
                 party_id = await self._get_or_create_party(conn, defendant)
-                await self._link_party_to_case(conn, case_id, party_id, 'defendant')
+                await self._link_party_to_case(conn, case_id, party_id, PartyRole.DEFENDANT)
     
     async def _save_events(self, conn: asyncpg.Connection, 
                          case_id: int, events: List[EventData]):
@@ -1730,15 +2271,313 @@ class DatabaseManager:
         )
         
         return max_sequence
+    
+    def get_smas_instance_codes(self, settings) -> Set[str]:
+        """
+        Собрать все instance_code для судов СМАС из конфигурации
+        
+        Returns:
+            {'94', '93', ...}
+        """
+        smas_codes = set()
+        
+        for region_key, region_config in settings.regions.items():
+            courts = region_config.get('courts', {})
+            smas_court = courts.get('smas')
+            
+            if smas_court and smas_court.get('instance_code'):
+                smas_codes.add(smas_court['instance_code'])
+        
+        self.logger.debug(f"СМАС instance_codes: {smas_codes}")
+        return smas_codes
+    
+    async def get_smas_cases_without_judge(
+        self, 
+        settings,
+        interval_days: int = 2
+    ) -> List[str]:
+        """
+        Получить номера дел СМАС без назначенного судьи
+        
+        Args:
+            settings: экземпляр Settings для получения instance_codes
+            interval_days: интервал проверки (общий для update mode)
+        
+        Returns:
+            ['7194-25-00-4/123', '7594-25-00-4/456', ...]
+        """
+        # Получаем все instance_code для СМАС
+        smas_codes = self.get_smas_instance_codes(settings)
+        
+        if not smas_codes:
+            self.logger.warning("Не найдены instance_codes для СМАС в конфиге")
+            return []
+        
+        # Формируем условия для SQL
+        # Номер дела: "7194-25-00-4/123" → court_code = "7194" → instance = "94"
+        # Паттерн: символы 3-4 в court_code (индексы 2-3 в номере до первого дефиса)
+        # SQL: SUBSTRING(case_number FROM 3 FOR 2)
+        
+        # Строим условие для проверки instance_code
+        code_conditions = []
+        params = []
+        param_counter = 1
+        
+        for code in smas_codes:
+            code_conditions.append(f"SUBSTRING(case_number FROM 3 FOR 2) = ${param_counter}")
+            params.append(code)
+            param_counter += 1
+        
+        codes_where = f"({' OR '.join(code_conditions)})"
+        
+        query = f"""
+            SELECT case_number
+            FROM cases
+            WHERE 
+                judge_id IS NULL
+                AND {codes_where}
+                AND (
+                    last_updated_at IS NULL
+                    OR last_updated_at < NOW() - INTERVAL '{interval_days} days'
+                )
+            ORDER BY case_date DESC
+        """
+        
+        async with self.pool.acquire() as conn:
+            rows = await conn.fetch(query, *params)
+        
+        case_numbers = [row['case_number'] for row in rows]
+        
+        self.logger.info(
+            f"Найдено дел СМАС без судьи: {len(case_numbers)}"
+        )
+        
+        return case_numbers
+    
+
+    # Docs processing:
+
+    async def get_document_keys(self, case_id: int) -> set:
+        """Получить ключи уже скачанных документов"""
+        async with self.pool.acquire() as conn:
+            rows = await conn.fetch(
+                "SELECT doc_date, doc_name FROM case_documents WHERE case_id = $1",
+                case_id
+            )
+        return {f"{r['doc_date'].isoformat()}|{ r['doc_name']}" for r in rows}
+
+    async def save_documents(self, case_id: int, documents: List[Dict]) -> int:
+        """Сохранить информацию о документах"""
+        if not documents:
+            return 0
+        saved = 0
+        async with self.pool.acquire() as conn:
+            for doc in documents:
+                try:
+                    await conn.execute("""
+                        INSERT INTO case_documents (case_id, doc_date, doc_name, file_path, downloaded_at)
+                        VALUES ($1, $2, $3, $4, CURRENT_TIMESTAMP)
+                        ON CONFLICT (case_id, doc_date, doc_name) DO UPDATE
+                        SET file_path = EXCLUDED.file_path, downloaded_at = CURRENT_TIMESTAMP
+                    """, case_id, doc['doc_date'], doc['doc_name'], doc['file_path'])
+                    saved += 1
+                except Exception as e:
+                    self.logger.error(f"Ошибка сохранения документа: {e}")
+        return saved
+
+    async def get_cases_pending_documents(self, limit: int = None) -> List[Dict]:
+        """Получить дела для скачивания документов"""
+        query = """
+            SELECT id, case_number FROM cases
+            WHERE documents_pending = TRUE
+            ORDER BY case_date DESC
+        """
+        if limit:
+            query += f" LIMIT {limit}"
+        async with self.pool.acquire() as conn:
+            rows = await conn.fetch(query)
+        return [{'id': r['id'], 'case_number': r['case_number']} for r in rows]
+
+    async def mark_documents_downloaded(self, case_id: int):
+        """Пометить что документы скачаны"""
+        async with self.pool.acquire() as conn:
+            await conn.execute("""
+                UPDATE cases SET documents_pending = FALSE, documents_checked_at = CURRENT_TIMESTAMP
+                WHERE id = $1
+            """, case_id)
+
+    async def mark_case_for_documents(self, case_id: int):
+        """Пометить дело для скачивания документов"""
+        async with self.pool.acquire() as conn:
+            await conn.execute(
+                "UPDATE cases SET documents_pending = TRUE WHERE id = $1", case_id
+            )
+
+    async def get_cases_for_documents(self, filters: Dict, limit: int = None) -> List[Dict]:
+        """
+        Получить дела для скачивания документов
+        
+        Использует ту же логику фильтрации, что и get_cases_for_update
+        """
+        defendant_keywords = filters.get('defendant_keywords', [])
+        exclude_events = filters.get('exclude_event_types', [])
+        interval_days = filters.get('check_interval_days', 7)
+        
+        query = """
+            SELECT DISTINCT c.id, c.case_number, c.case_date, c.documents_checked_at
+            FROM cases c
+        """
+        
+        conditions = []
+        params = []
+        param_counter = 1
+        
+        # ФИЛЬТР 1: По ответчику (если указан)
+        if defendant_keywords:
+            query += """
+                JOIN case_parties cp ON c.id = cp.case_id AND cp.party_role = 'defendant'
+                JOIN parties p ON cp.party_id = p.id
+            """
+            
+            keyword_conditions = []
+            for keyword in defendant_keywords:
+                keyword_conditions.append(f"p.name ILIKE ${param_counter}")
+                params.append(f'%{keyword}%')
+                param_counter += 1
+            
+            conditions.append(f"({' OR '.join(keyword_conditions)})")
+        
+        # ФИЛЬТР 2: Исключить дела с определёнными событиями
+        if exclude_events:
+            placeholders = ', '.join([f'${i}' for i in range(param_counter, param_counter + len(exclude_events))])
+            
+            conditions.append(f"""
+                NOT EXISTS (
+                    SELECT 1 
+                    FROM case_events ce
+                    JOIN event_types et ON ce.event_type_id = et.id
+                    WHERE ce.case_id = c.id
+                    AND et.name IN ({placeholders})
+                )
+            """)
+            
+            params.extend(exclude_events)
+            param_counter += len(exclude_events)
+        
+        # ФИЛЬТР 3: Документы не проверялись или проверялись давно
+        conditions.append(f"""
+            (
+                c.documents_checked_at IS NULL 
+                OR c.documents_checked_at < NOW() - INTERVAL '{interval_days} days'
+            )
+        """)
+        
+        # Собираем WHERE
+        if conditions:
+            query += " WHERE " + " AND ".join(conditions)
+        
+        # Сортировка (все колонки есть в SELECT)
+        query += " ORDER BY c.documents_checked_at NULLS FIRST, c.case_date DESC"
+        
+        if limit:
+            query += f" LIMIT {limit}"
+        
+        async with self.pool.acquire() as conn:
+            rows = await conn.fetch(query, *params)
+        
+        self.logger.info(f"Дел для скачивания документов: {len(rows)}")
+        return [{'id': r['id'], 'case_number': r['case_number']} for r in rows]
+    
+    async def get_case_id(self, case_number: str) -> Optional[int]:
+        """Получить ID дела по номеру"""
+        async with self.pool.acquire() as conn:
+            row = await conn.fetchrow(
+                "SELECT id FROM cases WHERE case_number = $1",
+                case_number
+            )
+            return row['id'] if row else None
+        
+    async def update_case(self, case_data: CaseData) -> Dict[str, Any]:
+        """
+        Обновление дела (события, судья)
+        
+        Returns:
+            {'case_id': int, 'events_added': int}
+        """
+        try:
+            async with self.pool.acquire() as conn:
+                # 1. Получаем case_id
+                case_id = await conn.fetchval(
+                    "SELECT id FROM cases WHERE case_number = $1",
+                    case_data.case_number
+                )
+                
+                if not case_id:
+                    # Дело не найдено — создаём новое
+                    result = await self.save_case(case_data)
+                    return {
+                        'case_id': result.get('case_id'),
+                        'events_added': len(case_data.events)
+                    }
+                
+                # 2. Обновляем судью (если появился)
+                if case_data.judge:
+                    judge_id = await self._get_or_create_judge(conn, case_data.judge)
+                    await conn.execute(
+                        "UPDATE cases SET judge_id = $1, updated_at = CURRENT_TIMESTAMP WHERE id = $2",
+                        judge_id, case_id
+                    )
+                
+                # 3. Получаем существующие события
+                existing_events = await conn.fetch("""
+                    SELECT et.name, ce.event_date 
+                    FROM case_events ce
+                    JOIN event_types et ON ce.event_type_id = et.id
+                    WHERE ce.case_id = $1
+                """, case_id)
+                
+                existing_keys = {
+                    f"{row['name']}|{row['event_date'].isoformat()}" 
+                    for row in existing_events
+                }
+                
+                # 4. Добавляем новые события
+                events_added = 0
+                for event in case_data.events:
+                    event_key = f"{event.event_type}|{event.event_date.isoformat()}"
+                    if event_key not in existing_keys:
+                        event_type_id = await self._get_or_create_event_type(conn, event.event_type)
+                        await conn.execute("""
+                            INSERT INTO case_events (case_id, event_type_id, event_date)
+                            VALUES ($1, $2, $3)
+                            ON CONFLICT DO NOTHING
+                        """, case_id, event_type_id, event.event_date)
+                        events_added += 1
+                
+                # 5. Обновляем метку времени
+                await conn.execute(
+                    "UPDATE cases SET last_updated_at = CURRENT_TIMESTAMP WHERE id = $1",
+                    case_id
+                )
+                
+                return {'case_id': case_id, 'events_added': events_added}
+        
+        except Exception as e:
+            self.logger.error(f"Ошибка обновления дела {case_data.case_number}: {e}")
+            return {'case_id': None, 'events_added': 0}
 
 
-# ============================================================================
-# МОДУЛЬ: parsers/court_parser/database/models.py
-# ============================================================================
+################################################################################
+# ФАЙЛ: parsers/court_parser/database/models.py
+################################################################################
+
 
 """
 Структуры данных для БД
 """
+from dataclasses import dataclass, field
+from datetime import datetime, date
+from typing import List, Optional
 
 
 @dataclass
@@ -1750,9 +2589,10 @@ class CaseData:
     plaintiffs: List[str] = field(default_factory=list)
     defendants: List[str] = field(default_factory=list)
     events: List['EventData'] = field(default_factory=list)
+    result_index: Optional[int] = None  # Индекс в результатах поиска (не сохраняется в БД)
     
     def to_dict(self) -> dict:
-        """Преобразование в словарь"""
+        """Преобразование в словарь (без result_index — он не для БД)"""
         return {
             'case_number': self.case_number,
             'case_date': self.case_date,
@@ -1784,17 +2624,50 @@ class SearchResult:
     error: Optional[str] = None
 
 
-# ============================================================================
-# МОДУЛЬ: parsers/court_parser/parsing/data_extractor.py
-# ============================================================================
+@dataclass
+class DocumentInfo:
+    """Информация о документе"""
+    index: int  # Индекс из onclick (уже правильно реализовано)
+    doc_date: date
+    doc_name: str
+    doc_type: str = ""
+    
+    @property
+    def unique_key(self) -> str:
+        return f"{self.doc_date.isoformat()}|{self.doc_name}"
+    
+    def to_dict(self) -> dict:
+        return {
+            'index': self.index,
+            'doc_date': self.doc_date,
+            'doc_name': self.doc_name,
+            'doc_type': self.doc_type
+        }
+
+
+################################################################################
+# ФАЙЛ: parsers/court_parser/parsing/__init__.py
+################################################################################
+
+
+from .html_parser import ResultsParser
+from .data_extractor import DataExtractor
+
+
+################################################################################
+# ФАЙЛ: parsers/court_parser/parsing/data_extractor.py
+################################################################################
+
 
 """
 Извлечение данных из HTML элементов
 """
+from typing import List, Tuple, Optional
+from datetime import date
 
-# REMOVED IMPORT: from database.models import EventData
-# REMOVED IMPORT: from utils.text_processor import TextProcessor
-# REMOVED IMPORT: from utils.logger import get_logger
+from database.models import EventData
+from utils.text_processor import TextProcessor
+from utils.logger import get_logger
 
 
 class DataExtractor:
@@ -1882,17 +2755,151 @@ class DataExtractor:
         return events
 
 
-# ============================================================================
-# МОДУЛЬ: parsers/court_parser/parsing/html_parser.py
-# ============================================================================
+################################################################################
+# ФАЙЛ: parsers/court_parser/parsing/document_parser.py
+################################################################################
+
+
+"""
+Парсинг страниц с документами
+"""
+from typing import Dict, List, Optional, Tuple
+import re
+from selectolax.parser import HTMLParser
+
+from database.models import DocumentInfo
+from utils.text_processor import TextProcessor
+from utils.logger import get_logger
+from utils.http_utils import ViewStateExtractor
+
+
+class DocumentParser:
+    """Парсер страниц документов"""
+    
+    def __init__(self):
+        self.text_processor = TextProcessor()
+        self.logger = get_logger('document_parser')
+    
+    def extract_case_card_form(self, html: str) -> Optional[Dict[str, str]]:
+        """
+        Извлечение данных формы для открытия карточки дела из lawsuitList.xhtml
+        """
+        pattern = r'viewSelectedLawsuit\s*=\s*function\s*\([^)]*\)\s*\{\s*RichFaces\.ajax\s*\(\s*["\']([^"\']+)["\']'
+        match = re.search(pattern, html)
+        
+        if not match:
+            self.logger.warning("viewSelectedLawsuit не найден")
+            return None
+        
+        ajax_id = match.group(1)
+        form_id = ajax_id.rsplit(':', 1)[0]
+        viewstate = self._extract_viewstate(html)
+        
+        if not viewstate:
+            return None
+        
+        return {
+            'form_id': form_id,
+            'ajax_id': ajax_id,
+            'viewstate': viewstate
+        }
+    
+    def extract_document_list(self, html: str) -> Tuple[List[DocumentInfo], Optional[Dict[str, str]]]:
+        """
+        Извлечение списка документов из documentList.xhtml
+        """
+        parser = HTMLParser(html)
+        documents = []
+        
+        rows = parser.css('table tbody tr.hover-effect')
+        
+        for row in rows:
+            cells = row.css('td')
+            if len(cells) < 3:
+                continue
+            
+            # Дата
+            date_text = self.text_processor.clean(cells[0].text())
+            doc_date = self.text_processor.parse_date(date_text)
+            if not doc_date:
+                continue
+            
+            # Тип
+            doc_type = self.text_processor.clean(cells[1].text())
+            
+            # Имя и индекс
+            link = cells[2].css_first('a')
+            if not link:
+                continue
+            
+            doc_name = self.text_processor.clean(link.text())
+            onclick = link.attributes.get('onclick', '')
+            index_match = re.search(r'viewInlineDoc\s*\(\s*(\d+)\s*\)', onclick)
+            
+            if not index_match:
+                continue
+            
+            documents.append(DocumentInfo(
+                index=int(index_match.group(1)),
+                doc_date=doc_date.date(),
+                doc_name=doc_name,
+                doc_type=doc_type
+            ))
+        
+        form_data = self._extract_document_form(html)
+        return documents, form_data
+    
+    def _extract_document_form(self, html: str) -> Optional[Dict[str, str]]:
+        """Извлечение данных формы для открытия документа"""
+        pattern = r'viewInlineDoc\s*=\s*function\s*\([^)]*\)\s*\{\s*RichFaces\.ajax\s*\(\s*["\']([^"\']+)["\']'
+        match = re.search(pattern, html)
+        
+        if not match:
+            return None
+        
+        ajax_id = match.group(1)
+        form_id = ajax_id.rsplit(':', 1)[0]
+        viewstate = self._extract_viewstate(html)
+        
+        return {
+            'form_id': form_id,
+            'ajax_id': ajax_id,
+            'viewstate': viewstate
+        }
+    
+    def extract_pdf_url(self, html: str) -> Optional[str]:
+        """Извлечение URL документа из document.xhtml"""
+        parser = HTMLParser(html)
+        
+        embed = parser.css_first('embed[type="application/pdf"]')
+        if embed and embed.attributes:
+            return embed.attributes.get('src')
+        
+        embed = parser.css_first('embed[src*=".pdf"]')
+        if embed and embed.attributes:
+            return embed.attributes.get('src')
+        
+        return None
+    
+    def _extract_viewstate(self, html: str) -> Optional[str]:
+        return ViewStateExtractor.extract(html)
+
+
+################################################################################
+# ФАЙЛ: parsers/court_parser/parsing/html_parser.py
+################################################################################
+
 
 """
 Парсинг HTML результатов
 """
+import re
+from typing import List, Optional
+from selectolax.parser import HTMLParser
 
-# REMOVED IMPORT: from database.models import CaseData
-# REMOVED IMPORT: from parsing.data_extractor import DataExtractor
-# REMOVED IMPORT: from utils.logger import get_logger
+from database.models import CaseData
+from parsing.data_extractor import DataExtractor
+from utils.logger import get_logger
 
 
 class ResultsParser:
@@ -1911,7 +2918,7 @@ class ResultsParser:
         """
         Парсинг HTML с результатами
         
-        Возвращает: список найденных дел
+        Возвращает: список найденных дел с result_index
         """
         parser = HTMLParser(html)
         
@@ -1958,11 +2965,14 @@ class ResultsParser:
         return results
     
     def _parse_row(self, row) -> Optional[CaseData]:
-        """Парсинг одной строки таблицы"""
+        """Парсинг одной строки таблицы с извлечением result_index"""
         cells = row.css('td')
         
         if len(cells) < 4:
             return None
+        
+        # Извлечение result_index из onclick атрибута строки
+        result_index = self._extract_result_index(row)
         
         # Ячейка 1: Номер дела и дата
         case_number, case_date = self.extractor.extract_case_info(cells[0])
@@ -1984,20 +2994,316 @@ class ResultsParser:
             judge=judge,
             plaintiffs=plaintiffs,
             defendants=defendants,
-            events=events
+            events=events,
+            result_index=result_index
         )
+    
+    def _extract_result_index(self, row) -> Optional[int]:
+        """
+        Извлечение индекса из onclick атрибута строки
+        
+        Пример: onclick="viewSelectedLawsuit(1);" → 1
+        """
+        if not row.attributes:
+            return None
+        
+        onclick = row.attributes.get('onclick', '')
+        
+        # Паттерн: viewSelectedLawsuit(N)
+        match = re.search(r'viewSelectedLawsuit\s*\(\s*(\d+)\s*\)', onclick)
+        
+        if match:
+            return int(match.group(1))
+        
+        return None
+    
+    def find_case_index(self, cases: List[CaseData], target_case_number: str) -> Optional[int]:
+        """
+        Найти result_index для конкретного номера дела
+        
+        Args:
+            cases: список распарсенных дел
+            target_case_number: искомый номер дела
+        
+        Returns:
+            result_index или None если не найдено
+        """
+        for case in cases:
+            if case.case_number == target_case_number:
+                return case.result_index
+        
+        return None
 
 
-# ============================================================================
-# МОДУЛЬ: parsers/court_parser/search/form_handler.py
-# ============================================================================
+################################################################################
+# ФАЙЛ: parsers/court_parser/search/__init__.py
+################################################################################
+
+
+from .form_handler import FormHandler
+from .search_engine import SearchEngine
+
+
+################################################################################
+# ФАЙЛ: parsers/court_parser/search/document_handler.py
+################################################################################
+
+
+# parsers/court_parser/search/document_handler.py
+"""
+Обработка документов судебных дел
+"""
+from typing import Dict, List, Optional, Set
+from pathlib import Path
+import asyncio
+import re
+import aiohttp
+
+from parsing.document_parser import DocumentParser
+from database.models import DocumentInfo
+from utils.text_processor import TextProcessor
+from utils.logger import get_logger
+from utils.http_utils import HttpHeaders, AjaxRequestBuilder
+
+
+class DocumentHandler:
+    """Обработчик загрузки документов"""
+    
+    def __init__(self, base_url: str, storage_dir: str = "./court_documents", regions_config: Dict = None):
+        self.base_url = base_url
+        self.storage_dir = Path(storage_dir)
+        self.storage_dir.mkdir(parents=True, exist_ok=True)
+        self.parser = DocumentParser()
+        self.text_processor = TextProcessor()
+        self.regions_config = regions_config or {}
+        self.logger = get_logger('document_handler')
+    
+    def _get_case_folder(self, case_number: str) -> Path:
+        """
+        Определить папку для дела по номеру
+        
+        Вход: "7594-25-00-4/5229"
+        Выход: documents/almaty/smas/2025/7594-25-00-4_5229/
+        """
+        # Парсим номер дела
+        case_info = self.text_processor.find_region_and_court_by_case_number(
+            case_number, self.regions_config
+        )
+        
+        if case_info:
+            region_key = case_info['region_key']
+            court_key = case_info['court_key']
+            year = case_info['year']
+        else:
+            # Fallback: извлекаем год из номера дела
+            # "7594-25-00-4/5229" → год = "2025"
+            match = re.match(r'\d+-(\d{2})-', case_number)
+            if match:
+                year_short = match.group(1)
+                year = f"20{year_short}"
+            else:
+                year = "unknown"
+            
+            region_key = "unknown"
+            court_key = "unknown"
+        
+        # Безопасное имя папки для дела
+        safe_case = case_number.replace('/', '_')
+        
+        # Формируем путь: documents/region/court/year/case_number/
+        folder = self.storage_dir / region_key / court_key / year / safe_case
+        folder.mkdir(parents=True, exist_ok=True)
+        
+        return folder
+    
+    def _save_file(self, case_number: str, doc_info: DocumentInfo, content: bytes) -> str:
+        """Сохранить файл на диск с новой структурой папок"""
+        # Получаем папку для дела
+        case_dir = self._get_case_folder(case_number)
+        
+        # Формируем имя файла
+        date_prefix = doc_info.doc_date.strftime('%Y-%m-%d')
+        safe_name = self._sanitize_filename(doc_info.doc_name)
+        filename = f"{date_prefix}_{safe_name}"
+        
+        if not filename.lower().endswith('.pdf'):
+            filename += '.pdf'
+        
+        file_path = case_dir / filename
+        
+        with open(file_path, 'wb') as f:
+            f.write(content)
+        
+        # Возвращаем относительный путь от storage_dir
+        relative_path = file_path.relative_to(self.storage_dir)
+        
+        self.logger.info(f"Сохранён: {relative_path}")
+        return str(relative_path)
+    
+    def _sanitize_filename(self, filename: str) -> str:
+        """Очистка имени файла"""
+        if filename.lower().endswith('.pdf'):
+            filename = filename[:-4]
+        filename = re.sub(r'[<>:"/\\|?*]', '_', filename)
+        filename = re.sub(r'\s+', '_', filename)
+        filename = re.sub(r'_+', '_', filename).strip('_')
+        return filename[:100] if len(filename) > 100 else filename
+    
+    async def open_case_card(self, session: aiohttp.ClientSession,
+                             results_html: str, case_index: int = 0) -> bool:
+        """Открыть карточку дела из списка результатов"""
+        form_data = self.parser.extract_case_card_form(results_html)
+        if not form_data:
+            return False
+        
+        url = f"{self.base_url}/lawsuit/lawsuitList.xhtml"
+        
+        data = AjaxRequestBuilder.build(
+            form_id=form_data['form_id'],
+            ajax_id=form_data['ajax_id'],
+            viewstate=form_data['viewstate'],
+            extra_params={'param1': str(case_index)}
+        )
+        
+        headers = HttpHeaders.get_ajax()
+        headers['Referer'] = url
+        
+        async with session.post(url, data=data, headers=headers) as response:
+            return response.status == 200
+    
+    async def get_document_list(self, session: aiohttp.ClientSession):
+        """Получить список документов"""
+        url = f"{self.base_url}/lawsuit/documentList.xhtml"
+        headers = HttpHeaders.get_base()
+        headers['Referer'] = f"{self.base_url}/lawsuit/lawsuitList.xhtml"
+        
+        async with session.get(url, headers=headers) as response:
+            if response.status != 200:
+                return [], None
+            html = await response.text()
+            return self.parser.extract_document_list(html)
+    
+    async def open_document(self, session: aiohttp.ClientSession,
+                            form_data: Dict[str, str], doc_index: int) -> bool:
+        """Открыть документ по индексу"""
+        url = f"{self.base_url}/lawsuit/documentList.xhtml"
+        
+        data = AjaxRequestBuilder.build(
+            form_id=form_data['form_id'],
+            ajax_id=form_data['ajax_id'],
+            viewstate=form_data['viewstate'],
+            extra_params={'param1': str(doc_index)}
+        )
+        
+        headers = HttpHeaders.get_ajax()
+        async with session.post(url, data=data, headers=headers) as response:
+            return response.status == 200
+    
+    async def get_document_page(self, session: aiohttp.ClientSession) -> Optional[str]:
+        """Получить страницу с PDF viewer"""
+        url = f"{self.base_url}/lawsuit/document.xhtml"
+        headers = HttpHeaders.get_base()
+        headers['Referer'] = f"{self.base_url}/lawsuit/documentList.xhtml"
+        
+        async with session.get(url, headers=headers) as response:
+            if response.status != 200:
+                return None
+            return await response.text()
+    
+    async def download_pdf(self, session: aiohttp.ClientSession, pdf_url: str,
+                           case_number: str, doc_info: DocumentInfo) -> Optional[str]:
+        """Скачать PDF файл"""
+        full_url = f"{self.base_url}{pdf_url}" if pdf_url.startswith('/') else pdf_url
+        headers = HttpHeaders.get_base()
+        headers['Referer'] = f"{self.base_url}/lawsuit/document.xhtml"
+        
+        async with session.get(full_url, headers=headers) as response:
+            if response.status != 200:
+                return None
+            content = await response.read()
+            return self._save_file(case_number, doc_info, content)
+    
+    async def fetch_all_documents(
+        self, 
+        session: aiohttp.ClientSession,
+        results_html: str, 
+        case_number: str,
+        case_index: int = 0,
+        existing_keys: Optional[Set[str]] = None,
+        delay: float = 1.0
+    ) -> List[Dict]:
+        """Скачать все новые документы для дела"""
+        existing_keys = existing_keys or set()
+        downloaded = []
+        
+        if not await self.open_case_card(session, results_html, case_index):
+            return downloaded
+        
+        await asyncio.sleep(delay)
+        
+        documents, form_data = await self.get_document_list(session)
+        if not documents or not form_data:
+            return downloaded
+        
+        new_docs = [d for d in documents if d.unique_key not in existing_keys]
+        if not new_docs:
+            self.logger.info(f"Новых документов нет для {case_number}")
+            return downloaded
+        
+        self.logger.info(f"Новых документов: {len(new_docs)}")
+        
+        for doc in new_docs:
+            try:
+                if not await self.open_document(session, form_data, doc.index):
+                    continue
+                await asyncio.sleep(delay)
+                
+                doc_html = await self.get_document_page(session)
+                if not doc_html:
+                    continue
+                
+                pdf_url = self.parser.extract_pdf_url(doc_html)
+                if not pdf_url:
+                    continue
+                
+                file_path = await self.download_pdf(session, pdf_url, case_number, doc)
+                if file_path:
+                    downloaded.append({
+                        'doc_date': doc.doc_date,
+                        'doc_name': doc.doc_name,
+                        'file_path': file_path
+                    })
+                
+                await asyncio.sleep(delay)
+            except Exception as e:
+                self.logger.error(f"Ошибка скачивания {doc.doc_name}: {e}")
+        
+        return downloaded
+    
+    def _get_headers(self) -> Dict[str, str]:
+        return HttpHeaders.get_base()
+
+    def _get_ajax_headers(self) -> Dict[str, str]:
+        return HttpHeaders.get_ajax()
+
+
+################################################################################
+# ФАЙЛ: parsers/court_parser/search/form_handler.py
+################################################################################
+
 
 """
 Работа с поисковой формой
 """
-# REMOVED IMPORT: from utils.retry import NonRetriableError
+from typing import Dict, Optional
+import asyncio
+import re
+import aiohttp
+from selectolax.parser import HTMLParser
 
-# REMOVED IMPORT: from utils.logger import get_logger
+from utils.logger import get_logger
+from utils.retry import NonRetriableError
+from utils.http_utils import HttpHeaders, ViewStateExtractor
 
 
 class FormHandler:
@@ -2010,6 +3316,7 @@ class FormHandler:
         # Кеш ID формы (извлекается один раз за сессию)
         self._cached_form_ids: Optional[Dict[str, str]] = None
         self._cache_initialized: bool = False
+        self._cache_lock: asyncio.Lock = asyncio.Lock()
     
     def reset_cache(self):
         """
@@ -2053,14 +3360,15 @@ class FormHandler:
                 # ViewState — всегда извлекаем заново
                 viewstate = self._extract_viewstate(html)
                 
-                # Form IDs — извлекаем только один раз
-                if not self._cache_initialized:
-                    self._cached_form_ids = self._extract_form_ids(html)
-                    self._cache_initialized = True
-                    
-                    self.logger.info("📋 ID формы извлечены и закешированы:")
-                    for key, value in self._cached_form_ids.items():
-                        self.logger.info(f"   {key}: {value}")
+                # Form IDs — извлекаем только один раз (с блокировкой)
+                async with self._cache_lock:
+                    if not self._cache_initialized:
+                        self._cached_form_ids = self._extract_form_ids(html)
+                        self._cache_initialized = True
+                        
+                        self.logger.info("📋 ID формы извлечены и закешированы:")
+                        for key, value in self._cached_form_ids.items():
+                            self.logger.info(f"   {key}: {value}")
                 
                 return viewstate, self._cached_form_ids
         
@@ -2070,6 +3378,20 @@ class FormHandler:
         except Exception as e:
             self.logger.error(f"Ошибка подготовки формы: {e}")
             raise aiohttp.ClientError(f"Ошибка подготовки формы: {e}")
+
+    def reset_cache(self):
+        """
+        Сброс кеша ID формы
+        
+        Вызывать при:
+        - Переавторизации
+        - Ошибках, связанных с невалидными ID
+        """
+        # Примечание: этот метод синхронный, но безопасен
+        # т.к. просто сбрасывает флаги (атомарные операции в Python)
+        self._cached_form_ids = None
+        self._cache_initialized = False
+        self.logger.debug("Кеш ID формы сброшен")
     
     async def select_region(self, session: aiohttp.ClientSession, 
                            viewstate: str, region_id: str, 
@@ -2122,12 +3444,7 @@ class FormHandler:
     
     def _extract_viewstate(self, html: str) -> Optional[str]:
         """Извлечение ViewState"""
-        parser = HTMLParser(html)
-        viewstate_input = parser.css_first('input[name="javax.faces.ViewState"]')
-        
-        if viewstate_input and viewstate_input.attributes:
-            return viewstate_input.attributes.get('value')
-        return None
+        return ViewStateExtractor.extract(html)
     
     def _extract_form_ids(self, html: str) -> Dict[str, str]:
         """Извлечение ID элементов формы"""
@@ -2167,6 +3484,7 @@ class FormHandler:
         
         Ищет паттерн: goNext = function(...) { RichFaces.ajax("ID", ...)
         """
+        import re
         
         pattern = r'goNext\s*=\s*function\s*\([^)]*\)\s*\{\s*RichFaces\.ajax\s*\(\s*["\']([^"\']+)["\']'
         match = re.search(pattern, html)
@@ -2187,32 +3505,28 @@ class FormHandler:
     
     def _get_headers(self) -> Dict[str, str]:
         """Базовые заголовки"""
-        return {
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
-            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
-            'Accept-Language': 'ru,en;q=0.9'
-        }
-    
+        return HttpHeaders.get_base()
+
     def _get_ajax_headers(self) -> Dict[str, str]:
         """AJAX заголовки"""
-        headers = self._get_headers()
-        headers.update({
-            'Accept': '*/*',
-            'Content-Type': 'application/x-www-form-urlencoded;charset=UTF-8',
-            'Faces-Request': 'partial/ajax'
-        })
-        return headers
+        return HttpHeaders.get_ajax()
 
 
-# ============================================================================
-# МОДУЛЬ: parsers/court_parser/search/search_engine.py
-# ============================================================================
+################################################################################
+# ФАЙЛ: parsers/court_parser/search/search_engine.py
+################################################################################
+
 
 """
 Поисковый движок
 """
-# REMOVED IMPORT: from utils.logger import get_logger
-# REMOVED IMPORT: from utils.retry import NonRetriableError
+from typing import Dict
+import asyncio
+import aiohttp
+
+from utils.logger import get_logger
+from utils.retry import NonRetriableError
+from utils.http_utils import HttpHeaders
 
 
 class SearchEngine:
@@ -2347,43 +3661,46 @@ class SearchEngine:
     
     def _get_headers(self) -> Dict[str, str]:
         """Базовые заголовки"""
-        return {
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
-            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
-            'Accept-Language': 'ru,en;q=0.9'
-        }
-    
+        return HttpHeaders.get_base()
+
     def _get_ajax_headers(self) -> Dict[str, str]:
         """AJAX заголовки"""
-        headers = self._get_headers()
-        headers.update({
-            'Accept': '*/*',
-            'Content-Type': 'application/x-www-form-urlencoded;charset=UTF-8',
-            'Faces-Request': 'partial/ajax'
-        })
-        return headers
+        return HttpHeaders.get_ajax()
 
 
-# ============================================================================
-# МОДУЛЬ: parsers/court_parser/core/parser.py
-# ============================================================================
+################################################################################
+# ФАЙЛ: parsers/court_parser/core/__init__.py
+################################################################################
+
+
+from .parser import CourtParser
+from .session import SessionManager
+
+
+################################################################################
+# ФАЙЛ: parsers/court_parser/core/parser.py
+################################################################################
+
 
 """
 Главный класс парсера с retry и восстановлением
 """
+from typing import Dict, Any, Optional, List, Tuple
+import asyncio
+import aiohttp
 
-
-# REMOVED IMPORT: from config.settings import Settings
-# REMOVED IMPORT: from core.session import SessionManager
-# REMOVED IMPORT: from auth.authenticator import Authenticator
-# REMOVED IMPORT: from search.form_handler import FormHandler
-# REMOVED IMPORT: from search.search_engine import SearchEngine
-# REMOVED IMPORT: from parsing.html_parser import ResultsParser
-# REMOVED IMPORT: from database.db_manager import DatabaseManager
-# REMOVED IMPORT: from database.models import CaseData, SearchResult
-# REMOVED IMPORT: from utils.text_processor import TextProcessor
-# REMOVED IMPORT: from utils.logger import get_logger
-# REMOVED IMPORT: from utils.retry import RetryStrategy, RetryConfig, NonRetriableError
+from config.settings import Settings
+from core.session import SessionManager
+from auth.authenticator import Authenticator
+from search.form_handler import FormHandler
+from search.search_engine import SearchEngine
+from parsing.html_parser import ResultsParser
+from database.db_manager import DatabaseManager
+from database.models import CaseData, SearchResult
+from utils.text_processor import TextProcessor
+from utils.logger import get_logger
+from utils.retry import RetryStrategy, RetryConfig, NonRetriableError
+from utils.constants import CaseStatus
 
 class CourtParser:
     """Главный класс парсера"""
@@ -2427,6 +3744,55 @@ class CourtParser:
         
         self.logger = get_logger('court_parser')
         self.logger.info("🚀 Парсер инициализирован")
+
+    async def search_case_by_number(self, case_number: str) -> Tuple[Optional[str], List[CaseData]]:
+        """
+        Поиск дела по номеру
+        
+        Args:
+            case_number: полный номер дела (например '7599-25-00-4а/215')
+        
+        Returns:
+            (results_html, parsed_cases) — HTML для документов и список дел
+            (None, []) — если не удалось определить регион
+        """
+        # Определяем регион и суд по номеру дела
+        case_info = self.text_processor.find_region_and_court_by_case_number(
+            case_number, self.settings.regions
+        )
+        
+        if not case_info:
+            self.logger.warning(f"⚠️ Не удалось определить регион: {case_number}")
+            return None, []
+        
+        region_config = self.settings.get_region(case_info['region_key'])
+        court_config = self.settings.get_court(case_info['region_key'], case_info['court_key'])
+        
+        # Поиск через форму
+        async with self.form_lock:
+            session = await self.session_manager.get_session()
+            
+            viewstate, form_ids = await self.form_handler.prepare_search_form(session)
+            
+            await self.form_handler.select_region(
+                session, viewstate, region_config['id'], form_ids
+            )
+            
+            await asyncio.sleep(1)
+            
+            results_html = await self.search_engine.search_case(
+                session, viewstate,
+                region_config['id'],
+                court_config['id'],
+                case_info['year'],
+                int(case_info['sequence']),
+                form_ids
+            )
+        
+        # Парсинг
+        cases = self.results_parser.parse(results_html)
+        
+        return results_html, cases
     
     async def initialize(self):
         """Инициализация"""
@@ -2545,29 +3911,16 @@ class CourtParser:
         
         self.logger.info(f"🔍 Ищу дело: {target_case_number}")
         
-        # Работа с формой
-        async with self.form_lock:
-            session = await self.session_manager.get_session()
-            
-            viewstate, form_ids = await self.form_handler.prepare_search_form(session)
-            
-            await self.form_handler.select_region(
-                session, viewstate, region_config['id'], form_ids
-            )
-            
-            await asyncio.sleep(1)
-            
-            results_html = await self.search_engine.search_case(
-                session, viewstate, 
-                region_config['id'], 
-                court_config['id'],
-                year, 
-                sequence_number,
-                form_ids
-            )
+        # Используем общий метод поиска
+        results_html, cases = await self.search_case_by_number(target_case_number)
         
-        # Парсинг результатов
-        cases = self.results_parser.parse(results_html)
+        if results_html is None:
+            return {
+                'success': False,
+                'saved': False,
+                'case_number': target_case_number,
+                'error': CaseStatus.REGION_NOT_FOUND
+            }
         
         if not cases:
             self.logger.info(f"❌ Ничего не найдено: {target_case_number}")
@@ -2575,7 +3928,7 @@ class CourtParser:
                 'success': False,
                 'saved': False,
                 'case_number': target_case_number,
-                'error': 'no_results'
+                'error': CaseStatus.NO_RESULTS
             }
         
         # Выбор дела для сохранения
@@ -2589,13 +3942,13 @@ class CourtParser:
                 'success': False,
                 'saved': False,
                 'case_number': target_case_number,
-                'error': 'target_not_found'
+                'error': CaseStatus.TARGET_NOT_FOUND
             }
         
         # Сохранение
         save_result = await self.db_manager.save_case(case_to_save)
         
-        if save_result['status'] in ['saved', 'updated']:
+        if save_result['status'] in [CaseStatus.SAVED, CaseStatus.UPDATED]:
             judge_info = "✅ судья" if case_to_save.judge else "⚠️ без судьи"
             parties = len(case_to_save.plaintiffs) + len(case_to_save.defendants)
             events = len(case_to_save.events)
@@ -2608,60 +3961,38 @@ class CourtParser:
             return {
                 'success': True,
                 'saved': True,
-                'case_number': case_to_save.case_number
+                'case_number': case_to_save.case_number,
+                'results_html': results_html  # Добавляем для документов
             }
         
         return {
             'success': False,
             'saved': False,
             'case_number': target_case_number,
-            'error': 'save_failed'
+            'error': CaseStatus.SAVE_FAILED
         }
     
-    def _select_case_to_save( self, 
+    def _select_case_to_save(
+        self, 
         cases: List[CaseData], 
         court_key: str, 
         target_case_number: str
     ) -> Optional[CaseData]:
         """
-        Выбор дела для сохранения в зависимости от типа суда
-        
-        Args:
-            cases: список найденных дел
-            court_key: тип суда ('smas', 'appellate')
-            target_case_number: целевой номер дела
-        
-        Returns:
-            CaseData или None
+        Выбор дела для сохранения по точному совпадению номера
         """
-        if court_key == 'smas':
-            # СМЭС: сервер возвращает одно дело — берём первое
-            if cases:
-                return cases[0]
-            return None
+        result = next(
+            (case for case in cases if case.case_number == target_case_number), 
+            None
+        )
         
-        elif court_key == 'appellate':
-            # Апелляция: ищем целевое дело по точному номеру
-            for case in cases:
-                if case.case_number == target_case_number:
-                    return case
-            
-            # Если не нашли точное совпадение — логируем что вернулось
+        if result is None and cases:
             self.logger.debug(
-                f"Апелляция: получено {len(cases)} дел, "
-                f"целевое {target_case_number} не найдено"
+                f"Получено {len(cases)} дел, целевое {target_case_number} не найдено: "
+                f"{[c.case_number for c in cases]}"
             )
-            for case in cases:
-                self.logger.debug(f"  - {case.case_number}")
-            
-            return None
         
-        else:
-            # Другие типы судов: по умолчанию ищем целевое
-            for case in cases:
-                if case.case_number == target_case_number:
-                    return case
-            return cases[0] if cases else None
+        return result
     
     async def _handle_session_recovery(self, error: Exception) -> bool:
         """Восстановление сессии"""
@@ -2683,8 +4014,7 @@ class CourtParser:
             return True
         except Exception as e:
             self.logger.error(f"❌ Переавторизация не удалась: {e}")
-            return False
-    
+            return False 
     
     async def __aenter__(self):
         await self.initialize()
@@ -2695,17 +4025,21 @@ class CourtParser:
         return False
 
 
-# ============================================================================
-# МОДУЛЬ: parsers/court_parser/core/session.py
-# ============================================================================
+################################################################################
+# ФАЙЛ: parsers/court_parser/core/session.py
+################################################################################
+
 
 """
 Управление HTTP сессиями с retry
 """
+from typing import Dict, Any, Optional
+import ssl
+import asyncio
+import aiohttp
 
-
-# REMOVED IMPORT: from utils.logger import get_logger
-# REMOVED IMPORT: from utils.retry import RetryStrategy, RetryConfig, CircuitBreaker, NonRetriableError
+from utils.logger import get_logger
+from utils.retry import RetryStrategy, RetryConfig, CircuitBreaker, NonRetriableError
 
 
 class SessionManager:
@@ -2750,7 +4084,7 @@ class SessionManager:
             return await self.create_session()
         return self.session
     
-    async def request(self, method: str, url: str, **kwargs) -> aiohttp.ClientResponse:
+    async def request(self, method: str, url: str, **kwargs) -> Dict[str, Any]:
         """
         HTTP запрос с автоматическим retry
         
@@ -2760,7 +4094,7 @@ class SessionManager:
             **kwargs: параметры для aiohttp
         
         Returns:
-            aiohttp.ClientResponse
+            {'status': int, 'text': str, 'headers': dict}
         
         Raises:
             NonRetriableError: если ошибка не подлежит retry (400, 401, 404, etc)
@@ -2770,29 +4104,42 @@ class SessionManager:
         # Получаем retry config
         http_retry_config = self.retry_config.get('http_request', {})
         
-        if not http_retry_config:
-            # Нет конфига - выполняем без retry
-            return await session.request(method, url, **kwargs)
-        
-        # Retry стратегия
-        retry_cfg = RetryConfig(http_retry_config)
-        strategy = RetryStrategy(retry_cfg, self.circuit_breaker)
-        
-        async def _do_request():
+        async def _do_request() -> Dict[str, Any]:
             async with session.request(method, url, **kwargs) as response:
+                # Читаем данные ДО выхода из контекстного менеджера
+                text = await response.text()
+                
                 # Проверка на non-retriable статусы
                 if response.status in [400, 401, 403, 404]:
                     raise NonRetriableError(f"HTTP {response.status}")
                 
                 # Проверка на retriable статусы
-                if strategy.is_retriable_status(response.status):
+                if http_retry_config and response.status in http_retry_config.get('retriable_status_codes', [500, 502, 503, 504]):
                     raise aiohttp.ClientError(f"HTTP {response.status}")
                 
-                # Успех
-                return response
+                return {
+                    'status': response.status,
+                    'text': text,
+                    'headers': dict(response.headers)
+                }
+        
+        if not http_retry_config:
+            return await _do_request()
+        
+        # Retry стратегия
+        retry_cfg = RetryConfig(http_retry_config)
+        strategy = RetryStrategy(retry_cfg, self.circuit_breaker)
         
         error_context = f"{method} {url}"
         return await strategy.execute_with_retry(_do_request, error_context=error_context)
+
+    async def get(self, url: str, **kwargs) -> Dict[str, Any]:
+        """GET запрос с retry"""
+        return await self.request('GET', url, **kwargs)
+
+    async def post(self, url: str, **kwargs) -> Dict[str, Any]:
+        """POST запрос с retry"""
+        return await self.request('POST', url, **kwargs)
     
     async def get(self, url: str, **kwargs) -> aiohttp.ClientResponse:
         """GET запрос с retry"""
@@ -2816,38 +4163,45 @@ class SessionManager:
         await self.close()
 
 
-# ============================================================================
-# МОДУЛЬ: parsers/court_parser/__init__.py
-# ============================================================================
+################################################################################
+# ФАЙЛ: parsers/court_parser/__init__.py
+################################################################################
+
 
 """
 Court Parser - Парсер судебных дел Казахстана
 """
 __version__ = "2.0.0"
 __author__ = "Your Name"
-# REMOVED IMPORT: from core.parser import CourtParser
+
+from core.parser import CourtParser
+
 __all__ = ['CourtParser']
 
 
-# ============================================================================
-# МОДУЛЬ: parsers/court_parser/main.py
-# ============================================================================
+################################################################################
+# ФАЙЛ: parsers/court_parser/main.py
+################################################################################
+
 
 """
 Точка входа парсера
 """
+import sys
+import asyncio
+import traceback
+from typing import List, Optional
 
-# REMOVED IMPORT: from core.parser import CourtParser
-# REMOVED IMPORT: from config.settings import Settings
-# REMOVED IMPORT: from utils.logger import setup_logger
-# REMOVED IMPORT: from utils.text_processor import TextProcessor
+from core.parser import CourtParser
+from config.settings import Settings
+from search.document_handler import DocumentHandler
+from utils.logger import setup_logger
 
 
 async def parse_all_regions_from_config() -> dict:
     """Парсинг всех регионов согласно настройкам из config.json"""
     logger = setup_logger('main', level='INFO')
     
-    # Загрузка настроек
     settings = Settings()
     ps = settings.parsing_settings
     
@@ -2859,11 +4213,9 @@ async def parse_all_regions_from_config() -> dict:
     delay_between_requests = ps.get('delay_between_requests', 2)
     max_parallel_regions = ps.get('max_parallel_regions', 1)
     
-    # Настройки retry на уровне региона
     region_retry_max_attempts = ps.get('region_retry_max_attempts', 3)
     region_retry_delay = ps.get('region_retry_delay_seconds', 5)
     
-    # ЛИМИТЫ ДЛЯ ТЕСТИРОВАНИЯ
     limit_regions = settings.get_limit_regions()
     limit_cases_per_region = settings.get_limit_cases_per_region()
     
@@ -2886,10 +4238,8 @@ async def parse_all_regions_from_config() -> dict:
     
     logger.info("=" * 70)
     
-    # Получение списка регионов
     all_regions = settings.get_target_regions()
     
-    # Применение лимита регионов
     if limit_regions:
         regions_to_process = all_regions[:limit_regions]
         logger.info(f"Обрабатываю {len(regions_to_process)} из {len(all_regions)} регионов")
@@ -2897,7 +4247,6 @@ async def parse_all_regions_from_config() -> dict:
         regions_to_process = all_regions
         logger.info(f"Обрабатываю все {len(regions_to_process)} регионов")
     
-    # Общая статистика
     total_stats = {
         'regions_processed': 0,
         'regions_failed': 0,
@@ -2906,14 +4255,11 @@ async def parse_all_regions_from_config() -> dict:
     }
     stats_lock = asyncio.Lock()
     
-    # Семафор для контроля параллельности
     semaphore = asyncio.Semaphore(max_parallel_regions)
     
-    # Создаём парсер один раз
     async with CourtParser() as parser:
         
         async def process_region_with_retry(region_key: str):
-            """Обработка региона с retry"""
             async with semaphore:
                 region_config = settings.get_region(region_key)
                 
@@ -2926,7 +4272,6 @@ async def parse_all_regions_from_config() -> dict:
                             logger.info(f"Регион: {region_config['name']}")
                         logger.info(f"{'='*70}")
                         
-                        # Парсинг всех судов региона
                         region_stats = await process_region_all_courts(
                             parser=parser,
                             settings=settings,
@@ -2940,7 +4285,6 @@ async def parse_all_regions_from_config() -> dict:
                             limit_cases=limit_cases_per_region
                         )
                         
-                        # Успех → обновляем статистику
                         async with stats_lock:
                             total_stats['regions_processed'] += 1
                             total_stats['total_queries'] += region_stats['total_queries']
@@ -2961,11 +4305,9 @@ async def parse_all_regions_from_config() -> dict:
                                 total_stats['regions_failed'] += 1
                             return None
         
-        # Запускаем все регионы
         tasks = [process_region_with_retry(r) for r in regions_to_process]
         await asyncio.gather(*tasks, return_exceptions=True)
     
-    # Итоговая статистика
     logger.info("\n" + "=" * 70)
     logger.info("ОБЩАЯ СТАТИСТИКА:")
     logger.info(f"  Обработано регионов: {total_stats['regions_processed']}")
@@ -3034,7 +4376,6 @@ async def process_region_all_courts(
             logger.error(traceback.format_exc())
             continue
     
-    # Итоги региона
     logger.info(f"\n{'-'*70}")
     logger.info(f"ИТОГИ РЕГИОНА {region_config['name']}:")
     logger.info(f"  Судов: {region_stats['courts_processed']}/{len(court_types)}")
@@ -3059,192 +4400,338 @@ async def parse_court(
 ) -> dict:
     """Парсинг одного суда"""
     logger = setup_logger('main', level='INFO')
-    court_config = settings.get_court(region_key, court_key)
     
     stats = {
-        'queries_made': 0,
-        'cases_saved': 0,
+        'missing_found': 0,
+        'missing_filled': 0,
+        'missing_not_found': 0,
+        'new_queries': 0,
+        'new_saved': 0,
         'consecutive_empty': 0
     }
     
-    # Определяем стартовый номер
+    existing = await parser.db_manager.get_existing_case_numbers(
+        region_key, court_key, year, settings
+    )
+    
     last_in_db = await parser.db_manager.get_last_sequence_number(
         region_key, court_key, year, settings
     )
     
+    logger.info(f"📊 Анализ БД:")
+    logger.info(f"   Существующих номеров: {len(existing)}")
+    logger.info(f"   Последний номер: {last_in_db}")
+    
+    # ШАГ 1: Заполнение пропусков
     if last_in_db > 0:
-        actual_start = last_in_db + 1
-        logger.info(f"📥 Последний в БД: {last_in_db}")
-        logger.info(f"▶️  Продолжаю с: {actual_start}")
-    else:
-        actual_start = start_from
-        logger.info(f"📥 БД пуста, старт с: {actual_start}")
+        full_range = set(range(start_from, last_in_db + 1))
+        missing = sorted(full_range - existing)
+        stats['missing_found'] = len(missing)
+        
+        if missing:
+            logger.info(f"\n{'─' * 70}")
+            logger.info(f"ШАГ 1: Заполнение пропусков")
+            logger.info(f"{'─' * 70}")
+            logger.info(f"📋 Пропущено номеров: {len(missing)}")
+            
+            for i, seq_num in enumerate(missing, 1):
+                if limit_cases:
+                    total_queries = stats['missing_filled'] + stats['missing_not_found'] + stats['new_queries']
+                    if total_queries >= limit_cases:
+                        logger.info(f"🔒 Лимит запросов ({limit_cases})")
+                        break
+                
+                result = await parser.search_and_save(
+                    region_key=region_key,
+                    court_key=court_key,
+                    sequence_number=seq_num,
+                    year=year
+                )
+                
+                if result['success'] and result.get('saved'):
+                    stats['missing_filled'] += 1
+                else:
+                    stats['missing_not_found'] += 1
+                
+                if i % 10 == 0 or i == len(missing):
+                    logger.info(
+                        f"   [{i}/{len(missing)}] "
+                        f"Заполнено: {stats['missing_filled']}, "
+                        f"Не найдено: {stats['missing_not_found']}"
+                    )
+                
+                await asyncio.sleep(delay_between_requests)
     
-    if actual_start > max_number:
-        logger.info(f"✅ Все номера до {max_number} уже спарсены")
-        return stats
+    # ШАГ 2: Сбор новых дел
+    actual_start = last_in_db + 1 if last_in_db > 0 else start_from
     
-    current_number = actual_start
-    
-    while current_number <= max_number:
-        # Проверка лимитов
-        if limit_cases and stats['queries_made'] >= limit_cases:
-            logger.info(f"🔒 Лимит запросов ({limit_cases})")
-            break
+    if actual_start <= max_number:
+        logger.info(f"\n{'─' * 70}")
+        logger.info(f"ШАГ 2: Сбор новых дел")
+        logger.info(f"{'─' * 70}")
+        logger.info(f"▶️  Старт с номера: {actual_start}")
         
-        if stats['consecutive_empty'] >= max_consecutive_empty:
-            logger.info(f"🛑 Лимит пустых ({max_consecutive_empty}), стоп")
-            break
+        current_number = actual_start
         
-        # Поиск
-        result = await parser.search_and_save(
-            region_key=region_key,
-            court_key=court_key,
-            sequence_number=current_number,
-            year=year
-        )
-        
-        stats['queries_made'] += 1
-        
-        # Результат
-        if result['success'] and result.get('saved'):
-            stats['cases_saved'] += 1
-            stats['consecutive_empty'] = 0
-        elif result.get('error') == 'no_results':
-            stats['consecutive_empty'] += 1
-        
-        # Прогресс
-        if stats['queries_made'] % 10 == 0:
-            logger.info(
-                f"📊 #{current_number} | "
-                f"Запросов: {stats['queries_made']} | "
-                f"Сохранено: {stats['cases_saved']} | "
-                f"Пустых: {stats['consecutive_empty']}"
+        while current_number <= max_number:
+            if limit_cases:
+                total_queries = (stats['missing_filled'] + stats['missing_not_found'] + 
+                               stats['new_queries'])
+                if total_queries >= limit_cases:
+                    logger.info(f"🔒 Лимит запросов ({limit_cases})")
+                    break
+            
+            if stats['consecutive_empty'] >= max_consecutive_empty:
+                logger.info(f"🛑 Лимит пустых подряд ({max_consecutive_empty}), стоп")
+                break
+            
+            result = await parser.search_and_save(
+                region_key=region_key,
+                court_key=court_key,
+                sequence_number=current_number,
+                year=year
             )
-        
-        current_number += 1
-        await asyncio.sleep(delay_between_requests)
+            
+            stats['new_queries'] += 1
+            
+            if result['success'] and result.get('saved'):
+                stats['new_saved'] += 1
+                stats['consecutive_empty'] = 0
+            elif result.get('error') == 'no_results':
+                stats['consecutive_empty'] += 1
+            
+            if stats['new_queries'] % 10 == 0:
+                logger.info(
+                    f"   #{current_number} | "
+                    f"Запросов: {stats['new_queries']} | "
+                    f"Сохранено: {stats['new_saved']} | "
+                    f"Пустых подряд: {stats['consecutive_empty']}"
+                )
+            
+            current_number += 1
+            await asyncio.sleep(delay_between_requests)
     
-    # Итоги
-    logger.info(f"\n{'-'*70}")
-    logger.info(f"ИТОГИ {court_config['name']}:")
-    logger.info(f"  Диапазон: {actual_start}-{current_number - 1}")
-    logger.info(f"  Запросов: {stats['queries_made']}")
-    logger.info(f"  Сохранено: {stats['cases_saved']}")
-    logger.info(f"{'-'*70}")
+    total_saved = stats['missing_filled'] + stats['new_saved']
+    total_queries = (stats['missing_filled'] + stats['missing_not_found'] + 
+                    stats['new_queries'])
     
-    return stats
+    return {
+        'queries_made': total_queries,
+        'cases_saved': total_saved,
+        'consecutive_empty': stats['consecutive_empty'],
+        'missing_filled': stats['missing_filled'],
+        'new_saved': stats['new_saved']
+    }
 
 
 async def update_cases_history():
-    """Режим обновления истории дел"""
+    """
+    Режим обновления: события + документы
+    """
     logger = setup_logger('main', level='INFO')
     
     settings = Settings()
-    update_config = settings.update_settings
+    update_config = settings.config.get('update_settings', {})
+    docs_config = settings.config.get('documents_settings', {})
     
-    if not update_config.get('enabled'):
-        logger.warning("⚠️ Update Mode отключен")
+    if not update_config.get('enabled', True):
+        logger.warning("⚠️ Update Mode отключен в настройках")
         return
     
+    interval_days = update_config.get('update_interval_days', 2)
+    filters = update_config.get('filters', {})
+    
+    storage_dir = docs_config.get('storage_dir', './documents')
+    download_delay = docs_config.get('download_delay', 2.0)
+    
     logger.info("\n" + "=" * 70)
-    logger.info("РЕЖИМ ОБНОВЛЕНИЯ")
+    logger.info("РЕЖИМ ОБНОВЛЕНИЯ: СОБЫТИЯ + ДОКУМЕНТЫ")
+    logger.info("=" * 70)
+    logger.info(f"Интервал: {interval_days} дней")
+    if filters.get('defendant_keywords'):
+        logger.info(f"Фильтр по ответчику: {filters['defendant_keywords']}")
+    if filters.get('exclude_event_types'):
+        logger.info(f"Исключить события: {filters['exclude_event_types']}")
     logger.info("=" * 70)
     
-    stats = {'checked': 0, 'updated': 0, 'errors': 0}
+    stats = {
+        'cases_updated': 0,
+        'events_added': 0,
+        'documents_downloaded': 0,
+        'errors': 0,
+        'skipped': 0
+    }
     
     async with CourtParser() as parser:
-        cases_to_update = await parser.db_manager.get_cases_for_update({
-            'defendant_keywords': update_config['filters']['defendant_keywords'],
-            'exclude_event_types': update_config['filters']['exclude_event_types'],
-            'update_interval_days': update_config['update_interval_days']
+        doc_handler = DocumentHandler(
+            base_url=settings.base_url,
+            storage_dir=storage_dir,
+            regions_config=settings.regions
+        )
+        
+        # Этап 1: Дела СМАС без судьи
+        logger.info("\n📋 Этап 1: Дела СМАС без судьи...")
+        smas_cases = await parser.db_manager.get_smas_cases_without_judge(settings, interval_days)
+        logger.info(f"   Найдено: {len(smas_cases)}")
+        
+        for case_number in smas_cases:
+            result = await _process_single_case(
+                parser, doc_handler, case_number, download_delay, logger
+            )
+            _update_stats(stats, result)
+        
+        # Этап 2: Дела по ключевым словам
+        logger.info(f"\n📋 Этап 2: Дела по ключевым словам...")
+        keyword_cases = await parser.db_manager.get_cases_for_update({
+            'defendant_keywords': filters.get('defendant_keywords', []),
+            'exclude_event_types': filters.get('exclude_event_types', []),
+            'update_interval_days': interval_days
         })
+        logger.info(f"   Найдено: {len(keyword_cases)}")
         
-        if not cases_to_update:
-            logger.info("✅ Нет дел для обновления")
-            return
-        
-        logger.info(f"📋 Дел для обновления: {len(cases_to_update)}")
-        
-        text_processor = TextProcessor()
-        
-        for i, case_number in enumerate(cases_to_update, 1):
-            try:
-                case_info = text_processor.find_region_and_court_by_case_number(
-                    case_number, settings.regions
-                )
-                
-                if not case_info:
-                    stats['errors'] += 1
-                    continue
-                
-                result = await parser.search_and_save(
-                    region_key=case_info['region_key'],
-                    court_key=case_info['court_key'],
-                    sequence_number=int(case_info['sequence']),
-                    year=case_info['year']
-                )
-                
-                stats['checked'] += 1
-                
-                if result['success']:
-                    await parser.db_manager.mark_case_as_updated(case_number)
-                    if result.get('saved'):
-                        stats['updated'] += 1
-                else:
-                    stats['errors'] += 1
-                
-                await asyncio.sleep(2)
-                
-            except Exception as e:
-                stats['errors'] += 1
-                logger.error(f"❌ {case_number}: {e}")
+        for case_number in keyword_cases:
+            result = await _process_single_case(
+                parser, doc_handler, case_number, download_delay, logger
+            )
+            _update_stats(stats, result)
     
-    logger.info(f"\nИТОГИ: проверено {stats['checked']}, обновлено {stats['updated']}, ошибок {stats['errors']}")
+    # Итоги
+    logger.info("\n" + "=" * 70)
+    logger.info("ИТОГИ ОБНОВЛЕНИЯ:")
+    logger.info(f"  Обновлено дел: {stats['cases_updated']}")
+    logger.info(f"  Добавлено событий: {stats['events_added']}")
+    logger.info(f"  Скачано документов: {stats['documents_downloaded']}")
+    logger.info(f"  Пропущено: {stats['skipped']}")
+    logger.info(f"  Ошибок: {stats['errors']}")
+    logger.info("=" * 70)
 
 
-async def main():
+async def _process_single_case(parser, doc_handler, case_number: str, delay: float, logger) -> dict:
+    """Обработка одного дела: обновление событий + документы"""
+    result = {'updated': False, 'events_added': 0, 'documents': 0, 'error': False}
+    
+    try:
+        logger.info(f"   🔄 {case_number}")
+        
+        # 1. Поиск на сайте
+        results_html, cases = await parser.search_case_by_number(case_number)
+        
+        if not results_html or not cases:
+            logger.warning(f"      ⚠️ Не найдено на сайте")
+            result['skipped'] = True
+            return result
+        
+        # 2. Найти целевое дело
+        target_case = next((c for c in cases if c.case_number == case_number), None)
+        
+        if not target_case or target_case.result_index is None:
+            logger.warning(f"      ⚠️ Индекс не определён")
+            result['skipped'] = True
+            return result
+        
+        # 3. Обновление событий в БД
+        save_result = await parser.db_manager.update_case(target_case)
+        
+        if save_result.get('events_added', 0) > 0:
+            result['events_added'] = save_result['events_added']
+            result['updated'] = True
+            logger.info(f"      ✅ +{result['events_added']} событий")
+        
+        # 4. Скачивание документов
+        case_id = save_result.get('case_id') or await parser.db_manager.get_case_id(case_number)
+        
+        if case_id:
+            session = await parser.session_manager.get_session()
+            existing_keys = await parser.db_manager.get_document_keys(case_id)
+            
+            downloaded = await doc_handler.fetch_all_documents(
+                session=session,
+                results_html=results_html,
+                case_number=case_number,
+                case_index=target_case.result_index,
+                existing_keys=existing_keys,
+                delay=delay
+            )
+            
+            if downloaded:
+                await parser.db_manager.save_documents(case_id, downloaded)
+                result['documents'] = len(downloaded)
+                result['updated'] = True
+                logger.info(f"      📎 +{len(downloaded)} документов")
+            
+            await parser.db_manager.mark_documents_downloaded(case_id)
+        
+        await asyncio.sleep(delay)
+        
+    except Exception as e:
+        logger.error(f"      ❌ {case_number}: {e}")
+        result['error'] = True
+    
+    return result
+
+
+def _update_stats(stats: dict, result: dict):
+    """Обновить общую статистику"""
+    if result.get('error'):
+        stats['errors'] += 1
+    elif result.get('skipped'):
+        stats['skipped'] += 1
+    elif result.get('updated'):
+        stats['cases_updated'] += 1
+        stats['events_added'] += result.get('events_added', 0)
+        stats['documents_downloaded'] += result.get('documents', 0)
+    else:
+        stats['skipped'] += 1
+
+
+def main():
     """Главная функция"""
     logger = setup_logger('main', level='INFO')
     
     logger.info("\n" + "=" * 70)
-    logger.info("ПАРСЕР СУДЕБНЫХ ДЕЛ КАЗАХСТАНА v2.0")
+    logger.info("ПАРСЕР СУДЕБНЫХ ДЕЛ КАЗАХСТАНА v2.1")
     logger.info("=" * 70)
     
+    # Парсинг аргументов
+    mode = 'parse'
+    
+    if '--mode' in sys.argv:
+        idx = sys.argv.index('--mode')
+        if idx + 1 < len(sys.argv):
+            mode = sys.argv[idx + 1]
+    
     try:
-        if '--mode' in sys.argv:
-            idx = sys.argv.index('--mode')
-            if idx + 1 < len(sys.argv) and sys.argv[idx + 1] == 'update':
-                await update_cases_history()
-                return 0
+        if mode == 'parse':
+            asyncio.run(parse_all_regions_from_config())
         
-        await parse_all_regions_from_config()
-        logger.info("\n✅ Завершено")
-        return 0
-    
+        elif mode == 'update':
+            asyncio.run(update_cases_history())
+        
+        else:
+            logger.error(f"❌ Неизвестный режим: {mode}")
+            logger.info("Доступные режимы:")
+            logger.info("  --mode parse   (по умолчанию)")
+            logger.info("  --mode update  (события + документы)")
+            sys.exit(1)
+            
     except KeyboardInterrupt:
-        logger.warning("\n🛑 Прервано")
-        return 1
-    
-    except Exception as e:
-        logger.critical(f"\n💥 Ошибка: {e}")
-        logger.critical(traceback.format_exc())
-        return 1
-
-
-if __name__ == "__main__":
-    sys.exit(asyncio.run(main()))
-
-# ============================================================================
-# ТОЧКА ВХОДА
-# ============================================================================
-
-if __name__ == '__main__':
-    try:
-        main()
-    except KeyboardInterrupt:
-        print("\n⚠️  Прервано пользователем")
+        logger.warning("\n⚠️ Прервано пользователем")
         sys.exit(0)
     except Exception as e:
-        print(f"❌ Критическая ошибка: {e}")
+        logger.critical(f"\n💥 Ошибка: {e}")
+        logger.debug(traceback.format_exc())
         sys.exit(1)
+
+
+if __name__ == '__main__':
+    main()
+
+################################################################################
+#                           КОНЕЦ СБОРКИ
+################################################################################
+#
+# Всего файлов: 27
+# Всего строк: 4,727
+# Размер: 181,902 байт (177.6 KB)
+#
+################################################################################

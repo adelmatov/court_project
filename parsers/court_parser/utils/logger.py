@@ -5,6 +5,7 @@ import logging
 import sys
 from datetime import datetime
 from pathlib import Path
+from logging.handlers import RotatingFileHandler
 
 
 # Цвета для консоли
@@ -30,28 +31,31 @@ class ColoredFormatter(logging.Formatter):
 
 
 def setup_logger(name: str, log_dir: str = "logs", level: str = "INFO") -> logging.Logger:
-    """Настройка логгера"""
+    """Настройка логгера с ротацией"""
     logger = logging.getLogger(name)
     logger.setLevel(logging.DEBUG)
-    logger.handlers.clear()
     
-    # Консольный вывод
-    console = logging.StreamHandler(sys.stdout)
-    console.setLevel(getattr(logging, level))
-    console.setFormatter(ColoredFormatter())
-    logger.addHandler(console)
-    
-    # Файловый вывод
-    Path(log_dir).mkdir(exist_ok=True)
-    file_handler = logging.FileHandler(
-        f"{log_dir}/parser.log",
-        encoding='utf-8'
-    )
-    file_handler.setLevel(logging.DEBUG)
-    file_handler.setFormatter(logging.Formatter(
-        '%(asctime)s [%(levelname)s] %(name)s: %(message)s'
-    ))
-    logger.addHandler(file_handler)
+    # Очищаем существующие handlers только если это новый логгер
+    if not logger.handlers:
+        # Консольный вывод
+        console = logging.StreamHandler(sys.stdout)
+        console.setLevel(getattr(logging, level))
+        console.setFormatter(ColoredFormatter())
+        logger.addHandler(console)
+        
+        # Файловый вывод с ротацией
+        Path(log_dir).mkdir(exist_ok=True)
+        file_handler = RotatingFileHandler(
+            f"{log_dir}/parser.log",
+            maxBytes=10 * 1024 * 1024,  # 10 MB
+            backupCount=5,
+            encoding='utf-8'
+        )
+        file_handler.setLevel(logging.DEBUG)
+        file_handler.setFormatter(logging.Formatter(
+            '%(asctime)s [%(levelname)s] %(name)s: %(message)s'
+        ))
+        logger.addHandler(file_handler)
     
     return logger
 
