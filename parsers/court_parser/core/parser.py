@@ -17,6 +17,7 @@ from utils.text_processor import TextProcessor
 from utils.logger import get_logger
 from utils.retry import RetryStrategy, RetryConfig, NonRetriableError
 from utils.constants import CaseStatus
+import traceback
 
 class CourtParser:
     """Главный класс парсера"""
@@ -118,6 +119,7 @@ class CourtParser:
             self.logger.info("✅ Парсер готов к работе")
         except Exception as e:
             self.logger.error(f"❌ Ошибка инициализации: {e}")
+            self.logger.debug(f"Traceback:\n{traceback.format_exc()}")
             await self.cleanup()
             raise
     

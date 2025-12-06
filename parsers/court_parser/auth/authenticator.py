@@ -11,6 +11,7 @@ from selectolax.parser import HTMLParser
 from utils.logger import get_logger
 from utils.retry import RetryStrategy, RetryConfig, NonRetriableError, RetryableError
 from utils.http_utils import HttpHeaders, ViewStateExtractor
+import traceback
 
 
 class AuthenticationError(Exception):
@@ -57,6 +58,7 @@ class Authenticator:
             )
         except Exception as e:
             self.logger.error(f"❌ Авторизация не удалась: {e}")
+            self.logger.debug(f"Traceback:\n{traceback.format_exc()}")
             raise AuthenticationError(f"Не удалось авторизоваться: {e}") from e
     
     async def _do_authenticate(self, session_manager) -> bool:

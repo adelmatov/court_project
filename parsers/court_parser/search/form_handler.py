@@ -23,19 +23,7 @@ class FormHandler:
         self._cached_form_ids: Optional[Dict[str, str]] = None
         self._cache_initialized: bool = False
         self._cache_lock: asyncio.Lock = asyncio.Lock()
-    
-    def reset_cache(self):
-        """
-        Сброс кеша ID формы
-        
-        Вызывать при:
-        - Переавторизации
-        - Ошибках, связанных с невалидными ID
-        """
-        self._cached_form_ids = None
-        self._cache_initialized = False
-        self.logger.debug("Кеш ID формы сброшен")
-    
+
     async def prepare_search_form(self, session: aiohttp.ClientSession) -> tuple:
         """
         Подготовка формы поиска
