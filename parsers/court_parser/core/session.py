@@ -109,14 +109,6 @@ class SessionManager:
         """POST запрос с retry"""
         return await self.request('POST', url, **kwargs)
     
-    async def get(self, url: str, **kwargs) -> aiohttp.ClientResponse:
-        """GET запрос с retry"""
-        return await self.request('GET', url, **kwargs)
-    
-    async def post(self, url: str, **kwargs) -> aiohttp.ClientResponse:
-        """POST запрос с retry"""
-        return await self.request('POST', url, **kwargs)
-    
     async def close(self):
         """Закрытие сессии"""
         if self.session and not self.session.closed:

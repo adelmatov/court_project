@@ -28,20 +28,28 @@ class DatabaseManager:
     
     async def connect(self):
         """Подключение к БД"""
-        self.pool = await asyncpg.create_pool(
-            host=self.db_config['host'],
-            port=self.db_config['port'],
-            database=self.db_config['dbname'],
-            user=self.db_config['user'],
-            password=self.db_config['password'],
-            min_size=1,
-            max_size=10
-        )
+        import traceback
         
-        # Загрузка кешей
-        await self._load_caches()
-        
-        self.logger.info("✅ Подключение к БД установлено")
+        try:
+            self.pool = await asyncpg.create_pool(
+                host=self.db_config['host'],
+                port=self.db_config['port'],
+                database=self.db_config['dbname'],
+                user=self.db_config['user'],
+                password=self.db_config['password'],
+                min_size=1,
+                max_size=10
+            )
+            
+            # Загрузка кешей
+            await self._load_caches()
+            
+            self.logger.info("✅ Подключение к БД установлено")
+            
+        except Exception as e:
+            self.logger.critical(f"❌ Ошибка подключения к БД: {e}")
+            self.logger.debug(f"Traceback:\n{traceback.format_exc()}")
+            raise
     
     async def disconnect(self):
         """Отключение от БД"""
