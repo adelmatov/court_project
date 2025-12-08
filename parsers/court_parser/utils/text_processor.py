@@ -114,16 +114,16 @@ class TextProcessor:
         """
         Парсинг номера дела
         
-        Пример: "6294-25-00-4/215" →
+        Пример: "6294-25-00-4/215" или "6003-25-00-4к/1454(2)" →
         {
             'court_code': '6294',
             'year': '25',
             'middle': '00',
             'case_type': '4',
-            'sequence': '215'
+            'sequence': '215' или '1454(2)'
         }
         """
-        pattern = r'^(\d+)-(\d+)-(\d+)-([0-9а-яА-Я]+)/(\d+)$'
+        pattern = r'^(\d+)-(\d+)-(\d+)-([0-9а-яА-Я]+)/(\d+(?:\(\d+\))?)$'
         match = re.match(pattern, case_number)
         
         if not match:
@@ -158,15 +158,15 @@ class TextProcessor:
         """
         Распарсить полный номер дела
         
-        Вход: "6294-25-00-4/215"
+        Вход: "6294-25-00-4/215" или "6003-25-00-4к/1454(2)"
         Выход: {
             'court_code': '6294',
             'year_short': '25',
             'case_type': '4',
-            'sequence': '215'
+            'sequence': '215' или '1454(2)'
         }
         """
-        pattern = r'^(\d+)-(\d+)-(\d+)-([0-9а-яА-Я]+)/(\d+)$'
+        pattern = r'^(\d+)-(\d+)-(\d+)-([0-9а-яА-Я]+)/(\d+(?:\(\d+\))?)$'
         match = re.match(pattern, case_number)
         
         if not match:
@@ -226,3 +226,62 @@ class TextProcessor:
                     }
         
         return None
+    
+    @staticmethod
+    def is_matching_case_number(case_number: str, target: str) -> bool:
+        """
+        Проверка соответствия номера дела целевому
+        
+        Правила:
+        - Точное совпадение: "991" == "991" ✓
+        - С суффиксом: "991(1)" matches "991" ✓
+        - С суффиксом: "991(2)" matches "991" ✓
+        - Другой номер: "992" != "991" ✗
+        - Не суффикс: "9910" != "991" ✗
+        
+        Args:
+            case_number: номер дела из ответа сервера
+            target: целевой номер дела (без суффикса)
+        
+        Returns:
+            True если номер соответствует целевому
+        
+        Examples:
+            >>> is_matching_case_number("6003-25-00-4к/991", "6003-25-00-4к/991")
+            True
+            >>> is_matching_case_number("6003-25-00-4к/991(1)", "6003-25-00-4к/991")
+            True
+            >>> is_matching_case_number("6003-25-00-4к/992", "6003-25-00-4к/991")
+            False
+        """
+        # Точное совпадение
+        if case_number == target:
+            return True
+        
+        # Проверка суффикса вида (1), (2), (10) и т.д.
+        # Паттерн: целевой номер + скобки с числом
+        pattern = f"^{re.escape(target)}\\(\\d+\\)$"
+        return bool(re.match(pattern, case_number))
+
+    @staticmethod
+    def extract_base_case_number(case_number: str) -> str:
+        """
+        Извлечь базовый номер дела без суффикса
+        
+        Args:
+            case_number: номер дела (возможно с суффиксом)
+        
+        Returns:
+            Базовый номер без суффикса
+        
+        Examples:
+            >>> extract_base_case_number("6003-25-00-4к/991(1)")
+            "6003-25-00-4к/991"
+            >>> extract_base_case_number("6003-25-00-4к/991")
+            "6003-25-00-4к/991"
+        """
+        # Удаляем суффикс (N) в конце
+        match = re.match(r'^(.+?)(\(\d+\))?$', case_number)
+        if match:
+            return match.group(1)
+        return case_number

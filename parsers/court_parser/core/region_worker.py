@@ -3,7 +3,7 @@
 """
 import ssl
 import asyncio
-from typing import Dict, Any, Optional
+from typing import Dict, Any, Optional, Union
 
 import aiohttp
 
@@ -157,7 +157,11 @@ class RegionWorker:
         sequence_number: int,
         year: str
     ) -> Dict[str, Any]:
-        """Выполнение поиска и сохранения"""
+        """
+        Выполнение поиска и сохранения
+        
+        Сохраняет все дела с суффиксами
+        """
         region_config = self.settings.get_region(self.region_key)
         court_config = self.settings.get_court(self.region_key, court_key)
         
@@ -175,6 +179,8 @@ class RegionWorker:
             return {
                 'success': False,
                 'saved': False,
+                'saved_count': 0,
+                'case_numbers': [],
                 'case_number': target_case_number,
                 'error': CaseStatus.REGION_NOT_FOUND
             }
@@ -184,44 +190,62 @@ class RegionWorker:
             return {
                 'success': False,
                 'saved': False,
+                'saved_count': 0,
+                'case_numbers': [],
                 'case_number': target_case_number,
                 'error': CaseStatus.NO_RESULTS
             }
         
-        case_to_save = next(
-            (c for c in cases if c.case_number == target_case_number),
-            None
-        )
+        # Находим ВСЕ дела, соответствующие целевому номеру
+        matching_cases = [
+            case for case in cases 
+            if self.text_processor.is_matching_case_number(case.case_number, target_case_number)
+        ]
         
-        if not case_to_save:
+        if not matching_cases:
             self.logger.debug(f"Целевое дело не найдено среди {len(cases)} результатов")
             return {
                 'success': False,
                 'saved': False,
+                'saved_count': 0,
+                'case_numbers': [],
                 'case_number': target_case_number,
                 'error': CaseStatus.TARGET_NOT_FOUND
             }
         
-        save_result = await db_manager.save_case(case_to_save)
+        # Сохраняем все найденные дела
+        saved_count = 0
+        saved_numbers = []
         
-        if save_result['status'] in [CaseStatus.SAVED, CaseStatus.UPDATED]:
-            self.logger.info(
-                f"Сохранено: {case_to_save.case_number} | "
-                f"судья: {'да' if case_to_save.judge else 'нет'} | "
-                f"сторон: {len(case_to_save.plaintiffs) + len(case_to_save.defendants)} | "
-                f"событий: {len(case_to_save.events)}"
-            )
+        for case in matching_cases:
+            save_result = await db_manager.save_case(case)
             
+            if save_result['status'] in [CaseStatus.SAVED, CaseStatus.UPDATED]:
+                saved_count += 1
+                saved_numbers.append(case.case_number)
+                
+                self.logger.info(
+                    f"Сохранено: {case.case_number} | "
+                    f"судья: {'да' if case.judge else 'нет'} | "
+                    f"сторон: {len(case.plaintiffs) + len(case.defendants)} | "
+                    f"событий: {len(case.events)}"
+                )
+        
+        if saved_count > 0:
             return {
                 'success': True,
                 'saved': True,
-                'case_number': case_to_save.case_number,
+                'saved_count': saved_count,
+                'case_numbers': saved_numbers,
+                'case_number': target_case_number,
                 'results_html': results_html
             }
         
         return {
             'success': False,
             'saved': False,
+            'saved_count': 0,
+            'case_numbers': [],
             'case_number': target_case_number,
             'error': CaseStatus.SAVE_FAILED
         }
@@ -231,22 +255,24 @@ class RegionWorker:
         region_config: Dict,
         court_config: Dict,
         year: str,
-        sequence_number: int
+        sequence_number: Union[int, str]
     ) -> tuple:
         """
         Выполнение поиска дела
         
-        Returns:
-            (results_html, [CaseData, ...])
+        Для республиканских судов (Верховный, Кассационный) 
+        используется search_region_id вместо id
         """
         viewstate, form_ids = await self.form_handler.prepare_search_form(
             self.session
         )
         
+        # Передаём весь region_config вместо только id
+        # FormHandler сам определит какой ID использовать
         await self.form_handler.select_region(
             self.session,
             viewstate,
-            region_config['id'],
+            region_config,  # Изменено: передаём весь конфиг
             form_ids
         )
         
@@ -255,7 +281,7 @@ class RegionWorker:
         results_html = await self.search_engine.search_case(
             self.session,
             viewstate,
-            region_config['id'],
+            region_config.get('search_region_id', region_config['id']),  # Изменено
             court_config['id'],
             year,
             sequence_number,
@@ -269,12 +295,6 @@ class RegionWorker:
     async def search_case_by_number(self, case_number: str) -> tuple:
         """
         Поиск дела по номеру
-        
-        Args:
-            case_number: полный номер дела
-        
-        Returns:
-            (results_html, [CaseData, ...])
         """
         case_info = self.text_processor.find_region_and_court_by_case_number(
             case_number, self.settings.regions
@@ -294,7 +314,7 @@ class RegionWorker:
             region_config,
             court_config,
             case_info['year'],
-            int(case_info['sequence'])
+            case_info['sequence']  # ← передаём как строку
         )
     
     async def cleanup(self):

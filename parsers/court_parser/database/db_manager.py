@@ -2,6 +2,7 @@
 Менеджер базы данных
 """
 from typing import Dict, Any, Optional, List, Set
+from datetime import datetime, timedelta
 import asyncpg
 
 from database.models import CaseData, EventData
@@ -572,7 +573,6 @@ class DatabaseManager:
         
         return case_numbers
     
-
     # Docs processing:
 
     async def get_document_keys(self, case_id: int) -> set:
@@ -631,70 +631,146 @@ class DatabaseManager:
                 "UPDATE cases SET documents_pending = TRUE WHERE id = $1", case_id
             )
 
-    async def get_cases_for_documents(self, filters: Dict, limit: int = None) -> List[Dict]:
+    async def get_cases_for_documents(
+        self, 
+        filters: Dict, 
+        limit: int = None,
+        kato_code: str = None,
+        instance_code: str = None
+    ) -> List[Dict]:
         """
-        Получить дела для скачивания документов
+        Получить дела для скачивания документов с гибкой фильтрацией
         
-        Использует ту же логику фильтрации, что и get_cases_for_update
+        Args:
+            filters: словарь фильтров
+            limit: лимит записей
+            kato_code: КАТО-код региона (для max_per_court)
+            instance_code: код инстанции суда (для max_per_court)
         """
-        defendant_keywords = filters.get('defendant_keywords', [])
-        exclude_events = filters.get('exclude_event_types', [])
+        mode = filters.get('mode', 'any')
         interval_days = filters.get('check_interval_days', 7)
         
-        query = """
-            SELECT DISTINCT c.id, c.case_number, c.case_date, c.documents_checked_at
-            FROM cases c
-        """
-        
-        conditions = []
+        filter_conditions = []
         params = []
         param_counter = 1
         
-        # ФИЛЬТР 1: По ответчику (если указан)
-        if defendant_keywords:
-            query += """
-                JOIN case_parties cp ON c.id = cp.case_id AND cp.party_role = 'defendant'
-                JOIN parties p ON cp.party_id = p.id
-            """
+        # === ФИЛЬТР: missing_parties ===
+        if filters.get('missing_parties'):
+            filter_conditions.append("""
+                NOT EXISTS (
+                    SELECT 1 FROM case_parties cp WHERE cp.case_id = c.id
+                )
+            """)
+        
+        # === ФИЛЬТР: missing_judge ===
+        if filters.get('missing_judge'):
+            filter_conditions.append("c.judge_id IS NULL")
+        
+        # === ФИЛЬТР: party_keywords ===
+        party_keywords = filters.get('party_keywords', [])
+        party_role = filters.get('party_role')
+        
+        if party_keywords:
+            role_condition = ""
             
-            keyword_conditions = []
-            for keyword in defendant_keywords:
-                keyword_conditions.append(f"p.name ILIKE ${param_counter}")
+            if party_role:
+                if isinstance(party_role, str):
+                    party_role = [party_role]
+                
+                role_placeholders = [f"${param_counter + i}" for i in range(len(party_role))]
+                role_condition = f"AND cp.party_role IN ({', '.join(role_placeholders)})"
+                params.extend(party_role)
+                param_counter += len(party_role)
+            
+            keyword_placeholders = []
+            for keyword in party_keywords:
+                keyword_placeholders.append(f"p.name ILIKE ${param_counter}")
                 params.append(f'%{keyword}%')
                 param_counter += 1
             
-            conditions.append(f"({' OR '.join(keyword_conditions)})")
-        
-        # ФИЛЬТР 2: Исключить дела с определёнными событиями
-        if exclude_events:
-            placeholders = ', '.join([f'${i}' for i in range(param_counter, param_counter + len(exclude_events))])
+            keywords_sql = ' OR '.join(keyword_placeholders)
             
-            conditions.append(f"""
-                NOT EXISTS (
-                    SELECT 1 
-                    FROM case_events ce
-                    JOIN event_types et ON ce.event_type_id = et.id
-                    WHERE ce.case_id = c.id
-                    AND et.name IN ({placeholders})
+            filter_conditions.append(f"""
+                EXISTS (
+                    SELECT 1 FROM case_parties cp
+                    JOIN parties p ON cp.party_id = p.id
+                    WHERE cp.case_id = c.id
+                    {role_condition}
+                    AND ({keywords_sql})
                 )
             """)
-            
-            params.extend(exclude_events)
-            param_counter += len(exclude_events)
         
-        # ФИЛЬТР 3: Документы не проверялись или проверялись давно
-        conditions.append(f"""
+        if not filter_conditions:
+            self.logger.warning("Не указано ни одного фильтра для документов")
+            return []
+        
+        if mode == 'all':
+            combined_filters = ' AND '.join(f'({cond})' for cond in filter_conditions)
+        else:
+            combined_filters = ' OR '.join(f'({cond})' for cond in filter_conditions)
+        
+        # === ОБЩИЕ УСЛОВИЯ ===
+        common_conditions = []
+        
+        common_conditions.append(f"""
             (
                 c.documents_checked_at IS NULL 
                 OR c.documents_checked_at < NOW() - INTERVAL '{interval_days} days'
             )
         """)
         
-        # Собираем WHERE
-        if conditions:
-            query += " WHERE " + " AND ".join(conditions)
+        # Фильтр по конкретному суду (для max_per_court)
+        if kato_code and instance_code:
+            common_conditions.append(f"SUBSTRING(c.case_number FROM 1 FOR 2) = ${param_counter}")
+            params.append(kato_code)
+            param_counter += 1
+            
+            common_conditions.append(f"SUBSTRING(c.case_number FROM 3 FOR 2) = ${param_counter}")
+            params.append(instance_code)
+            param_counter += 1
+        else:
+            # Фильтр по списку регионов
+            regions = filters.get('regions')
+            if regions:
+                region_codes = self._get_region_kato_codes(regions)
+                if region_codes:
+                    region_conditions = []
+                    for code in region_codes:
+                        region_conditions.append(f"SUBSTRING(c.case_number FROM 1 FOR 2) = ${param_counter}")
+                        params.append(code)
+                        param_counter += 1
+                    common_conditions.append(f"({' OR '.join(region_conditions)})")
+            
+            # Фильтр по типам судов
+            court_types = filters.get('court_types')
+            if court_types:
+                court_codes = self._get_court_instance_codes(court_types)
+                if court_codes:
+                    code_conditions = []
+                    for code in court_codes:
+                        code_conditions.append(f"SUBSTRING(c.case_number FROM 3 FOR 2) = ${param_counter}")
+                        params.append(code)
+                        param_counter += 1
+                    common_conditions.append(f"({' OR '.join(code_conditions)})")
         
-        # Сортировка (все колонки есть в SELECT)
+        # Фильтр по году
+        year = filters.get('year')
+        if year:
+            year_short = year[-2:]
+            common_conditions.append(f"SUBSTRING(c.case_number FROM 6 FOR 2) = ${param_counter}")
+            params.append(year_short)
+            param_counter += 1
+        
+        # === СБОРКА ЗАПРОСА ===
+        query = """
+            SELECT DISTINCT c.id, c.case_number, c.case_date, c.documents_checked_at
+            FROM cases c
+            WHERE 
+        """
+        
+        all_conditions = [f"({combined_filters})"] + common_conditions
+        query += ' AND '.join(all_conditions)
+        
         query += " ORDER BY c.documents_checked_at NULLS FIRST, c.case_date DESC"
         
         if limit:
@@ -703,8 +779,60 @@ class DatabaseManager:
         async with self.pool.acquire() as conn:
             rows = await conn.fetch(query, *params)
         
-        self.logger.info(f"Дел для скачивания документов: {len(rows)}")
         return [{'id': r['id'], 'case_number': r['case_number']} for r in rows]
+    
+    def _get_court_instance_codes(self, court_types: List[str]) -> List[str]:
+        """
+        Получить instance_codes для указанных типов судов
+        """
+        court_code_map = {
+            'smas': ['94', '93'],
+            'appellate': ['99', '00'],
+            'cassation': ['03'],
+            'supreme': ['01'],
+        }
+        
+        codes = set()
+        for court_type in court_types:
+            if court_type in court_code_map:
+                codes.update(court_code_map[court_type])
+        
+        return list(codes)
+
+    def _get_region_kato_codes(self, regions: List[str]) -> List[str]:
+        """
+        Получить КАТО-коды для указанных регионов
+        """
+        region_kato_map = {
+            'republic': '60',
+            'astana': '71',
+            'almaty': '75',
+            'shymkent': '52',
+            'akmola': '11',
+            'aktobe': '15',
+            'almaty_region': '19',
+            'atyrau': '23',
+            'vko': '63',
+            'zhambyl': '31',
+            'zko': '27',
+            'karaganda': '35',
+            'kostanay': '39',
+            'kyzylorda': '43',
+            'mangystau': '47',
+            'pavlodar': '55',
+            'sko': '59',
+            'turkestan': '51',
+            'ulytau': '62',
+            'abay': '10',
+            'zhetysu': '33',
+        }
+        
+        codes = []
+        for region in regions:
+            if region in region_kato_map:
+                codes.append(region_kato_map[region])
+        
+        return codes
     
     async def get_case_id(self, case_number: str) -> Optional[int]:
         """Получить ID дела по номеру"""
@@ -714,6 +842,84 @@ class DatabaseManager:
                 case_number
             )
             return row['id'] if row else None
+    
+    async def get_gaps_check_date(
+        self, 
+        region_key: str, 
+        court_key: str, 
+        year: str
+    ) -> Optional[datetime]:
+        """
+        Получить дату последней проверки пропусков
+        
+        Returns:
+            datetime или None если никогда не проверялось
+        """
+        async with self.pool.acquire() as conn:
+            row = await conn.fetchrow("""
+                SELECT gaps_checked_at 
+                FROM parsing_metadata
+                WHERE region_key = $1 AND court_key = $2 AND year = $3
+            """, region_key, court_key, year)
+            
+            return row['gaps_checked_at'] if row else None
+
+    async def update_gaps_check_date(
+        self, 
+        region_key: str, 
+        court_key: str, 
+        year: str,
+        last_sequence: int = 0
+    ):
+        """
+        Обновить дату проверки пропусков
+        
+        Вызывается после завершения проверки gaps для региона/суда/года
+        """
+        async with self.pool.acquire() as conn:
+            await conn.execute("""
+                INSERT INTO parsing_metadata (region_key, court_key, year, gaps_checked_at, last_sequence_checked)
+                VALUES ($1, $2, $3, CURRENT_TIMESTAMP, $4)
+                ON CONFLICT (region_key, court_key, year) 
+                DO UPDATE SET 
+                    gaps_checked_at = CURRENT_TIMESTAMP,
+                    last_sequence_checked = $4,
+                    updated_at = CURRENT_TIMESTAMP
+            """, region_key, court_key, year, last_sequence)
+            
+            self.logger.debug(
+                f"Обновлена дата проверки пропусков: {region_key}/{court_key}/{year}"
+            )
+
+    async def should_check_gaps(
+        self, 
+        region_key: str, 
+        court_key: str, 
+        year: str,
+        interval_days: int = 30
+    ) -> bool:
+        """
+        Проверить, нужно ли проверять пропуски
+        
+        Returns:
+            True если прошло больше interval_days с последней проверки
+        """
+        last_check = await self.get_gaps_check_date(region_key, court_key, year)
+        
+        if last_check is None:
+            self.logger.debug(f"Пропуски {region_key}/{court_key}/{year}: никогда не проверялись")
+            return True
+        
+        days_since_check = (datetime.now() - last_check).days
+        should_check = days_since_check >= interval_days
+        
+        self.logger.debug(
+            f"Пропуски {region_key}/{court_key}/{year}: "
+            f"проверялись {days_since_check} дней назад, "
+            f"{'нужна проверка' if should_check else 'пропускаем'}"
+        )
+        
+        return should_check
         
     async def update_case(self, case_data: CaseData) -> Dict[str, Any]:
         """

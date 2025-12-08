@@ -166,47 +166,99 @@ def is_binary_resource(filename: str) -> bool:
     return any(filename.endswith(ext) for ext in BINARY_EXTENSIONS)
 
 
-def discover_files(base_path: Path, module_dir: str) -> tuple:
+def discover_files_recursive(dir_path: Path, base_path: Path) -> list:
     """
-    Автоматически обнаруживает все файлы в директории
+    ИСПРАВЛЕНО: Рекурсивно обнаруживает все Python файлы в директории и поддиректориях
+    
+    Args:
+        dir_path: Путь к директории для сканирования
+        base_path: Базовый путь проекта (для формирования относительных путей)
     
     Returns:
-        Кортеж (python_files, resource_files)
+        Список кортежей (relative_path, absolute_path) для каждого .py файла
     """
-    if module_dir:
-        dir_path = base_path / module_dir
-    else:
-        dir_path = base_path
-    
     if not dir_path.exists():
-        return [], []
+        return []
     
     py_files = []
-    resources = []
+    init_files = []  # __init__.py файлы обрабатываем первыми
+    
+    # Используем os.walk для рекурсивного обхода
+    for root, dirs, files in os.walk(dir_path):
+        # Исключаем ненужные директории (модифицируем список in-place)
+        dirs[:] = [d for d in dirs if not should_exclude_dir(d)]
+        
+        root_path = Path(root)
+        
+        for filename in files:
+            if not filename.endswith('.py'):
+                continue
+                
+            if should_exclude_file(filename):
+                continue
+            
+            filepath = root_path / filename
+            rel_path = filepath.relative_to(base_path)
+            
+            if filename == '__init__.py':
+                init_files.append((str(rel_path), filepath))
+            else:
+                py_files.append((str(rel_path), filepath))
+    
+    # Сортируем для предсказуемого порядка
+    init_files.sort(key=lambda x: x[0])
+    py_files.sort(key=lambda x: x[0])
+    
+    # __init__.py файлы идут первыми в каждой директории
+    # Группируем по директориям
+    result = []
+    all_files = init_files + py_files
+    
+    # Сортируем так, чтобы __init__.py шёл перед другими файлами той же директории
+    def sort_key(item):
+        rel_path = item[0]
+        dir_part = str(Path(rel_path).parent)
+        filename = Path(rel_path).name
+        # __init__.py получает приоритет (0), остальные файлы (1)
+        priority = 0 if filename == '__init__.py' else 1
+        return (dir_part, priority, filename)
+    
+    all_files.sort(key=sort_key)
+    
+    return all_files
+
+
+def discover_root_files(base_path: Path) -> list:
+    """
+    Обнаруживает Python файлы только в корневой директории (без рекурсии)
+    Используется для корневых файлов типа main.py
+    """
+    if not base_path.exists():
+        return []
+    
+    py_files = []
     init_file = None
     
-    for item in dir_path.iterdir():
-        if item.is_file():
+    for item in base_path.iterdir():
+        if item.is_file() and item.suffix == '.py':
             filename = item.name
             
             if should_exclude_file(filename):
                 continue
             
-            if item.suffix == '.py':
-                if filename == '__init__.py':
-                    init_file = filename
-                else:
-                    py_files.append(filename)
-            elif is_resource_file(filename) or is_binary_resource(filename):
-                resources.append(filename)
+            rel_path = item.relative_to(base_path.parent.parent)  # Относительно PARSER_DIR parent
+            
+            if filename == '__init__.py':
+                init_file = (str(item.relative_to(base_path.parent.parent)), item)
+            else:
+                py_files.append((str(item.relative_to(base_path.parent.parent)), item))
     
-    py_files.sort()
-    resources.sort()
+    py_files.sort(key=lambda x: x[0])
     
     if init_file:
         py_files.insert(0, init_file)
     
-    return py_files, resources
+    return py_files
 
 
 def discover_all_resources(base_path: Path) -> dict:
@@ -321,37 +373,52 @@ def build_unified_file(output_file: str = 'court_parser_full_code.txt'):
     print()
     
     # ============================================
-    # СБОР PYTHON МОДУЛЕЙ
+    # СБОР PYTHON МОДУЛЕЙ (ИСПРАВЛЕНО - РЕКУРСИВНО)
     # ============================================
     all_code = []
     files_processed = 0
     
     for module_name in MODULE_ORDER:
         if module_name:
+            # Для модулей (utils, config, core и т.д.) - рекурсивный обход
             module_path = base_path / module_name
             display_name = f"{PARSER_DIR}/{module_name}"
+            
+            if not module_path.exists():
+                print(f"⚠️  Модуль не найден: {display_name}")
+                continue
+            
+            # ИСПРАВЛЕНО: используем рекурсивную функцию
+            py_files = discover_files_recursive(module_path, base_path)
+            
         else:
-            module_path = base_path
+            # Для корневой папки - только файлы первого уровня (main.py и т.д.)
             display_name = PARSER_DIR
-        
-        if not module_path.exists():
-            print(f"⚠️  Модуль не найден: {display_name}")
-            continue
-        
-        py_files, _ = discover_files(base_path, module_name)
+            py_files = []
+            
+            for item in base_path.iterdir():
+                if item.is_file() and item.suffix == '.py':
+                    if not should_exclude_file(item.name):
+                        rel_path = str(item.relative_to(base_path))
+                        py_files.append((rel_path, item))
+            
+            py_files.sort(key=lambda x: (x[0] != '__init__.py', x[0]))
         
         if not py_files:
             continue
         
         print(f"📂 Модуль: {display_name}")
         
-        for filename in py_files:
-            filepath = module_path / filename
-            
+        for rel_path, filepath in py_files:
             if not filepath.exists():
                 continue
             
-            print(f"   ✓ {filename}")
+            # Формируем путь для отображения
+            if module_name:
+                display_path = f"{module_name}/{rel_path}"
+            else: display_path = rel_path
+            
+            print(f"   ✓ {display_path}")
             files_processed += 1
             
             content = read_file_content(filepath)
@@ -359,10 +426,7 @@ def build_unified_file(output_file: str = 'court_parser_full_code.txt'):
                 continue
             
             # Формируем полный путь для заголовка
-            if module_name:
-                full_module_name = f"{PARSER_DIR}/{module_name}/{filename}"
-            else:
-                full_module_name = f"{PARSER_DIR}/{filename}"
+            full_module_name = f"{PARSER_DIR}/{display_path}"
             
             all_code.append(MODULE_SEPARATOR.format(module_name=full_module_name))
             all_code.append(content.rstrip())
@@ -434,7 +498,7 @@ def build_unified_file(output_file: str = 'court_parser_full_code.txt'):
 def main():
     """Главная функция"""
     # Выходной файл — текстовый, не .py
-    output_file = 'court_parser_ full_code.txt'
+    output_file = 'court_parser_full_code.txt'
     
     # Проверяем аргументы командной строки
     if len(sys.argv) > 1:

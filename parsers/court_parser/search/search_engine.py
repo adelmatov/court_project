@@ -1,7 +1,7 @@
 """
 Поисковый движок
 """
-from typing import Dict
+from typing import Dict, Union
 import asyncio
 import aiohttp
 
@@ -24,7 +24,7 @@ class SearchEngine:
         region_id: str, 
         court_id: str,
         year: str, 
-        sequence_number: int,
+        sequence_number: Union[int, str],
         form_ids: Dict[str, str]
     ) -> str:
         """
@@ -55,7 +55,7 @@ class SearchEngine:
         region_id: str, 
         court_id: str,
         year: str, 
-        sequence_number: int,
+        sequence_number: Union[int, str],
         form_ids: Dict[str, str]
     ):
         """

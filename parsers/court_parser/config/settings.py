@@ -104,3 +104,30 @@ class Settings:
         """Настройки обновления"""
         return self.config.get('update_settings', {})
     
+    def validate_docs_filters(self) -> bool:
+        """Валидация фильтров документов"""
+        docs_config = self.update_settings.get('docs', {})
+        filters = docs_config.get('filters', {})
+        
+        # Проверка mode
+        mode = filters.get('mode', 'any')
+        if mode not in ('any', 'all'):
+            raise ConfigurationError(f"docs.filters.mode должен быть 'any' или 'all', получено: {mode}")
+        
+        # Проверка party_role
+        party_role = filters.get('party_role', 'any')
+        if party_role not in ('any', 'plaintiff', 'defendant'):
+            raise ConfigurationError(f"docs.filters.party_role некорректен: {party_role}")
+        
+        # Проверка что хотя бы один фильтр активен
+        has_filter = (
+            filters.get('missing_parties') or
+            filters.get('missing_judge') or
+            filters.get('party_keywords')
+        )
+        
+        if not has_filter:
+            raise ConfigurationError("docs.filters: должен быть активен хотя бы один фильтр")
+        
+        return True
+    
