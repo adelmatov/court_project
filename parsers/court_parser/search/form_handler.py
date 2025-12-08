@@ -1,7 +1,7 @@
 """
 Работа с поисковой формой
 """
-from typing import Dict, Optional
+from typing import Dict, Optional, Any
 import asyncio
 import re
 import aiohttp
@@ -88,11 +88,20 @@ class FormHandler:
         self.logger.debug("Кеш ID формы сброшен")
     
     async def select_region(self, session: aiohttp.ClientSession, 
-                           viewstate: str, region_id: str, 
-                           form_ids: Dict[str, str]):
-        """Выбор региона в форме"""
+                       viewstate: str, region_config: Dict[str, Any], 
+                       form_ids: Dict[str, str]):
+        """
+        Выбор региона в форме
+        
+        Args:
+            region_config: конфигурация региона (содержит id и search_region_id)
+        """
         url = f"{self.base_url}/form/lawsuit/index.xhtml"
         form_base = form_ids.get('form_base', 'j_idt45:j_idt46')
+        
+        # Используем search_region_id если есть, иначе id
+        # Это нужно для республиканских судов, которые ищутся через регион Астана
+        region_id = region_config.get('search_region_id', region_config['id'])
         
         data = {
             form_base: form_base,

@@ -91,15 +91,16 @@ class CourtParser:
             
             viewstate, form_ids = await self.form_handler.prepare_search_form(session)
             
+            # Передаём весь region_config для поддержки search_region_id
             await self.form_handler.select_region(
-                session, viewstate, region_config['id'], form_ids
+                session, viewstate, region_config, form_ids
             )
             
             await asyncio.sleep(1)
             
             results_html = await self.search_engine.search_case(
                 session, viewstate,
-                region_config['id'],
+                region_config.get('search_region_id', region_config['id']),
                 court_config['id'],
                 case_info['year'],
                 int(case_info['sequence']),
@@ -219,6 +220,9 @@ class CourtParser:
     ) -> Dict[str, Any]:
         """
         Один цикл поиска и сохранения
+        
+        Сохраняет все дела, соответствующие целевому номеру,
+        включая варианты с суффиксами (1), (2) и т.д.
         """
         region_config = self.settings.get_region(region_key)
         court_config = self.settings.get_court(region_key, court_key)
@@ -236,6 +240,8 @@ class CourtParser:
             return {
                 'success': False,
                 'saved': False,
+                'saved_count': 0,
+                'case_numbers': [],
                 'case_number': target_case_number,
                 'error': CaseStatus.REGION_NOT_FOUND
             }
@@ -245,73 +251,69 @@ class CourtParser:
             return {
                 'success': False,
                 'saved': False,
+                'saved_count': 0,
+                'case_numbers': [],
                 'case_number': target_case_number,
                 'error': CaseStatus.NO_RESULTS
             }
         
-        # Выбор дела для сохранения
-        case_to_save = self._select_case_to_save(
-            cases, court_key, target_case_number
-        )
+        # Находим ВСЕ дела, соответствующие целевому номеру (включая суффиксы)
+        matching_cases = [
+            case for case in cases 
+            if self.text_processor.is_matching_case_number(case.case_number, target_case_number)
+        ]
         
-        if not case_to_save:
+        if not matching_cases:
             self.logger.warning(f"⚠️ Целевое дело не найдено: {target_case_number}")
+            self.logger.debug(f"Получено {len(cases)} дел: {[c.case_number for c in cases]}")
             return {
                 'success': False,
                 'saved': False,
+                'saved_count': 0,
+                'case_numbers': [],
                 'case_number': target_case_number,
                 'error': CaseStatus.TARGET_NOT_FOUND
             }
         
-        # Сохранение
-        save_result = await self.db_manager.save_case(case_to_save)
+        # Сохраняем все найденные дела
+        saved_count = 0
+        saved_numbers = []
         
-        if save_result['status'] in [CaseStatus.SAVED, CaseStatus.UPDATED]:
-            judge_info = "✅ судья" if case_to_save.judge else "⚠️ без судьи"
-            parties = len(case_to_save.plaintiffs) + len(case_to_save.defendants)
-            events = len(case_to_save.events)
+        for case in matching_cases:
+            save_result = await self.db_manager.save_case(case)
             
-            self.logger.info(
-                f"✅ Сохранено: {case_to_save.case_number} "
-                f"({judge_info}, {parties} сторон, {events} событий)"
-            )
-            
+            if save_result['status'] in [CaseStatus.SAVED, CaseStatus.UPDATED]:
+                saved_count += 1
+                saved_numbers.append(case.case_number)
+                
+                judge_info = "✅ судья" if case.judge else "⚠️ без судьи"
+                parties = len(case.plaintiffs) + len(case.defendants)
+                events = len(case.events)
+                
+                self.logger.info(
+                    f"✅ Сохранено: {case.case_number} "
+                    f"({judge_info}, {parties} сторон, {events} событий)"
+                )
+        
+        if saved_count > 0:
             return {
                 'success': True,
                 'saved': True,
-                'case_number': case_to_save.case_number,
-                'results_html': results_html  # Добавляем для документов
+                'saved_count': saved_count,
+                'case_numbers': saved_numbers,
+                'case_number': target_case_number,
+                'results_html': results_html
             }
         
         return {
             'success': False,
             'saved': False,
+            'saved_count': 0,
+            'case_numbers': [],
             'case_number': target_case_number,
             'error': CaseStatus.SAVE_FAILED
         }
-    
-    def _select_case_to_save(
-        self, 
-        cases: List[CaseData], 
-        court_key: str, 
-        target_case_number: str
-    ) -> Optional[CaseData]:
-        """
-        Выбор дела для сохранения по точному совпадению номера
-        """
-        result = next(
-            (case for case in cases if case.case_number == target_case_number), 
-            None
-        )
-        
-        if result is None and cases:
-            self.logger.debug(
-                f"Получено {len(cases)} дел, целевое {target_case_number} не найдено: "
-                f"{[c.case_number for c in cases]}"
-            )
-        
-        return result
-    
+  
     async def _handle_session_recovery(self, error: Exception) -> bool:
         """Восстановление сессии"""
         if not (isinstance(error, (aiohttp.ClientError, NonRetriableError)) 

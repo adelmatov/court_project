@@ -53,6 +53,10 @@ tmp/
 # Screenshots (если не нужны в репозитории)
 screenshots/
 
+# Files
+*.pdf
+docs/
+*.txt
 # Test files
 parsers/court_parser/test.py
 parsers/court_parser/test2_bot.py

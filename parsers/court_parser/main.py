@@ -15,6 +15,7 @@ from utils.logger import setup_logger, get_logger, init_logging
 from utils.progress import ProgressDisplay
 from datetime import datetime
 from utils.stats_reporter import StatsReporter
+from core.updaters import JudgeUpdater, EventsUpdater, DocsUpdater
 
 
 async def parse_all_regions_from_config() -> dict:
@@ -194,7 +195,6 @@ async def parse_all_regions_from_config() -> dict:
     
     return session_stats
 
-
 async def process_region_all_courts_with_worker(
     worker: RegionWorker,
     db_manager,
@@ -309,7 +309,6 @@ async def process_region_all_courts_with_worker(
     
     return region_stats
 
-
 async def parse_court_with_worker(
     worker: RegionWorker,
     db_manager,
@@ -333,7 +332,8 @@ async def parse_court_with_worker(
         'missing_not_found': 0,
         'new_queries': 0,
         'new_saved': 0,
-        'consecutive_empty': 0
+        'consecutive_empty': 0,
+        'gaps_skipped': False
     }
     
     existing = await db_manager.get_existing_case_numbers(
@@ -349,13 +349,19 @@ async def parse_court_with_worker(
     total_saved = 0
     total_queries = 0
     
-    if last_in_db > 0:
+    # === ПРОВЕРКА ПРОПУСКОВ С УЧЁТОМ ИНТЕРВАЛА ===
+    gaps_interval = settings.parsing_settings.get('gaps_check_interval_days', 30)
+    should_check_gaps = await db_manager.should_check_gaps(
+        region_key, court_key, year, gaps_interval
+    )
+    
+    if last_in_db > 0 and should_check_gaps:
         full_range = set(range(start_from, last_in_db + 1))
         missing = sorted(full_range - existing)
         stats['missing_found'] = len(missing)
         
         if missing:
-            logger.info(f"{region_key}/{court_key}: пропусков {len(missing)}")
+            logger.info(f"{region_key}/{court_key}: проверка пропусков ({len(missing)} шт)")
             
             for seq_num in missing:
                 if limit_cases and total_queries >= limit_cases:
@@ -371,8 +377,8 @@ async def parse_court_with_worker(
                 total_queries += 1
                 
                 if result['success'] and result.get('saved'):
-                    stats['missing_filled'] += 1
-                    total_saved += 1
+                    stats['missing_filled'] += result.get('saved_count', 1)
+                    total_saved += result.get('saved_count', 1)
                 else:
                     stats['missing_not_found'] += 1
                 
@@ -385,7 +391,22 @@ async def parse_court_with_worker(
                 )
                 
                 await asyncio.sleep(delay_between_requests)
+        
+        # Обновляем дату проверки пропусков
+        await db_manager.update_gaps_check_date(
+            region_key, court_key, year, last_in_db
+        )
+        logger.info(f"{region_key}/{court_key}: проверка пропусков завершена")
     
+    elif last_in_db > 0 and not should_check_gaps:
+        # Пропускаем проверку gaps
+        stats['gaps_skipped'] = True
+        logger.info(
+            f"{region_key}/{court_key}: пропуск проверки gaps "
+            f"(интервал {gaps_interval} дней не прошёл)"
+        )
+    
+    # === ПОИСК НОВЫХ ДЕЛ (без изменений) ===
     actual_start = last_in_db + 1 if last_in_db > 0 else start_from
     
     if actual_start <= max_number:
@@ -413,8 +434,8 @@ async def parse_court_with_worker(
             total_queries += 1
             
             if result['success'] and result.get('saved'):
-                stats['new_saved'] += 1
-                total_saved += 1
+                stats['new_saved'] += result.get('saved_count', 1)
+                total_saved += result.get('saved_count', 1)
                 stats['consecutive_empty'] = 0
             elif result.get('error') == 'no_results':
                 stats['consecutive_empty'] += 1
@@ -437,87 +458,66 @@ async def parse_court_with_worker(
         'cases_saved': total_saved,
         'consecutive_empty': stats['consecutive_empty'],
         'missing_filled': stats['missing_filled'],
-        'new_saved': stats['new_saved']
+        'new_saved': stats['new_saved'],
+        'gaps_skipped': stats['gaps_skipped']
     }
 
-
-async def update_cases_history():
-    """Режим обновления: события + документы"""
+async def run_update_judge():
+    """Режим обновления судей (--mode update judge)"""
     logger = get_logger('main')
     
     settings = Settings()
-    update_config = settings.config.get('update_settings', {})
-    docs_config = settings.config.get('documents_settings', {})
-    
-    if not update_config.get('enabled', True):
-        logger.warning("Update Mode отключен в настройках")
-        return
-    
-    interval_days = update_config.get('update_interval_days', 2)
-    filters = update_config.get('filters', {})
-    
-    storage_dir = docs_config.get('storage_dir', './documents')
-    download_delay = docs_config.get('download_delay', 2.0)
     
     logger.info("=" * 70)
-    logger.info("РЕЖИМ ОБНОВЛЕНИЯ: СОБЫТИЯ + ДОКУМЕНТЫ")
+    logger.info("РЕЖИМ ОБНОВЛЕНИЯ: СУДЬИ (СМАС)")
     logger.info("=" * 70)
-    logger.info(f"Интервал: {interval_days} дней")
-    if filters.get('defendant_keywords'):
-        logger.info(f"Фильтр по ответчику: {filters['defendant_keywords']}")
-    if filters.get('exclude_event_types'):
-        logger.info(f"Исключить события: {filters['exclude_event_types']}")
     
-    stats = {
-        'cases_updated': 0,
-        'events_added': 0,
-        'documents_downloaded': 0,
-        'errors': 0,
-        'skipped': 0
-    }
+    db_manager = DatabaseManager(settings.database)
+    await db_manager.connect()
     
-    async with CourtParser() as parser:
-        doc_handler = DocumentHandler(
-            base_url=settings.base_url,
-            storage_dir=storage_dir,
-            regions_config=settings.regions
-        )
-        
-        logger.info("Этап 1: Дела СМАС без судьи")
-        
-        smas_cases = await parser.db_manager.get_smas_cases_without_judge(settings, interval_days)
-        logger.info(f"Найдено дел СМАС без судьи: {len(smas_cases)}")
-        
-        for case_number in smas_cases:
-            result = await _process_single_case(
-                parser, doc_handler, case_number, download_delay, logger
-            )
-            _update_stats(stats, result)
-        
-        logger.info("Этап 2: Дела по ключевым словам")
-        
-        keyword_cases = await parser.db_manager.get_cases_for_update({
-            'defendant_keywords': filters.get('defendant_keywords', []),
-            'exclude_event_types': filters.get('exclude_event_types', []),
-            'update_interval_days': interval_days
-        })
-        logger.info(f"Найдено дел по ключевым словам: {len(keyword_cases)}")
-        
-        for case_number in keyword_cases:
-            result = await _process_single_case(
-                parser, doc_handler, case_number, download_delay, logger
-            )
-            _update_stats(stats, result)
-    
-    logger.info("=" * 70)
-    logger.info("ИТОГИ ОБНОВЛЕНИЯ:")
-    logger.info(f"  Обновлено дел: {stats['cases_updated']}")
-    logger.info(f"  Добавлено событий: {stats['events_added']}")
-    logger.info(f"  Скачано документов: {stats['documents_downloaded']}")
-    logger.info(f"  Пропущено: {stats['skipped']}")
-    logger.info(f"  Ошибок: {stats['errors']}")
-    logger.info("=" * 70)
+    try:
+        updater = JudgeUpdater(settings, db_manager)
+        await updater.run()
+    finally:
+        await db_manager.disconnect()
 
+async def run_update_events():
+    """Режим обновления событий (--mode update case_events)"""
+    logger = get_logger('main')
+    
+    settings = Settings()
+    
+    logger.info("=" * 70)
+    logger.info("РЕЖИМ ОБНОВЛЕНИЯ: СОБЫТИЯ ДЕЛ")
+    logger.info("=" * 70)
+    
+    db_manager = DatabaseManager(settings.database)
+    await db_manager.connect()
+    
+    try:
+        updater = EventsUpdater(settings, db_manager)
+        await updater.run()
+    finally:
+        await db_manager.disconnect()
+
+async def run_update_docs():
+    """Режим обновления документов (--mode update docs)"""
+    logger = get_logger('main')
+    
+    settings = Settings()
+    
+    logger.info("=" * 70)
+    logger.info("РЕЖИМ ОБНОВЛЕНИЯ: ДОКУМЕНТЫ")
+    logger.info("=" * 70)
+    
+    db_manager = DatabaseManager(settings.database)
+    await db_manager.connect()
+    
+    try:
+        updater = DocsUpdater(settings, db_manager)
+        await updater.run()
+    finally:
+        await db_manager.disconnect()
 
 async def _process_single_case(parser, doc_handler, case_number: str, delay: float, logger) -> dict:
     """Обработка одного дела: обновление событий + документы"""
@@ -578,7 +578,6 @@ async def _process_single_case(parser, doc_handler, case_number: str, delay: flo
     
     return result
 
-
 def _update_stats(stats: dict, result: dict):
     """Обновить общую статистику"""
     if result.get('error'):
@@ -592,7 +591,6 @@ def _update_stats(stats: dict, result: dict):
     else:
         stats['skipped'] += 1
 
-
 def main():
     """Главная функция"""
     # Инициализация всех логгеров ОДИН раз при старте
@@ -600,25 +598,49 @@ def main():
     logger = get_logger('main')
     
     logger.info("=" * 70)
-    logger.info("ПАРСЕР СУДЕБНЫХ ДЕЛ КАЗАХСТАНА v2.1")
+    logger.info("ПАРСЕР СУДЕБНЫХ ДЕЛ КАЗАХСТАНА v2.2")
     logger.info("=" * 70)
     
+    # Парсинг аргументов
     mode = 'parse'
+    submode = None
     
     if '--mode' in sys.argv:
         idx = sys.argv.index('--mode')
         if idx + 1 < len(sys.argv):
             mode = sys.argv[idx + 1]
+        if idx + 2 < len(sys.argv) and not sys.argv[idx + 2].startswith('-'):
+            submode = sys.argv[idx + 2]
     
     try:
         if mode == 'parse':
             asyncio.run(parse_all_regions_from_config())
         
         elif mode == 'update':
-            asyncio.run(update_cases_history())
+            if submode is None:
+                logger.error("Укажите подкоманду: judge, case_events, docs")
+                logger.info("Примеры:")
+                logger.info("  python main.py --mode update judge")
+                logger.info("  python main.py --mode update case_events")
+                logger.info("  python main.py --mode update docs")
+                sys.exit(1)
+            
+            elif submode == 'judge':
+                asyncio.run(run_update_judge())
+            
+            elif submode == 'case_events':
+                asyncio.run(run_update_events())
+            
+            elif submode == 'docs': asyncio.run(run_update_docs())
+            
+            else:
+                logger.error(f"Неизвестная подкоманда: {submode}")
+                logger.info("Доступные подкоманды: judge, case_events, docs")
+                sys.exit(1)
         
         else:
             logger.error(f"Неизвестный режим: {mode}")
+            logger.info("Доступные режимы: parse, update")
             sys.exit(1)
             
     except KeyboardInterrupt:

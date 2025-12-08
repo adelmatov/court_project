@@ -19,8 +19,21 @@ class AuthenticationError(Exception):
     pass
 
 
+class LanguageError(Exception):
+    """Ошибка установки языка"""
+    pass
+
+
 class Authenticator:
-    """Класс авторизации с retry"""
+    """Класс авторизации с retry и установкой языка"""
+    
+    # Константы для формы языка
+    LANGUAGE_FORM_ID = 'f_l_temp'
+    RUSSIAN_LANGUAGE_TRIGGER = 'f_l_temp:js_temp_1'
+    
+    # Признаки русского интерфейса
+    RUSSIAN_INDICATORS = ['Войти', 'Вход', 'Пароль', 'Электронная почта']
+    KAZAKH_INDICATORS = ['Кіру', 'Құпия сөз']
     
     def __init__(self, base_url: str, auth_config: Dict[str, str], 
                  retry_config: Optional[Dict] = None):
@@ -67,24 +80,45 @@ class Authenticator:
         
         self.logger.info("Начинаю авторизацию...")
         
-        # Этап 1: Загрузка страницы и извлечение данных формы
-        viewstate, form_ids = await self._load_login_page(session)
+        # Этап 1: Загрузка страницы
+        html, viewstate = await self._load_page(session)
         await asyncio.sleep(0.5)
         
-        # Этап 2: Отправка логина
+        # Этап 2: Установка русского языка
+        html, viewstate = await self._ensure_russian_language(session, html, viewstate)
+        await asyncio.sleep(0.5)
+        
+        # Этап 3: Извлечение данных формы авторизации
+        form_ids = self._extract_auth_form_ids(html)
+        
+        if not form_ids.get('form_base') or not form_ids.get('submit_button'):
+            with open("auth_form_not_found.html", "w", encoding="utf-8") as f:
+                f.write(html)
+            raise RetryableError(
+                f"Форма авторизации не найдена. Извлечено: {form_ids}"
+            )
+        
+        self.logger.info(f"📋 Форма: {form_ids['form_base']}, кнопка: {form_ids['submit_button']}")
+        
+        # Этап 4: Отправка логина
         await self._perform_login(session, viewstate, form_ids)
         await asyncio.sleep(0.5)
         
-        # Этап 3: Проверка
+        # Этап 5: Проверка авторизации
         if await self._verify_authentication(session):
             self.logger.info("✅ Авторизация успешна")
             return True
         
         raise RetryableError("Проверка авторизации не пройдена")
     
-    async def _load_login_page(self, session: aiohttp.ClientSession) -> tuple:
-        """Загрузка страницы логина и динамическое извлечение данных формы"""
-        url = f"{self.base_url}/index.xhtml?lang=ru"
+    async def _load_page(self, session: aiohttp.ClientSession) -> tuple:
+        """
+        Загрузка страницы логина
+        
+        Returns:
+            (html, viewstate)
+        """
+        url = f"{self.base_url}/index.xhtml"
         headers = self._get_base_headers()
         
         try:
@@ -96,27 +130,130 @@ class Authenticator:
                 
                 html = await response.text()
                 
-                # Динамическое извлечение ViewState
                 viewstate = ViewStateExtractor.extract(html)
                 if not viewstate:
                     raise RetryableError("ViewState не найден")
                 
-                # Динамическое извлечение ID формы
-                form_ids = self._extract_auth_form_ids(html)
-                
-                if not form_ids.get('form_base') or not form_ids.get('submit_button'):
-                    # Сохраняем для отладки
-                    with open("auth_form_not_found.html", "w", encoding="utf-8") as f:
-                        f.write(html)
-                    raise RetryableError(
-                        f"Форма авторизации не найдена. Извлечено: {form_ids}"
-                    )
-                
-                self.logger.info(f"📋 Форма: {form_ids['form_base']}, кнопка: {form_ids['submit_button']}")
-                return viewstate, form_ids
+                self.logger.debug("Страница загружена, ViewState извлечён")
+                return html, viewstate
                 
         except aiohttp.ClientError as e:
             raise RetryableError(f"Сетевая ошибка: {e}")
+    
+    async def _ensure_russian_language(
+        self, 
+        session: aiohttp.ClientSession, 
+        html: str, 
+        viewstate: str
+    ) -> tuple:
+        """
+        Проверка и установка русского языка
+        
+        Returns:
+            (html, viewstate) — обновлённые после смены языка
+        """
+        # Проверяем текущий язык
+        if self._is_russian_interface(html):
+            self.logger.info("🌐 Интерфейс уже на русском языке")
+            return html, viewstate
+        
+        self.logger.info("🌐 Интерфейс на казахском, переключаю на русский...")
+        
+        # Отправляем POST для смены языка
+        await self._send_language_change_request(session, viewstate)
+        await asyncio.sleep(0.5)
+        
+        # Загружаем страницу заново для получения нового ViewState и проверки
+        html, new_viewstate = await self._load_page(session)
+        
+        # Проверяем что язык сменился
+        if not self._is_russian_interface(html):
+            # Сохраняем для отладки
+            with open("language_not_changed.html", "w", encoding="utf-8") as f:
+                f.write(html)
+            raise RetryableError("Не удалось переключить язык на русский")
+        
+        self.logger.info("✅ Язык успешно переключён на русский")
+        return html, new_viewstate
+    
+    def _is_russian_interface(self, html: str) -> bool:
+        """
+        Проверка что интерфейс на русском языке
+        
+        Проверяет наличие кнопки "Войти" и отсутствие казахских элементов
+        """
+        # Проверяем наличие русских индикаторов
+        russian_found = any(indicator in html for indicator in self.RUSSIAN_INDICATORS)
+        
+        # Проверяем отсутствие казахских индикаторов (в кнопках)
+        # Ищем кнопку входа
+        parser = HTMLParser(html)
+        submit_buttons = parser.css('input[type="submit"]')
+        
+        for btn in submit_buttons:
+            if not btn.attributes:
+                continue
+            value = btn.attributes.get('value', '')
+            
+            # Если кнопка "Войти" — русский
+            if value == 'Войти':
+                self.logger.debug("Найдена кнопка 'Войти' — интерфейс русский")
+                return True
+            
+            # Если кнопка "Кіру" — казахский
+            if value == 'Кіру':
+                self.logger.debug("Найдена кнопка 'Кіру' — интерфейс казахский")
+                return False
+        
+        # Fallback: проверка по общим индикаторам
+        if russian_found:
+            kazakh_found = any(indicator in html for indicator in self.KAZAKH_INDICATORS)
+            return russian_found and not kazakh_found
+        
+        return False
+    
+    async def _send_language_change_request(
+        self, 
+        session: aiohttp.ClientSession, 
+        viewstate: str
+    ):
+        """
+        Отправка POST запроса для смены языка на русский
+        
+        Ответ не обрабатывается — изменения применяются при следующем GET
+        """
+        url = f"{self.base_url}/index.xhtml"
+        
+        data = {
+            self.LANGUAGE_FORM_ID: self.LANGUAGE_FORM_ID,
+            'javax.faces.ViewState': viewstate,
+            'javax.faces.source': self.RUSSIAN_LANGUAGE_TRIGGER,
+            'javax.faces.partial.execute': f'{self.RUSSIAN_LANGUAGE_TRIGGER} @component',
+            'javax.faces.partial.render': '@component',
+            'param1': f'{self.base_url}/#',
+            'org.richfaces.ajax.component': self.RUSSIAN_LANGUAGE_TRIGGER,
+            self.RUSSIAN_LANGUAGE_TRIGGER: self.RUSSIAN_LANGUAGE_TRIGGER,
+            'rfExt': 'null',
+            'AJAX:EVENTS_COUNT': '1',
+            'javax.faces.partial.ajax': 'true'
+        }
+        
+        headers = self._get_ajax_headers()
+        headers['Referer'] = f'{self.base_url}/'
+        headers['Origin'] = self.base_url
+        
+        try:
+            async with session.post(url, data=data, headers=headers) as response:
+                if response.status in [500, 502, 503, 504]:
+                    raise RetryableError(f"HTTP {response.status} при смене языка")
+                
+                # Ответ не важен, просто читаем чтобы завершить запрос
+                await response.text()
+                
+                self.logger.debug("POST запрос смены языка отправлен")
+                
+        except aiohttp.ClientError as e:
+            raise RetryableError(f"Сетевая ошибка при смене языка: {e}")
     
     async def _perform_login(self, session: aiohttp.ClientSession, 
                             viewstate: str, form_ids: Dict[str, str]):
