@@ -3,605 +3,601 @@
 """
 import sys
 import asyncio
-import traceback
-from typing import List, Optional, Dict
+from datetime import datetime
 
 from core.parser import CourtParser
 from core.region_worker import RegionWorker
 from config.settings import Settings
 from database.db_manager import DatabaseManager
-from search.document_handler import DocumentHandler
-from utils.logger import setup_logger, get_logger, init_logging
-from utils.progress import ProgressDisplay
-from datetime import datetime
-from utils.stats_reporter import StatsReporter
-from core.updaters import JudgeUpdater, EventsUpdater, DocsUpdater
+from utils.logger import init_logging, get_logger
+from utils.terminal_ui import init_ui, get_ui, Mode, RegionStatus, CourtStatus
 
 
 async def parse_all_regions_from_config() -> dict:
-    """Парсинг всех регионов с изолированными воркерами"""
-    logger = get_logger('main')
+    """Парсинг всех регионов"""
     
     settings = Settings()
     ps = settings.parsing_settings
     
     year = ps.get('year', '2025')
-    court_types = ps.get('court_types', ['smas'])
+    court_types = ps.get('court_types', ['smas', 'appellate'])
     start_from = ps.get('start_from', 1)
     max_number = ps.get('max_number', 9999)
-    max_consecutive_empty = ps.get('max_consecutive_empty', 200)
+    max_consecutive_empty = ps.get('max_consecutive_empty', 5)
     delay_between_requests = ps.get('delay_between_requests', 2)
-    max_parallel_regions = ps.get('max_parallel_regions', 1)
+    max_parallel_regions = ps.get('max_parallel_regions', 3)
     
-    region_retry_max_attempts = ps.get('region_retry_max_attempts', 3)
-    region_retry_delay = ps.get('region_retry_delay_seconds', 5)
-    
-    limit_regions = settings.get_limit_regions()
-    limit_cases_per_region = settings.get_limit_cases_per_region()
-    
+    # Получаем регионы
     all_regions = settings.get_target_regions()
+    limit_regions = settings.get_limit_regions()
+    regions_to_process = all_regions[:limit_regions] if limit_regions else all_regions
     
-    if limit_regions:
-        regions_to_process = all_regions[:limit_regions]
-    else:
-        regions_to_process = all_regions
+    # Собираем информацию о регионах и их судах
+    regions_display = {}
+    region_courts = {}
     
-    # Статистика сессии
-    session_stats = {
-        'start_time': datetime.now(),
-        'end_time': None,
-        'year': year,
-        'regions_total': len(regions_to_process),
-        'regions_processed': 0,
-        'regions_failed': 0,
-        'total_queries': 0,
-        'total_cases_saved': 0,
-        'gaps_filled': 0,
-        'regions': {}
-    }
+    for key in regions_to_process:
+        region_config = settings.get_region(key)
+        regions_display[key] = region_config['name']
+        
+        # Получаем доступные суды для этого региона
+        available_courts = list(region_config.get('courts', {}).keys())
+        
+        # Фильтруем только те, которые в court_types (или все если это особый регион)
+        if available_courts:
+            # Проверяем есть ли стандартные суды (smas, appellate)
+            standard_courts = [c for c in court_types if c in available_courts]
+            
+            if standard_courts:
+                # Обычный регион — используем стандартные суды
+                region_courts[key] = standard_courts
+            else:
+                # Особый регион (Republic) — используем все его суды
+                region_courts[key] = available_courts
+        else:
+            region_courts[key] = court_types
     
-    stats_lock = asyncio.Lock()
-    semaphore = asyncio.Semaphore(max_parallel_regions)
+    # Инициализация UI с информацией о судах для каждого региона
+    ui = init_ui(Mode.PARSE, regions_display, court_types, region_courts)
     
-    regions_display = {
-        key: settings.get_region (key)['name'] 
-        for key in regions_to_process
-    }
-    progress = ProgressDisplay(regions_display, court_types)
-    
+    # Подключение к БД
     db_manager = DatabaseManager(settings.database)
     await db_manager.connect()
     
-    # Инициализация репортера статистики
-    stats_reporter = StatsReporter(db_manager, settings)
+    # Семафор для параллельности
+    semaphore = asyncio.Semaphore(max_parallel_regions)
+    
+    # Статистика для отчёта
+    report_data = {
+        'no_judge': 0,
+        'no_parties': 0,
+    }
+    
+    logger = get_logger('main')
     
     try:
-        # === НАЧАЛЬНЫЙ ОТЧЁТ ===
-        plan = {
-            'mode': 'parse',
-            'year': year,
-            'court_types': court_types,
-            'target_regions': regions_to_process,
-            'max_consecutive_empty': max_consecutive_empty,
-        }
-        await stats_reporter.print_start_report(plan)
+        await ui.start()
         
-        print()  # Пустая строка перед прогрессом
-        await progress.start()
-        
-        async def process_region_with_retry(region_key: str):
+        async def process_region(region_key: str):
             async with semaphore:
-                region_config = settings.get_region(region_key)
-                region_session = {}
+                # Передаём суды конкретного региона
+                region_court_types = region_courts.get(region_key, court_types)
                 
-                for attempt in range(1, region_retry_max_attempts + 1):
-                    worker = None
-                    try:
-                        worker = RegionWorker(settings, region_key)
-                        
-                        if not await worker.initialize():
-                            raise Exception("Не удалось инициализировать воркер")
-                        
-                        logger.info(f"Регион {region_config['name']}: старт (попытка {attempt})")
-                        
-                        region_stats = await process_region_all_courts_with_worker(
-                            worker=worker,
-                            db_manager=db_manager,
-                            settings=settings,
-                            region_key=region_key,
-                            court_types=court_types,
-                            year=year,
-                            start_from=start_from,
-                            max_number=max_number,
-                            max_consecutive_empty=max_consecutive_empty,
-                            delay_between_requests=delay_between_requests,
-                            limit_cases=limit_cases_per_region,
-                            progress=progress,
-                            logger=logger,
-                            region_session=region_session
-                        )
-                        
-                        await progress.set_region_done(region_key)
-                        
-                        async with stats_lock:
-                            session_stats['regions_processed'] += 1
-                            session_stats['total_queries'] += region_stats['total_queries']
-                            session_stats['total_cases_saved'] += region_stats['total_cases_saved']
-                            session_stats['regions'][region_key] = region_session
-                        
-                        logger.info(
-                            f"Регион {region_config['name']}: завершён | "
-                            f"запросов: {region_stats['total_queries']} | "
-                            f"сохранено: {region_stats['total_cases_saved']}"
-                        )
-                        
-                        return region_stats
-                        
-                    except Exception as e:
-                        logger.error(f"Регион {region_config['name']}: ошибка - {e}")
-                        
-                        # Помечаем ошибку в статистике
-                        for court_key in court_types:
-                            if court_key not in region_session:
-                                region_session[court_key] = {
-                                    'queries': 0,
-                                    'saved': 0,
-                                    'time': '',
-                                    'stop_reason': 'error',
-                                    'consecutive_empty': 0
-                                }
-                            else:
-                                region_session[court_key]['stop_reason'] = 'error'
-                        
-                        if attempt < region_retry_max_attempts:
-                            await asyncio.sleep(region_retry_delay)
-                        else:
-                            await progress.set_region_error(region_key)
-                            async with stats_lock:
-                                session_stats['regions_failed'] += 1
-                                session_stats['regions'][region_key] = region_session
-                            return None
-                            
-                    finally:
-                        if worker:
-                            await worker.cleanup()
+                await process_region_with_ui(
+                    region_key=region_key,
+                    settings=settings,
+                    db_manager=db_manager,
+                    ui=ui,
+                    court_types=region_court_types,  # Суды этого региона
+                    year=year,
+                    start_from=start_from,
+                    max_number=max_number,
+                    max_consecutive_empty=max_consecutive_empty,
+                    delay=delay_between_requests,
+                    report_data=report_data,
+                    logger=logger
+                )
         
-        tasks = [process_region_with_retry(r) for r in regions_to_process]
+        tasks = [process_region(r) for r in regions_to_process]
         await asyncio.gather(*tasks, return_exceptions=True)
         
-        await progress.finish()
-        
-        session_stats['end_time'] = datetime.now()
-        
-        # === ФИНАЛЬНЫЙ ОТЧЁТ ===
-        print()  # Пустая строка после прогресса
-        await stats_reporter.print_end_report(session_stats)
+        await ui.finish()
+        ui.print_final_report(report_data)
         
     except KeyboardInterrupt:
-        session_stats['end_time'] = datetime.now()
-        logger.warning("Прервано пользователем")
-        
-        # Помечаем все активные регионы как остановленные вручную
-        for region_key in regions_to_process:
-            if region_key in session_stats['regions']:
-                for court_key in session_stats['regions'][region_key]:
-                    if not session_stats['regions'][region_key][court_key].get('stop_reason'):
-                        session_stats['regions'][region_key][court_key]['stop_reason'] = 'manual'
-        
-        await stats_reporter.print_end_report(session_stats)
-        
+        await ui.finish()
+        print("\n⚠ Прервано пользователем")
+    
     finally:
         await db_manager.disconnect()
     
-    return session_stats
+    return {}
 
-async def process_region_all_courts_with_worker(
-    worker: RegionWorker,
-    db_manager,
-    settings: Settings,
+
+async def process_region_with_ui(
     region_key: str,
-    court_types: List[str],
+    settings: Settings,
+    db_manager,
+    ui,
+    court_types: list,
     year: str,
     start_from: int,
     max_number: int,
     max_consecutive_empty: int,
-    delay_between_requests: float,
-    limit_cases: Optional[int],
-    progress: ProgressDisplay,
-    logger,
-    region_session: Dict  # Новый параметр для сбора статистики
-) -> dict:
-    """Обработка всех судов региона через воркер"""
+    delay: float,
+    report_data: dict,
+    logger
+):
+    """Обработка региона"""
+    
     region_config = settings.get_region(region_key)
+    worker = RegionWorker(settings, region_key)
     
-    region_stats = {
-        'region_key': region_key,
-        'courts_processed': 0,
-        'total_queries': 0,
-        'total_cases_saved': 0,
-        'courts_stats': {}
-    }
+    try:
+        if not await worker.initialize():
+            logger.error(f"Failed to initialize worker for {region_key}")
+            ui.region_error(region_key, "Failed to initialize")
+            return
+        
+        ui.region_start(region_key)
+        logger.info(f"Started processing region: {region_key}")
+        
+        region_no_judge = 0
+        
+        for court_key in court_types:
+            court_config = region_config['courts'].get(court_key)
+            if not court_config:
+                continue
+            
+            ui.court_start(region_key, court_key)
+            logger.info(f"Started court: {region_key}/{court_key}")
+            
+            try:
+                court_stats = await parse_court(
+                    worker=worker,
+                    db_manager=db_manager,
+                    settings=settings,
+                    region_key=region_key,
+                    court_key=court_key,
+                    year=year,
+                    start_from=start_from,
+                    max_number=max_number,
+                    max_consecutive_empty=max_consecutive_empty,
+                    delay=delay,
+                    ui=ui,
+                    logger=logger
+                )
+                
+                ui.court_done(region_key, court_key, court_stats['saved'])
+                logger.info(f"Completed court: {region_key}/{court_key}, saved: {court_stats['saved']}")
+                
+                region_no_judge += court_stats.get('no_judge', 0)
+                
+            except Exception as e:
+                logger.error(f"Error in court {region_key}/{court_key}: {e}")
+                ui.court_error(region_key, court_key, str(e))
+        
+        ui.region_done(region_key)
+        logger.info(f"Completed region: {region_key}")
+        
+        report_data['no_judge'] += region_no_judge
+        
+    except Exception as e:
+        logger.error(f"Error in region {region_key}: {e}", exc_info=True)
+        ui.region_error(region_key, str(e))
     
-    for court_key in court_types:
-        court_config = region_config['courts'].get(court_key)
-        if not court_config:
-            logger.warning(f"Суд {court_key} не найден в регионе {region_key}")
-            continue
-        
-        logger.info(f"Регион {region_key}, суд {court_key}: старт")
-        
-        await progress.update(
-            region_key, 
-            court=court_key, 
-            saved=0, 
-            queries=0, 
-            consecutive_empty=0
-        )
-        
-        court_start_time = datetime.now()
-        
-        try:
-            court_stats = await parse_court_with_worker(
-                worker=worker,
-                db_manager=db_manager,
-                settings=settings,
-                region_key=region_key,
-                court_key=court_key,
-                year=year,
-                start_from=start_from,
-                max_number=max_number,
-                max_consecutive_empty=max_consecutive_empty,
-                delay_between_requests=delay_between_requests,
-                limit_cases=limit_cases,
-                progress=progress,
-                logger=logger
-            )
-            
-            await progress.set_court_done(region_key, court_key)
-            
-            court_end_time = datetime.now()
-            court_duration = court_end_time - court_start_time
-            minutes, seconds = divmod(int(court_duration.total_seconds()), 60)
-            
-            # Определяем причину остановки
-            if court_stats['consecutive_empty'] >= max_consecutive_empty:
-                stop_reason = 'empty_limit'
-            elif limit_cases and court_stats['queries_made'] >= limit_cases:
-                stop_reason = 'query_limit'
-            else:
-                stop_reason = 'completed'
-            
-            # Сохраняем статистику суда для отчёта
-            region_session[court_key] = {
-                'queries': court_stats['queries_made'],
-                'saved': court_stats['cases_saved'],
-                'time': f"{minutes}:{seconds:02d}",
-                'stop_reason': stop_reason,
-                'consecutive_empty': court_stats['consecutive_empty']
-            }
-            
-            region_stats['courts_processed'] += 1
-            region_stats['total_queries'] += court_stats['queries_made']
-            region_stats['total_cases_saved'] += court_stats['cases_saved']
-            region_stats['courts_stats'][court_key] = court_stats
-            
-            logger.info(
-                f"Регион {region_key}, суд {court_key}: завершён | "
-                f"запросов: {court_stats['queries_made']} | "
-                f"сохранено: {court_stats['cases_saved']}"
-            )
-            
-        except Exception as e:
-            logger.error(f"Ошибка суда {court_key} в регионе {region_key}: {e}")
-            
-            court_end_time = datetime.now()
-            court_duration = court_end_time - court_start_time
-            minutes, seconds = divmod(int(court_duration.total_seconds()), 60)
-            
-            region_session[court_key] = {
-                'queries': 0,
-                'saved': 0,
-                'time': f"{minutes}:{seconds:02d}",
-                'stop_reason': 'error',
-                'consecutive_empty': 0
-            }
-            continue
-    
-    return region_stats
+    finally:
+        await worker.cleanup()
 
-async def parse_court_with_worker(
-    worker: RegionWorker,
+
+async def parse_court(
+    worker,
     db_manager,
-    settings: Settings,
+    settings,
     region_key: str,
     court_key: str,
     year: str,
     start_from: int,
     max_number: int,
     max_consecutive_empty: int,
-    delay_between_requests: float,
-    limit_cases: Optional[int],
-    progress: ProgressDisplay,
+    delay: float,
+    ui,
     logger
 ) -> dict:
-    """Парсинг одного суда через воркер"""
+    """Парсинг суда"""
     
     stats = {
-        'missing_found': 0,
-        'missing_filled': 0,
-        'missing_not_found': 0,
-        'new_queries': 0,
-        'new_saved': 0,
+        'saved': 0,
+        'queries': 0,
+        'no_judge': 0,
         'consecutive_empty': 0,
-        'gaps_skipped': False
     }
     
+    # Получаем существующие номера
     existing = await db_manager.get_existing_case_numbers(
         region_key, court_key, year, settings
     )
+    last_in_db = max(existing) if existing else 0
     
-    last_in_db = await db_manager.get_last_sequence_number(
-        region_key, court_key, year, settings
-    )
+    current_number = last_in_db + 1 if last_in_db > 0 else start_from
     
-    logger.info(f"{region_key}/{court_key}: существует {len(existing)}, последний #{last_in_db}")
+    logger.debug(f"Starting from number {current_number} (last in DB: {last_in_db})")
     
-    total_saved = 0
-    total_queries = 0
-    
-    # === ПРОВЕРКА ПРОПУСКОВ С УЧЁТОМ ИНТЕРВАЛА ===
-    gaps_interval = settings.parsing_settings.get('gaps_check_interval_days', 30)
-    should_check_gaps = await db_manager.should_check_gaps(
-        region_key, court_key, year, gaps_interval
-    )
-    
-    if last_in_db > 0 and should_check_gaps:
-        full_range = set(range(start_from, last_in_db + 1))
-        missing = sorted(full_range - existing)
-        stats['missing_found'] = len(missing)
+    while current_number <= max_number:
+        if stats['consecutive_empty'] >= max_consecutive_empty:
+            logger.info(f"Reached {max_consecutive_empty} consecutive empty results, stopping")
+            break
         
-        if missing:
-            logger.info(f"{region_key}/{court_key}: проверка пропусков ({len(missing)} шт)")
-            
-            for seq_num in missing:
-                if limit_cases and total_queries >= limit_cases:
-                    break
-                
-                result = await worker.search_and_save(
-                    db_manager=db_manager,
-                    court_key=court_key,
-                    sequence_number=seq_num,
-                    year=year
-                )
-                
-                total_queries += 1
-                
-                if result['success'] and result.get('saved'):
-                    stats['missing_filled'] += result.get('saved_count', 1)
-                    total_saved += result.get('saved_count', 1)
-                else:
-                    stats['missing_not_found'] += 1
-                
-                await progress.update(
-                    region_key,
-                    court=court_key,
-                    saved=total_saved,
-                    queries=total_queries,
-                    consecutive_empty=stats['consecutive_empty']
-                )
-                
-                await asyncio.sleep(delay_between_requests)
-        
-        # Обновляем дату проверки пропусков
-        await db_manager.update_gaps_check_date(
-            region_key, court_key, year, last_in_db
+        # Поиск дела
+        result = await worker.search_and_save(
+            db_manager=db_manager,
+            court_key=court_key,
+            sequence_number=current_number,
+            year=year
         )
-        logger.info(f"{region_key}/{court_key}: проверка пропусков завершена")
-    
-    elif last_in_db > 0 and not should_check_gaps:
-        # Пропускаем проверку gaps
-        stats['gaps_skipped'] = True
-        logger.info(
-            f"{region_key}/{court_key}: пропуск проверки gaps "
-            f"(интервал {gaps_interval} дней не прошёл)"
-        )
-    
-    # === ПОИСК НОВЫХ ДЕЛ (без изменений) ===
-    actual_start = last_in_db + 1 if last_in_db > 0 else start_from
-    
-    if actual_start <= max_number:
-        logger.info(f"{region_key}/{court_key}: новые дела с #{actual_start}")
         
-        current_number = actual_start
+        stats['queries'] += 1
+        ui.increment_queries(region_key)
         
-        while current_number <= max_number:
-            if limit_cases and total_queries >= limit_cases:
-                logger.info(f"{region_key}/{court_key}: лимит запросов {limit_cases}")
-                break
+        if result['success'] and result.get('saved'):
+            saved_count = result.get('saved_count', 1)
+            stats['saved'] += saved_count
+            stats['consecutive_empty'] = 0
             
-            if stats['consecutive_empty'] >= max_consecutive_empty:
-                logger.info(f"{region_key}/{court_key}: лимит пустых {max_consecutive_empty}")
-                break
+            ui.increment_saved(region_key, court_key, saved_count)
             
-            result = await worker.search_and_save(
-                db_manager=db_manager,
-                court_key=court_key,
-                sequence_number=current_number,
-                year=year
+            # Логирование каждого сохранённого дела
+            case_numbers = result.get('case_numbers', [result.get('case_number')])
+            for case_num in case_numbers:
+                has_judge = result.get('has_judge', True)
+                if not has_judge:
+                    stats['no_judge'] += 1
+                
+                logger.info(
+                    f"Saved: {case_num}",
+                    extra={
+                        'region': region_key,
+                        'court': court_key,
+                        'case_number': case_num
+                    }
+                )
+        
+        elif result.get('error') == 'no_results':
+            # Это НЕ ошибка, просто нет результатов
+            stats['consecutive_empty'] += 1
+            logger.debug(
+                f"No results for #{current_number} (consecutive: {stats['consecutive_empty']})",
+                extra={'region': region_key, 'court': court_key}
             )
-            
-            stats['new_queries'] += 1
-            total_queries += 1
-            
-            if result['success'] and result.get('saved'):
-                stats['new_saved'] += result.get('saved_count', 1)
-                total_saved += result.get('saved_count', 1)
-                stats['consecutive_empty'] = 0
-            elif result.get('error') == 'no_results':
-                stats['consecutive_empty'] += 1
-            elif result.get('error') == 'target_not_found' and court_key != 'smas':
-                stats['consecutive_empty'] += 1
-            
-            await progress.update(
-                region_key,
-                court=court_key,
-                saved=total_saved,
-                queries=total_queries,
-                consecutive_empty=stats['consecutive_empty']
+        
+        elif result.get('error') == 'target_not_found':
+            # Это тоже НЕ ошибка
+            stats['consecutive_empty'] += 1
+            logger.debug(
+                f"Target not found for #{current_number}",
+                extra={'region': region_key, 'court': court_key}
             )
-            
-            current_number += 1
-            await asyncio.sleep(delay_between_requests)
+        
+        elif result.get('error'):
+            # Настоящая ошибка (сеть, авторизация, etc)
+            logger.warning(
+                f"Error for #{current_number}: {result.get('error')}",
+                extra={'region': region_key, 'court': court_key}
+            )
+            # НЕ увеличиваем errors в UI - это не считается ошибкой парсинга
+        
+        current_number += 1
+        await asyncio.sleep(delay)
     
-    return {
-        'queries_made': total_queries,
-        'cases_saved': total_saved,
-        'consecutive_empty': stats['consecutive_empty'],
-        'missing_filled': stats['missing_filled'],
-        'new_saved': stats['new_saved'],
-        'gaps_skipped': stats['gaps_skipped']
-    }
+    return stats
+
+
+# === UPDATE РЕЖИМЫ ===
 
 async def run_update_judge():
-    """Режим обновления судей (--mode update judge)"""
-    logger = get_logger('main')
-    
+    """Режим обновления судей"""
     settings = Settings()
-    
-    logger.info("=" * 70)
-    logger.info("РЕЖИМ ОБНОВЛЕНИЯ: СУДЬИ (СМАС)")
-    logger.info("=" * 70)
-    
     db_manager = DatabaseManager(settings.database)
     await db_manager.connect()
+    logger = get_logger('main')
     
     try:
-        updater = JudgeUpdater(settings, db_manager)
-        await updater.run()
+        cases = await db_manager.get_smas_cases_without_judge(settings)
+        
+        if not cases:
+            print("Нет дел для обновления")
+            return
+        
+        from utils.text_processor import TextProcessor
+        tp = TextProcessor()
+        
+        grouped = {}
+        for case_number in cases:
+            info = tp.find_region_and_court_by_case_number(case_number, settings.regions)
+            if info:
+                grouped.setdefault(info['region_key'], []).append(case_number)
+        
+        regions_display = {k: settings.get_region(k)['name'] for k in grouped.keys()}
+        ui = init_ui(Mode.JUDGE, regions_display, court_types=[])
+        
+        for region_key, region_cases in grouped.items():
+            region = ui.regions.get(region_key)
+            if region:
+                region.total_cases = len(region_cases)
+        
+        await ui.start()
+        
+        semaphore = asyncio.Semaphore(3)
+        
+        async def process_region(region_key: str, region_cases: list):
+            async with semaphore:
+                worker = RegionWorker(settings, region_key)
+                try:
+                    if not await worker.initialize():
+                        ui.region_error(region_key, "Init failed")
+                        return
+                    
+                    ui.region_start(region_key)
+                    
+                    processed = 0
+                    found = 0
+                    
+                    for case_number in region_cases:
+                        _, cases_found = await worker.search_case_by_number(case_number)
+                        
+                        processed += 1
+                        
+                        target = next(
+                            (c for c in cases_found if tp.is_matching_case_number(c.case_number, case_number)),
+                            None
+                        )
+                        
+                        if target and target.judge:
+                            await db_manager.update_case(target)
+                            found += 1
+                            logger.info(f"Judge found for {case_number}: {target.judge}")
+                        
+                        await db_manager.mark_case_as_updated(case_number)
+                        
+                        ui.update_progress(region_key, processed=processed, found=found)
+                        
+                        await asyncio.sleep(2)
+                    
+                    ui.region_done(region_key)
+                    
+                except Exception as e:
+                    logger.error(f"Error in {region_key}: {e}")
+                    ui.region_error(region_key, str(e))
+                finally:
+                    await worker.cleanup()
+        
+        tasks = [process_region(k, v) for k, v in grouped.items()]
+        await asyncio.gather(*tasks, return_exceptions=True)
+        
+        await ui.finish()
+        ui.print_final_report()
+        
     finally:
         await db_manager.disconnect()
+
 
 async def run_update_events():
-    """Режим обновления событий (--mode update case_events)"""
-    logger = get_logger('main')
-    
+    """Режим обновления событий"""
     settings = Settings()
-    
-    logger.info("=" * 70)
-    logger.info("РЕЖИМ ОБНОВЛЕНИЯ: СОБЫТИЯ ДЕЛ")
-    logger.info("=" * 70)
-    
     db_manager = DatabaseManager(settings.database)
     await db_manager.connect()
+    logger = get_logger('main')
     
     try:
-        updater = EventsUpdater(settings, db_manager)
-        await updater.run()
+        config = settings.update_settings.get('case_events', {})
+        filters = config.get('filters', {})
+        
+        cases = await db_manager.get_cases_for_update({
+            'defendant_keywords': filters.get('party_keywords', []),
+            'exclude_event_types': filters.get('exclude_event_types', []),
+            'update_interval_days': config.get('check_interval_days', 2)
+        })
+        
+        if not cases:
+            print("Нет дел для обновления")
+            return
+        
+        from utils.text_processor import TextProcessor
+        tp = TextProcessor()
+        
+        grouped = {}
+        for case_number in cases:
+            info = tp.find_region_and_court_by_case_number(case_number, settings.regions)
+            if info:
+                grouped.setdefault(info['region_key'], []).append(case_number)
+        
+        regions_display = {k: settings.get_region(k)['name'] for k in grouped.keys()}
+        ui = init_ui(Mode.EVENTS, regions_display, court_types=[])
+        
+        for region_key, region_cases in grouped.items():
+            region = ui.regions.get(region_key)
+            if region:
+                region.total_cases = len(region_cases)
+        
+        await ui.start()
+        
+        semaphore = asyncio.Semaphore(3)
+        
+        async def process_region(region_key: str, region_cases: list):
+            async with semaphore:
+                worker = RegionWorker(settings, region_key)
+                try:
+                    if not await worker.initialize():
+                        ui.region_error(region_key, "Init failed")
+                        return
+                    
+                    ui.region_start(region_key)
+                    
+                    processed = 0
+                    events_total = 0
+                    
+                    for case_number in region_cases:
+                        _, cases_found = await worker.search_case_by_number(case_number)
+                        
+                        processed += 1
+                        
+                        target = next(
+                            (c for c in cases_found if tp.is_matching_case_number(c.case_number, case_number)),
+                            None
+                        )
+                        
+                        events_added = 0
+                        if target:
+                            result = await db_manager.update_case(target)
+                            events_added = result.get('events_added', 0)
+                            events_total += events_added
+                            if events_added > 0:
+                                logger.info(f"Added {events_added} events for {case_number}")
+                        
+                        await db_manager.mark_case_as_updated(case_number)
+                        
+                        ui.update_progress(region_key, processed=processed, events=events_total)
+                        
+                        await asyncio.sleep(2)
+                    
+                    ui.region_done(region_key)
+                    
+                except Exception as e:
+                    logger.error(f"Error in {region_key}: {e}")
+                    ui.region_error(region_key, str(e))
+                finally:
+                    await worker.cleanup()
+        
+        tasks = [process_region(k, v) for k, v in grouped.items()]
+        await asyncio.gather(*tasks, return_exceptions=True)
+        
+        await ui.finish()
+        ui.print_final_report()
+        
     finally:
         await db_manager.disconnect()
+
 
 async def run_update_docs():
-    """Режим обновления документов (--mode update docs)"""
-    logger = get_logger('main')
-    
+    """Режим скачивания документов"""
     settings = Settings()
-    
-    logger.info("=" * 70)
-    logger.info("РЕЖИМ ОБНОВЛЕНИЯ: ДОКУМЕНТЫ")
-    logger.info("=" * 70)
-    
     db_manager = DatabaseManager(settings.database)
     await db_manager.connect()
+    logger = get_logger('main')
     
     try:
-        updater = DocsUpdater(settings, db_manager)
-        await updater.run()
+        config = settings.update_settings.get('docs', {})
+        filters = config.get('filters', {})
+        
+        cases = await db_manager.get_cases_for_documents(filters, config.get('max_per_session'))
+        
+        if not cases:
+            print("Нет дел для обработки")
+            return
+        
+        from utils.text_processor import TextProcessor
+        from search.document_handler import DocumentHandler
+        
+        tp = TextProcessor()
+        doc_handler = DocumentHandler(
+            settings.base_url,
+            config.get('storage_dir', './documents'),
+            settings.regions
+        )
+        
+        grouped = {}
+        for case in cases:
+            info = tp.find_region_and_court_by_case_number(case['case_number'], settings.regions)
+            if info:
+                grouped.setdefault(info['region_key'], []).append(case)
+        
+        regions_display = {k: settings.get_region(k)['name'] for k in grouped.keys()}
+        ui = init_ui(Mode.DOCS, regions_display, court_types=[])
+        
+        for region_key, region_cases in grouped.items():
+            region = ui.regions.get(region_key)
+            if region:
+                region.total_cases = len(region_cases)
+        
+        await ui.start()
+        
+        semaphore = asyncio.Semaphore(3)
+        
+        async def process_region(region_key: str, region_cases: list):
+            async with semaphore:
+                worker = RegionWorker(settings, region_key)
+                try:
+                    if not await worker.initialize():
+                        ui.region_error(region_key, "Init failed")
+                        return
+                    
+                    ui.region_start(region_key)
+                    
+                    processed = 0
+                    docs_total = 0
+                    
+                    for case in region_cases:
+                        case_number = case['case_number']
+                        case_id = case['id']
+                        
+                        results_html, cases_found = await worker.search_case_by_number(case_number)
+                        processed += 1
+                        
+                        if not results_html or not cases_found:
+                            continue
+                        
+                        target = next(
+                            (c for c in cases_found if tp.is_matching_case_number(c.case_number, case_number)),
+                            None
+                        )
+                        
+                        if not target or target.result_index is None:
+                            continue
+                        
+                        existing_keys = await db_manager.get_document_keys(case_id)
+                        
+                        downloaded = await doc_handler.fetch_all_documents(
+                            session=worker.session,
+                            results_html=results_html,
+                            case_number=case_number,
+                            case_index=target.result_index,
+                            existing_keys=existing_keys,
+                            delay=config.get('download_delay', 2)
+                        )
+                        
+                        if downloaded:
+                            await db_manager.save_documents(case_id, downloaded)
+                            docs_total += len(downloaded)
+                            logger.info(f"Downloaded {len(downloaded)} docs for {case_number}")
+                        
+                        await db_manager.mark_documents_downloaded(case_id)
+                        
+                        ui.update_progress(region_key, processed=processed, docs=docs_total)
+                        
+                        await asyncio.sleep(2)
+                    
+                    ui.region_done(region_key)
+                    
+                except Exception as e:
+                    logger.error(f"Error in {region_key}: {e}")
+                    ui.region_error(region_key, str(e))
+                finally:
+                    await worker.cleanup()
+        
+        tasks = [process_region(k, v) for k, v in grouped.items()]
+        await asyncio.gather(*tasks, return_exceptions=True)
+        
+        await ui.finish()
+        ui.print_final_report()
+        
     finally:
         await db_manager.disconnect()
 
-async def _process_single_case(parser, doc_handler, case_number: str, delay: float, logger) -> dict:
-    """Обработка одного дела: обновление событий + документы"""
-    result = {'updated': False, 'events_added': 0, 'documents': 0, 'error': False, 'skipped': False}
-    
-    try:
-        logger.info(f"Обработка дела: {case_number}")
-        
-        results_html, cases = await parser.search_case_by_number(case_number)
-        
-        if not results_html or not cases:
-            logger.warning(f"Дело не найдено на сайте: {case_number}")
-            result['skipped'] = True
-            return result
-        
-        target_case = next((c for c in cases if c.case_number == case_number), None)
-        
-        if not target_case or target_case.result_index is None:
-            logger.warning(f"Индекс не определён: {case_number}")
-            result['skipped'] = True
-            return result
-        
-        save_result = await parser.db_manager.update_case(target_case)
-        
-        if save_result.get('events_added', 0) > 0:
-            result['events_added'] = save_result['events_added'] 
-            result['updated'] = True
-            logger.info(f"Добавлено событий: {result['events_added']} для {case_number}")
-        
-        case_id = save_result.get('case_id') or await parser.db_manager.get_case_id(case_number)
-        
-        if case_id:
-            session = await parser.session_manager.get_session()
-            existing_keys = await parser.db_manager.get_document_keys(case_id)
-            
-            downloaded = await doc_handler.fetch_all_documents(
-                session=session,
-                results_html=results_html,
-                case_number=case_number,
-                case_index=target_case.result_index,
-                existing_keys=existing_keys,
-                delay=delay
-            )
-            
-            if downloaded:
-                await parser.db_manager.save_documents(case_id, downloaded)
-                result['documents'] = len(downloaded)
-                result['updated'] = True
-                logger.info(f"Скачано документов: {len(downloaded)} для {case_number}")
-            
-            await parser.db_manager.mark_documents_downloaded(case_id)
-        
-        await asyncio.sleep(delay)
-        
-    except Exception as e:
-        logger.error(f"Ошибка обработки дела {case_number}: {e}")
-        result['error'] = True
-    
-    return result
-
-def _update_stats(stats: dict, result: dict):
-    """Обновить общую статистику"""
-    if result.get('error'):
-        stats['errors'] += 1
-    elif result.get('skipped'):
-        stats['skipped'] += 1
-    elif result.get('updated'):
-        stats['cases_updated'] += 1
-        stats['events_added'] += result.get('events_added', 0)
-        stats['documents_downloaded'] += result.get('documents', 0)
-    else:
-        stats['skipped'] += 1
 
 def main():
     """Главная функция"""
-    # Инициализация всех логгеров ОДИН раз при старте
     init_logging(log_dir="logs", level="DEBUG")
-    logger = get_logger('main')
     
-    logger.info("=" * 70)
-    logger.info("ПАРСЕР СУДЕБНЫХ ДЕЛ КАЗАХСТАНА v2.2")
-    logger.info("=" * 70)
-    
-    # Парсинг аргументов
     mode = 'parse'
     submode = None
     
@@ -617,39 +613,22 @@ def main():
             asyncio.run(parse_all_regions_from_config())
         
         elif mode == 'update':
-            if submode is None:
-                logger.error("Укажите подкоманду: judge, case_events, docs")
-                logger.info("Примеры:")
-                logger.info("  python main.py --mode update judge")
-                logger.info("  python main.py --mode update case_events")
-                logger.info("  python main.py --mode update docs")
-                sys.exit(1)
-            
-            elif submode == 'judge':
+            if submode == 'judge':
                 asyncio.run(run_update_judge())
-            
             elif submode == 'case_events':
                 asyncio.run(run_update_events())
-            
-            elif submode == 'docs': asyncio.run(run_update_docs())
-            
+            elif submode == 'docs':
+                asyncio.run(run_update_docs())
             else:
-                logger.error(f"Неизвестная подкоманда: {submode}")
-                logger.info("Доступные подкоманды: judge, case_events, docs")
+                print("Usage: --mode update [judge|case_events|docs]")
                 sys.exit(1)
-        
         else:
-            logger.error(f"Неизвестный режим: {mode}")
-            logger.info("Доступные режимы: parse, update")
+            print("Usage: --mode [parse|update]")
             sys.exit(1)
             
     except KeyboardInterrupt:
-        logger.warning("Прервано пользователем")
+        print("\n⚠ Interrupted")
         sys.exit(0)
-    except Exception as e:
-        logger.critical(f"Критическая ошибка: {e}")
-        logger.debug(traceback.format_exc())
-        sys.exit(1)
 
 
 if __name__ == '__main__':

@@ -1,6 +1,7 @@
 """
 Менеджер базы данных
 """
+import re
 from typing import Dict, Any, Optional, List, Set
 from datetime import datetime, timedelta
 import asyncpg
@@ -252,6 +253,37 @@ class DatabaseManager:
         self.logger.debug(f"Кеши загружены: {len(self.judges_cache)} судей, "
                          f"{len(self.parties_cache)} сторон, "
                          f"{len(self.event_types_cache)} типов событий")
+        
+    def _extract_sequence_number(self, case_number: str) -> Optional[int]:
+        """
+        Извлечь порядковый номер из номера дела
+        
+        Обрабатывает суффиксы дубликатов (2), (3) и т.д.
+        
+        Примеры:
+            7101-25-00-6/123     → 123
+            7101-25-00-6/123(2)  → 123
+            6001-25-00-6ап/1736  → 1736
+            6001-25-00-6ап/1736(2) → 1736
+        
+        Returns:
+            int или None если формат некорректный
+        """
+        
+        if '/' not in case_number:
+            return None
+        
+        # Берём часть после последнего /
+        seq_part = case_number.split('/')[-1]
+        
+        # Убираем суффикс (N) если есть: "1736(2)" → "1736"
+        seq_clean = re.sub(r'\(\d+\)$', '', seq_part)
+        
+        try:
+            return int(seq_clean)
+        except ValueError:
+            self.logger.warning(f"Не удалось извлечь sequence из: {case_number}")
+            return None
     
     async def __aenter__(self):
         await self.connect()
@@ -372,21 +404,15 @@ class DatabaseManager:
         
         Returns:
             {1, 2, 5, 10, 15, 23, 45, 67, 89, 100, ...}
-        
-        Example:
-            >>> existing = await db.get_existing_case_numbers('astana', 'smas', '2025', settings)
-            >>> 1075 in existing
-            True
         """
         # Получаем конфигурацию для формирования префикса номера
         region_config = settings.get_region(region_key)
         court_config = settings.get_court(region_key, court_key)
         
         # Формируем префикс номера дела
-        # Например: "6294-25-00-4/" для Астаны, SMAS, 2025
         kato = region_config['kato_code']
         instance = court_config['instance_code']
-        year_short = year[-2:]  # "2025" → "25"
+        year_short = year[-2:]
         case_type = court_config['case_type_code']
         
         prefix = f"{kato}{instance}-{year_short}-00-{case_type}/"
@@ -405,17 +431,9 @@ class DatabaseManager:
         sequence_numbers = set()
         
         for row in rows:
-            case_number = row['case_number']
-            # Извлекаем порядковый номер из "6294-25-00-4/1075"
-            if '/' in case_number:
-                try:
-                    seq_str = case_number.split('/')[-1]
-                    seq_num = int(seq_str)
-                    sequence_numbers.add(seq_num)
-                except (ValueError, IndexError):
-                    # Некорректный формат - пропускаем
-                    self.logger.warning(f"Некорректный формат номера: {case_number}")
-                    continue
+            seq_num = self._extract_sequence_number(row['case_number'])
+            if seq_num is not None:
+                sequence_numbers.add(seq_num)
         
         self.logger.info(
             f"Загружено существующих номеров для {region_key}/{court_key}/{year}: {len(sequence_numbers)}"
@@ -441,11 +459,6 @@ class DatabaseManager:
         
         Returns:
             Максимальный порядковый номер или 0 если дел нет
-        
-        Example:
-            >>> last = await db.get_last_sequence_number('astana', 'smas', '2025', settings)
-            >>> last
-            1075
         """
         region_config = settings.get_region(region_key)
         court_config = settings.get_court(region_key, court_key)
@@ -475,15 +488,9 @@ class DatabaseManager:
         max_sequence = 0
         
         for row in rows:
-            case_number = row['case_number']
-            if '/' in case_number:
-                try:
-                    seq_str = case_number.split('/')[-1]
-                    seq_num = int(seq_str)
-                    if seq_num > max_sequence:
-                        max_sequence = seq_num
-                except (ValueError, IndexError):
-                    continue
+            seq_num = self._extract_sequence_number(row['case_number'])
+            if seq_num is not None and seq_num > max_sequence:
+                max_sequence = seq_num
         
         self.logger.info(
             f"Последний номер для {region_key}/{court_key}/{year}: {max_sequence}"

@@ -1,34 +1,65 @@
 """
-Централизованное логирование с цветным выводом
+Логирование с ротацией по дате
 """
 import logging
 import sys
-import re
-from datetime import datetime
+import os
+from datetime import datetime, timedelta
 from pathlib import Path
 from logging.handlers import RotatingFileHandler
+from typing import Optional
+
+
+def _get_ui():
+    try:
+        from utils.terminal_ui import get_ui
+        return get_ui()
+    except ImportError:
+        return None
 
 
 class Colors:
     """ANSI цвета"""
+    RESET = '\033[0m'
+    BOLD = '\033[1m'
+    DIM = '\033[2m'
     GREEN = '\033[32m'
     BRIGHT_GREEN = '\033[92m'
-    RED = '\033[31m'
     YELLOW = '\033[33m'
+    RED = '\033[31m'
+    CYAN = '\033[36m'
     GRAY = '\033[90m'
     WHITE = '\033[97m'
-    CYAN = '\033[36m'
-    MAGENTA = '\033[35m'
-    RESET = '\033[0m'
     
     @classmethod
     def strip(cls, text: str) -> str:
-        """Удалить ANSI-коды из текста"""
-        ansi_pattern = re.compile(r'\033\[[0-9;]*m')
-        return ansi_pattern.sub('', text)
+        import re
+        return re.compile(r'\033\[[0-9;]*m').sub('', text)
 
 
-class ColoredFormatter(logging.Formatter):
+class FileFormatter(logging.Formatter):
+    """Форматтер для файла (без цветов)"""
+    
+    def format(self, record):
+        time_str = datetime.fromtimestamp(record.created).strftime('%Y-%m-%d %H:%M:%S.%f')[:-3]
+        message = record.getMessage()
+        clean_message = Colors.strip(message)
+        
+        # Добавляем дополнительную информацию если есть
+        extra_parts = []
+        if hasattr(record, 'region') and record.region:
+            extra_parts.append(f"region={record.region}")
+        if hasattr(record, 'court') and record.court:
+            extra_parts.append(f"court={record.court}")
+        if hasattr(record, 'case_number') and record.case_number:
+            extra_parts.append(f"case={record.case_number}")
+        
+        extra_str = f" [{', '.join(extra_parts)}]" if extra_parts else ""
+        
+        return f"{time_str} [{record.levelname:<7}] {record.name}{extra_str}: {clean_message}"
+
+
+class ColoredConsoleFormatter(logging.Formatter):
     """Форматтер с цветами для консоли"""
     
     LEVEL_COLORS = {
@@ -36,59 +67,40 @@ class ColoredFormatter(logging.Formatter):
         'INFO': Colors.GREEN,
         'WARNING': Colors.YELLOW,
         'ERROR': Colors.RED,
-        'CRITICAL': Colors.MAGENTA,
+        'CRITICAL': Colors.RED + Colors.BOLD,
     }
     
     def format(self, record):
-        time_str = datetime.fromtimestamp(record.created).strftime('%H:%M:%S')
+        time_str = datetime.fromtimestamp(record.created).strftime('%H :%M:%S')
         color = self.LEVEL_COLORS.get(record.levelname, Colors.WHITE)
-        
-        message = record.getMessage()
-        if '\033[' in message:
-            return message
-        
-        return f"{color}[{time_str}] {record.levelname:<7}{Colors.RESET} {message}"
+        return f"{Colors.DIM}[{time_str}]{Colors.RESET} {color}{record.levelname:<7}{Colors.RESET} {record.getMessage()}"
 
 
-class FileFormatter(logging.Formatter):
-    """Форматтер для файла (без цветов)"""
+def cleanup_old_logs(log_dir: str, days: int = 3):
+    """Удалить лог-файлы старше указанного количества дней"""
+    log_path = Path(log_dir)
+    if not log_path.exists():
+        return
     
-    def format(self, record):
-        time_str = datetime.fromtimestamp(record.created).strftime('%Y-%m-%d %H:%M:%S')
-        message = record.getMessage()
-        clean_message = Colors.strip(message)
-        return f"{time_str} [{record.levelname:<7}] {record.name}: {clean_message}"
+    cutoff_time = datetime.now() - timedelta(days=days)
+    
+    for log_file in log_path.glob("*.log"):
+        try:
+            file_mtime = datetime.fromtimestamp(log_file.stat().st_mtime)
+            if file_mtime < cutoff_time:
+                log_file.unlink()
+                print(f"Deleted old log: {log_file.name}")
+        except Exception as e:
+            print(f"Error deleting {log_file}: {e}")
 
 
-class ReportFormatter(logging.Formatter):
-    """Форматтер для отчётов"""
-    
-    def format(self, record):
-        message = record.getMessage()
-        return Colors.strip(message)
+def get_log_filename(prefix: str = "parser") -> str:
+    """Получить имя лог-файла с датой и временем"""
+    timestamp = datetime.now().strftime('%Y-%m-%d_%H-%M-%S')
+    return f"{prefix}_{timestamp}.log"
 
 
-class ProgressAwareHandler(logging.StreamHandler):
-    """
-    Handler который знает о прогресс-баре
-    
-    Когда прогресс активен — не выводит в консоль
-    """
-    
-    _progress_active = False
-    
-    @classmethod
-    def set_progress_active(cls, active: bool):
-        cls._progress_active = active
-    
-    @classmethod
-    def is_progress_active(cls) -> bool:
-        return cls._progress_active
-    
-    def emit(self, record):
-        if self._progress_active:
-            return
-        super().emit(record)
+_current_log_file: Optional[str] = None
 
 
 def setup_logger(
@@ -97,61 +109,100 @@ def setup_logger(
     level: str = "INFO",
     console_output: bool = True
 ) -> logging.Logger:
-    """
-    Настройка логгера с ротацией
-    """
+    """Настройка логгера"""
+    global _current_log_file
+    
     logger = logging.getLogger(name)
     logger.setLevel(logging.DEBUG)
+    logger.handlers.clear()
     
-    if logger.handlers:
-        logger.handlers.clear()
-    
+    # Создаём директорию логов
     Path(log_dir).mkdir(exist_ok=True)
-    file_handler = RotatingFileHandler(
-        f"{log_dir}/parser.log",
-        maxBytes=10 * 1024 * 1024,
-        backupCount=5,
-        encoding='utf-8'
+    
+    # Очищаем старые логи
+    cleanup_old_logs(log_dir, days=3)
+    
+    # Создаём имя файла при первом вызове
+    if _current_log_file is None:
+        _current_log_file = get_log_filename("parser")
+    
+    log_file_path = Path(log_dir) / _current_log_file
+    
+    # Файловый handler
+    file_handler = logging.FileHandler(
+        log_file_path,
+        encoding='utf-8',
+        mode='a'
     )
     file_handler.setLevel(logging.DEBUG)
     file_handler.setFormatter(FileFormatter())
     logger.addHandler(file_handler)
     
+    # Консольный handler (для fallback когда UI неактивен)
     if console_output:
-        console = ProgressAwareHandler(sys.stdout)
-        console.setLevel(getattr(logging, level))
-        console.setFormatter(ColoredFormatter())
-        logger.addHandler(console)
+        console_handler = logging.StreamHandler(sys.stdout)
+        console_handler.setLevel(getattr(logging, level))
+        console_handler.setFormatter(ColoredConsoleFormatter())
+        
+        # Добавляем фильтр чтобы не дублировать вывод когда UI активен
+        class UIFilter(logging.Filter):
+            def filter(self, record):
+                ui = _get_ui()
+                # Пропускаем в консоль только если UI неактивен
+                return ui is None or not ui._running
+        
+        console_handler.addFilter(UIFilter())
+        logger.addHandler(console_handler)
+    
+    return logger
+
+
+def setup_worker_logger(region_key: str, log_dir: str = "logs") -> logging.Logger:
+    """Настройка логгера для воркера региона"""
+    global _current_log_file
+    
+    logger_name = f'worker_{region_key}'
+    logger = logging.getLogger(logger_name)
+    logger.setLevel(logging.DEBUG)
+    logger.handlers.clear()
+    
+    Path(log_dir).mkdir(exist_ok=True)
+    
+    if _current_log_file is None:
+        _current_log_file = get_log_filename("parser")
+    
+    log_file_path = Path(log_dir) / _current_log_file
+    
+    file_handler = logging.FileHandler(
+        log_file_path,
+        encoding='utf-8',
+        mode='a'
+    )
+    file_handler.setLevel(logging.DEBUG)
+    file_handler.setFormatter(FileFormatter())
+    logger.addHandler(file_handler)
     
     return logger
 
 
 def setup_report_logger(log_dir: str = "logs") -> logging.Logger:
-    """
-    Настройка логгера для отчётов
-    """
+    """Настройка логгера для отчётов"""
     logger = logging.getLogger('report')
     logger.setLevel(logging.INFO)
-    
-    if logger.handlers:
-        logger.handlers.clear()
+    logger.handlers.clear()
     
     Path(log_dir).mkdir(exist_ok=True)
     
-    file_handler = RotatingFileHandler(
-        f"{log_dir}/reports.log",
-        maxBytes=5 * 1024 * 1024,
-        backupCount=3,
-        encoding='utf-8'
+    report_file = Path(log_dir) / get_log_filename("reports")
+    
+    file_handler = logging.FileHandler(
+        report_file,
+        encoding='utf-8',
+        mode='a'
     )
     file_handler.setLevel(logging.INFO)
-    file_handler.setFormatter(ReportFormatter())
+    file_handler.setFormatter(FileFormatter())
     logger.addHandler(file_handler)
-    
-    console = logging.StreamHandler(sys.stdout)
-    console.setLevel(logging.INFO)
-    console.setFormatter(logging.Formatter('%(message)s'))
-    logger.addHandler(console)
     
     return logger
 
@@ -161,48 +212,32 @@ def get_logger(name: str) -> logging.Logger:
     return logging.getLogger(name)
 
 
-def setup_worker_logger(region_key: str, log_dir: str = "logs") -> logging.Logger:
-    """
-    Настройка логгера для воркера региона
-    """
-    return setup_logger(
-        name=f'worker_{region_key}',
-        log_dir=log_dir,
-        level='DEBUG',
-        console_output=False
-    )
-
-
-def set_progress_mode(active: bool):
-    """
-    Включить/выключить режим прогресса
-    
-    Когда активен — консольные логи подавляются
-    """
-    ProgressAwareHandler.set_progress_active(active)
-
-
 def init_logging(log_dir: str = "logs", level: str = "INFO"):
     """Инициализация всех логгеров"""
+    global _current_log_file
+    _current_log_file = None  # Сброс для нового файла
+    
     setup_logger('main', log_dir, level, console_output=True)
     setup_report_logger(log_dir)
     
     components = [
-        'court_parser',
-        'authenticator',
-        'db_manager',
-        'circuit_breaker',
-        'retry_strategy',
-        'session_manager',
-        'results_parser',
-        'data_extractor',
-        'document_parser',
-        'form_handler',
-        'search_engine',
-        'document_handler',
-        'stats_collector',
-        'stats_reporter'
+        'court_parser', 'authenticator', 'db_manager',
+        'form_handler', 'search_engine', 'results_parser',
+        'document_handler', 'region_worker', 'circuit_breaker',
+        'retry_strategy', 'session_manager', 'data_extractor',
+        'document_parser'
     ]
     
     for component in components:
         setup_logger(component, log_dir, 'DEBUG', console_output=False)
+    
+    # Логируем начало сессии
+    main_logger = get_logger('main')
+    main_logger.info("=" * 60)
+    main_logger.info(f"New parsing session started at {datetime.now().isoformat()}")
+    main_logger.info("=" * 60)
+
+
+def set_progress_mode(active: bool):
+    """Устаревшая функция — для совместимости"""
+    pass
