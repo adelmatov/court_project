@@ -593,11 +593,13 @@ class DatabaseManager:
             for doc in documents:
                 try:
                     await conn.execute("""
-                        INSERT INTO case_documents (case_id, doc_date, doc_name, file_path, downloaded_at)
-                        VALUES ($1, $2, $3, $4, CURRENT_TIMESTAMP)
+                        INSERT INTO case_documents (case_id, doc_date, doc_name, file_path, file_size, downloaded_at)
+                        VALUES ($1, $2, $3, $4, $5, CURRENT_TIMESTAMP)
                         ON CONFLICT (case_id, doc_date, doc_name) DO UPDATE
-                        SET file_path = EXCLUDED.file_path, downloaded_at = CURRENT_TIMESTAMP
-                    """, case_id, doc['doc_date'], doc['doc_name'], doc['file_path'])
+                        SET file_path = EXCLUDED.file_path, 
+                            file_size = EXCLUDED.file_size,
+                            downloaded_at = CURRENT_TIMESTAMP
+                    """, case_id, doc['doc_date'], doc['doc_name'], doc['file_path'], doc.get('file_size'))
                     saved += 1
                 except Exception as e:
                     self.logger.error(f"Ошибка сохранения документа: {e}")
@@ -701,8 +703,12 @@ class DatabaseManager:
             """)
         
         if not filter_conditions:
-            self.logger.warning("Не указано ни одного фильтра для документов")
-            return []
+            if filters.get('mode') == 'none':
+                # Режим "none" — все дела без дополнительных фильтров
+                filter_conditions.append("1=1")
+            else:
+                self.logger.warning("Не указано ни одного фильтра для документов")
+                return []
         
         if mode == 'all':
             combined_filters = ' AND '.join(f'({cond})' for cond in filter_conditions)
@@ -771,7 +777,11 @@ class DatabaseManager:
         all_conditions = [f"({combined_filters})"] + common_conditions
         query += ' AND '.join(all_conditions)
         
-        query += " ORDER BY c.documents_checked_at NULLS FIRST, c.case_date DESC"
+        order = filters.get('order', 'newest')
+        if order == 'oldest':
+            query += " ORDER BY c.case_date ASC, c.documents_checked_at NULLS FIRST"
+        else:
+            query += " ORDER BY c.case_date DESC, c.documents_checked_at NULLS FIRST"
         
         if limit:
             query += f" LIMIT {limit}"

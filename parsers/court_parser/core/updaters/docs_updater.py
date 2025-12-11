@@ -64,6 +64,7 @@ class DocsUpdater(BaseUpdater):
             'regions': filters_config.get('regions'),
             'year': filters_config.get('year'),
             'check_interval_days': config.get('check_interval_days', 7),
+            'order': filters_config.get('order', 'newest'),
         }
         
         max_per_session = config.get('max_per_session')

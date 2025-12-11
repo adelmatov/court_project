@@ -13,6 +13,8 @@ from database.models import DocumentInfo
 from utils.text_processor import TextProcessor
 from utils.logger import get_logger
 from utils.http_utils import HttpHeaders, AjaxRequestBuilder
+import tempfile
+import shutil
 
 
 class DocumentHandler:
@@ -65,29 +67,31 @@ class DocumentHandler:
         
         return folder
     
-    def _save_file(self, case_number: str, doc_info: DocumentInfo, content: bytes) -> str:
-        """Сохранить файл на диск с новой структурой папок"""
-        # Получаем папку для дела
+    def _save_file(self, case_number: str, doc_info: DocumentInfo, content: bytes) -> dict:
+        """Сохранить файл на диск атомарно"""        
         case_dir = self._get_case_folder(case_number)
         
-        # Формируем имя файла
         date_prefix = doc_info.doc_date.strftime('%Y-%m-%d')
         safe_name = self._sanitize_filename(doc_info.doc_name)
-        filename = f"{date_prefix}_{safe_name}"
-        
-        if not filename.lower().endswith('.pdf'):
-            filename += '.pdf'
+        filename = f"{date_prefix}_{safe_name}.pdf"
         
         file_path = case_dir / filename
         
-        with open(file_path, 'wb') as f:
-            f.write(content)
+        # Атомарная запись: temp → rename
+        with tempfile.NamedTemporaryFile(dir=case_dir, delete=False, suffix='.tmp') as tmp:
+            tmp.write(content)
+            tmp_path = Path(tmp.name)
         
-        # Возвращаем относительный путь от storage_dir
+        shutil.move(str(tmp_path), str(file_path))
+        
         relative_path = file_path.relative_to(self.storage_dir)
         
-        self.logger.info(f"Сохранён: {relative_path}")
-        return str(relative_path)
+        self.logger.info(f"Сохранён: {relative_path} ({len(content)} bytes)")
+        
+        return {
+            'file_path': str(relative_path),
+            'file_size': len(content)
+        }
     
     def _sanitize_filename(self, filename: str) -> str:
         """Очистка имени файла"""
@@ -160,7 +164,7 @@ class DocumentHandler:
             return await response.text()
     
     async def download_pdf(self, session: aiohttp.ClientSession, pdf_url: str,
-                           case_number: str, doc_info: DocumentInfo) -> Optional[str]:
+                       case_number: str, doc_info: DocumentInfo) -> Optional[dict]:
         """Скачать PDF файл"""
         full_url = f"{self.base_url}{pdf_url}" if pdf_url.startswith('/') else pdf_url
         headers = HttpHeaders.get_base()
@@ -173,7 +177,7 @@ class DocumentHandler:
             return self._save_file(case_number, doc_info, content)
     
     async def fetch_all_documents(
-        self, 
+        self,
         session: aiohttp.ClientSession,
         results_html: str, 
         case_number: str,
@@ -215,12 +219,13 @@ class DocumentHandler:
                 if not pdf_url:
                     continue
                 
-                file_path = await self.download_pdf(session, pdf_url, case_number, doc)
-                if file_path:
+                file_info = await self.download_pdf(session, pdf_url, case_number, doc)
+                if file_info:
                     downloaded.append({
                         'doc_date': doc.doc_date,
                         'doc_name': doc.doc_name,
-                        'file_path': file_path
+                        'file_path': file_info['file_path'],
+                        'file_size': file_info['file_size']
                     })
                 
                 await asyncio.sleep(delay)
