@@ -4,9 +4,10 @@
 from utils.logger import (
     setup_logger, 
     get_logger, 
-    setup_worker_logger, 
-    init_logging,
+    setup_worker_logger,
     setup_report_logger,
+    init_logging,
+    set_progress_mode,
     Colors
 )
 from utils.text_processor import TextProcessor
@@ -19,17 +20,14 @@ from utils.retry import (
     NonRetriableError,
     CircuitBreakerOpenError
 )
-from utils.logger import (
-    setup_logger, 
-    get_logger, 
-    setup_worker_logger, 
-    init_logging,
-    setup_report_logger,
-    set_progress_mode,
-    Colors
-)
 from utils.constants import PartyRole, CaseStatus, HttpStatus
 from utils.http_utils import HttpHeaders, ViewStateExtractor, AjaxRequestBuilder
-from utils.stats_reporter import StatsReporter, StatsCollector, ReportFormatter
-from utils.update_progress import UpdateProgressDisplay, UpdateRegionStats, RegionStatus as UpdateRegionStatus
-from utils.update_reporter import UpdateReporter, UpdateSessionStats
+
+# Новый UI (импорт может быть ленивым)
+try:
+    from utils.terminal_ui import (
+        TerminalUI, init_ui, get_ui, 
+        Mode, RegionStatus
+    )
+except ImportError:
+    pass
