@@ -35,16 +35,25 @@ class EventsUpdater(BaseUpdater):
         
         filters = config.get('filters', {})
         interval_days = config.get('check_interval_days', 2)
+        max_active_age_days = config.get('max_active_age_days')
         
         cases = await self.db_manager.get_cases_for_update({
             'defendant_keywords': filters.get('party_keywords', []),
             'exclude_event_types': filters.get('exclude_event_types', []),
-            'update_interval_days': interval_days
+            'update_interval_days': interval_days,
+            'max_active_age_days': max_active_age_days
         })
         
+        # Логирование
+        log_parts = [
+            f"фильтр: {filters.get('party_keywords', [])}",
+            f"интервал: {interval_days}д"
+        ]
+        if max_active_age_days:
+            log_parts.append(f"макс. возраст: {max_active_age_days}д")
+        
         self.logger.info(
-            f"Найдено дел для обновления событий: {len(cases)} "
-            f"(фильтр: {filters.get('party_keywords', [])}, интервал {interval_days} дней)"
+            f"Найдено дел для обновления событий: {len(cases)} ({', '.join(log_parts)})"
         )
         
         return cases

@@ -294,11 +294,18 @@ class DatabaseManager:
     
     async def get_cases_for_update(self, filters: Dict) -> List[str]:
         """
-        Получить номера дел для обновления
+        Получить номера дел для обновления событий
+        
+        Логика:
+        1. Ответчик содержит ключевые слова
+        2. Нет финальных событий
+        3. Не проверялось дольше check_interval_days
+        4. Возраст дела < max_active_age_days
         """
         defendant_keywords = filters.get('defendant_keywords', [])
         exclude_events = filters.get('exclude_event_types', [])
         interval_days = filters.get('update_interval_days', 2)
+        max_active_age_days = filters.get('max_active_age_days')
         
         # Построение SQL запроса
         query = """
@@ -349,6 +356,12 @@ class DatabaseManager:
                 OR c.last_updated_at < NOW() - INTERVAL '{interval_days} days'
             )
         """)
+        
+        # ФИЛЬТР 4: Максимальный возраст активного дела
+        if max_active_age_days:
+            conditions.append(f"""
+                c.case_date > CURRENT_DATE - INTERVAL '{max_active_age_days} days'
+            """)
         
         # Собираем WHERE
         if conditions:
@@ -644,38 +657,35 @@ class DatabaseManager:
         self, 
         filters: Dict, 
         limit: int = None,
-        kato_code: str = None,
-        instance_code: str = None
+        final_event_types: List[str] = None,
+        final_check_period_days: int = 30,
+        max_active_age_days: int = None
     ) -> List[Dict]:
         """
-        Получить дела для скачивания документов с гибкой фильтрацией
+        Получить дела для скачивания документов
         
-        Args:
-            filters: словарь фильтров
-            limit: лимит записей
-            kato_code: КАТО-код региона (для max_per_court)
-            instance_code: код инстанции суда (для max_per_court)
+        Логика:
+        1. Активные дела (без финальных событий, возраст < max_active_age_days)
+        2. Завершённые дела в окне дозагрузки (финал < final_check_period_days)
+        3. Исключаем: завершённые после окна + заброшенные (старше max_active_age_days без финала)
         """
-        mode = filters.get('mode', 'any')
         interval_days = filters.get('check_interval_days', 7)
         
-        filter_conditions = []
         params = []
         param_counter = 1
         
-        # === ФИЛЬТР: missing_parties ===
-        if filters.get('missing_parties'):
-            filter_conditions.append("""
-                NOT EXISTS (
-                    SELECT 1 FROM case_parties cp WHERE cp.case_id = c.id
-                )
-            """)
+        # === Базовые условия ===
+        base_conditions = []
         
-        # === ФИЛЬТР: missing_judge ===
-        if filters.get('missing_judge'):
-            filter_conditions.append("c.judge_id IS NULL")
+        # Интервал проверки
+        base_conditions.append(f"""
+            (
+                c.documents_checked_at IS NULL 
+                OR c.documents_checked_at < NOW() - INTERVAL '{interval_days} days'
+            )
+        """)
         
-        # === ФИЛЬТР: party_keywords ===
+        # === Фильтр по сторонам ===
         party_keywords = filters.get('party_keywords', [])
         party_role = filters.get('party_role')
         
@@ -699,7 +709,7 @@ class DatabaseManager:
             
             keywords_sql = ' OR '.join(keyword_placeholders)
             
-            filter_conditions.append(f"""
+            base_conditions.append(f"""
                 EXISTS (
                     SELECT 1 FROM case_parties cp
                     JOIN parties p ON cp.party_id = p.id
@@ -709,94 +719,150 @@ class DatabaseManager:
                 )
             """)
         
-        if not filter_conditions:
-            if filters.get('mode') == 'none':
-                # Режим "none" — все дела без дополнительных фильтров
-                filter_conditions.append("1=1")
-            else:
-                self.logger.warning("Не указано ни одного фильтра для документов")
-                return []
+        # === Фильтр по регионам ===
+        regions = filters.get('regions')
+        if regions:
+            region_codes = self._get_region_kato_codes(regions)
+            if region_codes:
+                region_conditions = []
+                for code in region_codes:
+                    region_conditions.append(f"SUBSTRING(c.case_number FROM 1 FOR 2) = ${param_counter}")
+                    params.append(code)
+                    param_counter += 1
+                base_conditions.append(f"({' OR '.join(region_conditions)})")
         
-        if mode == 'all':
-            combined_filters = ' AND '.join(f'({cond})' for cond in filter_conditions)
-        else:
-            combined_filters = ' OR '.join(f'({cond})' for cond in filter_conditions)
+        # === Фильтр по типам судов ===
+        court_types = filters.get('court_types')
+        if court_types:
+            court_codes = self._get_court_instance_codes(court_types)
+            if court_codes:
+                code_conditions = []
+                for code in court_codes:
+                    code_conditions.append(f"SUBSTRING(c.case_number FROM 3 FOR 2) = ${param_counter}")
+                    params.append(code)
+                    param_counter += 1
+                base_conditions.append(f"({' OR '.join(code_conditions)})")
         
-        # === ОБЩИЕ УСЛОВИЯ ===
-        common_conditions = []
-        
-        common_conditions.append(f"""
-            (
-                c.documents_checked_at IS NULL 
-                OR c.documents_checked_at < NOW() - INTERVAL '{interval_days} days'
-            )
-        """)
-        
-        # Фильтр по конкретному суду (для max_per_court)
-        if kato_code and instance_code:
-            common_conditions.append(f"SUBSTRING(c.case_number FROM 1 FOR 2) = ${param_counter}")
-            params.append(kato_code)
-            param_counter += 1
-            
-            common_conditions.append(f"SUBSTRING(c.case_number FROM 3 FOR 2) = ${param_counter}")
-            params.append(instance_code)
-            param_counter += 1
-        else:
-            # Фильтр по списку регионов
-            regions = filters.get('regions')
-            if regions:
-                region_codes = self._get_region_kato_codes(regions)
-                if region_codes:
-                    region_conditions = []
-                    for code in region_codes:
-                        region_conditions.append(f"SUBSTRING(c.case_number FROM 1 FOR 2) = ${param_counter}")
-                        params.append(code)
-                        param_counter += 1
-                    common_conditions.append(f"({' OR '.join(region_conditions)})")
-            
-            # Фильтр по типам судов
-            court_types = filters.get('court_types')
-            if court_types:
-                court_codes = self._get_court_instance_codes(court_types)
-                if court_codes:
-                    code_conditions = []
-                    for code in court_codes:
-                        code_conditions.append(f"SUBSTRING(c.case_number FROM 3 FOR 2) = ${param_counter}")
-                        params.append(code)
-                        param_counter += 1
-                    common_conditions.append(f"({' OR '.join(code_conditions)})")
-        
-        # Фильтр по году
+        # === Фильтр по году ===
         year = filters.get('year')
         if year:
             year_short = year[-2:]
-            common_conditions.append(f"SUBSTRING(c.case_number FROM 6 FOR 2) = ${param_counter}")
+            base_conditions.append(f"SUBSTRING(c.case_number FROM 6 FOR 2) = ${param_counter}")
             params.append(year_short)
             param_counter += 1
         
-        # === СБОРКА ЗАПРОСА ===
+        # === Логика финальных событий и возраста ===
+        if final_event_types:
+            # Подготовка плейсхолдеров для типов событий
+            event_placeholders = [f"${param_counter + i}" for i in range(len(final_event_types))]
+            event_placeholders_str = ', '.join(event_placeholders)
+            params.extend(final_event_types)
+            param_counter += len(final_event_types)
+            
+            # Подзапрос для получения даты финального события
+            final_event_subquery = f"""
+                SELECT MAX(ce.event_date)
+                FROM case_events ce
+                JOIN event_types et ON ce.event_type_id = et.id
+                WHERE ce.case_id = c.id
+                AND et.name IN ({event_placeholders_str})
+            """
+            
+            if max_active_age_days:
+                # Три варианта:
+                # 1. Есть финал в окне → берём
+                # 2. Нет финала + возраст < max_active_age_days → берём
+                # 3. Нет финала + возраст >= max_active_age_days → НЕ берём
+                # 4. Есть финал за окном → НЕ берём
+                base_conditions.append(f"""
+                    (
+                        -- Вариант 1: Финал в окне дозагрузки
+                        (
+                            ({final_event_subquery}) IS NOT NULL
+                            AND ({final_event_subquery}) > CURRENT_DATE - INTERVAL '{final_check_period_days} days'
+                        )
+                        OR
+                        -- Вариант 2: Нет финала + дело не заброшено
+                        (
+                            ({final_event_subquery}) IS NULL
+                            AND c.case_date > CURRENT_DATE - INTERVAL '{max_active_age_days} days'
+                        )
+                    )
+                """)
+            else:
+                # Без ограничения по возрасту — старая логика
+                base_conditions.append(f"""
+                    (
+                        ({final_event_subquery}) IS NULL
+                        OR ({final_event_subquery}) > CURRENT_DATE - INTERVAL '{final_check_period_days} days'
+                    )
+                """)
+        elif max_active_age_days:
+            # Нет списка финальных событий, но есть ограничение по возрасту
+            base_conditions.append(f"""
+                c.case_date > CURRENT_DATE - INTERVAL '{max_active_age_days} days'
+            """)
+        
+        # === Сборка запроса ===
         query = """
             SELECT DISTINCT c.id, c.case_number, c.case_date, c.documents_checked_at
             FROM cases c
             WHERE 
         """
         
-        all_conditions = [f"({combined_filters})"] + common_conditions
-        query += ' AND '.join(all_conditions)
+        query += ' AND '.join(base_conditions)
         
-        order = filters.get('order', 'newest')
+        # Сортировка
+        order = filters.get('order', 'oldest')
         if order == 'oldest':
             query += " ORDER BY c.case_date ASC, c.documents_checked_at NULLS FIRST"
         else:
             query += " ORDER BY c.case_date DESC, c.documents_checked_at NULLS FIRST"
         
+        # Лимит
         if limit:
             query += f" LIMIT {limit}"
         
+        # Выполнение
         async with self.pool.acquire() as conn:
             rows = await conn.fetch(query, *params)
         
+        self.logger.info(f"Найдено дел для документов: {len(rows)}")
+        
         return [{'id': r['id'], 'case_number': r['case_number']} for r in rows]
+    
+    async def get_final_event_date(self, case_id: int, final_event_types: List[str]) -> Optional[datetime]:
+        """
+        Получить дату самого свежего финального события для дела
+        
+        Args:
+            case_id: ID дела
+            final_event_types: список типов финальных событий
+        
+        Returns:
+            Дата самого свежего финального события или None
+        """
+        if not final_event_types:
+            return None
+        
+        placeholders = ', '.join([f'${i+2}' for i in range(len(final_event_types))])
+        
+        query = f"""
+            SELECT MAX(ce.event_date) as final_date
+            FROM case_events ce
+            JOIN event_types et ON ce.event_type_id = et.id
+            WHERE ce.case_id = $1
+            AND et.name IN ({placeholders})
+        """
+        
+        async with self.pool.acquire() as conn:
+            row = await conn.fetchrow(query, case_id, *final_event_types)
+        
+        if row and row['final_date']:
+            # event_date это date, конвертируем в datetime
+            return datetime.combine(row['final_date'], datetime.min.time())
+        
+        return None
     
     def _get_court_instance_codes(self, court_types: List[str]) -> List[str]:
         """

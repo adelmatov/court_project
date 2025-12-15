@@ -1,3 +1,5 @@
+# parsers/court_parser/utils/logger.py
+
 """
 Логирование с ротацией по дате
 """
@@ -45,7 +47,6 @@ class FileFormatter(logging.Formatter):
         message = record.getMessage()
         clean_message = Colors.strip(message)
         
-        # Добавляем дополнительную информацию если есть
         extra_parts = []
         if hasattr(record, 'region') and record.region:
             extra_parts.append(f"region={record.region}")
@@ -71,7 +72,7 @@ class ColoredConsoleFormatter(logging.Formatter):
     }
     
     def format(self, record):
-        time_str = datetime.fromtimestamp(record.created).strftime('%H :%M:%S')
+        time_str = datetime.fromtimestamp(record.created).strftime('%H:%M:%S')
         color = self.LEVEL_COLORS.get(record.levelname, Colors.WHITE)
         return f"{Colors.DIM}[{time_str}]{Colors.RESET} {color}{record.levelname:<7}{Colors.RESET} {record.getMessage()}"
 
@@ -89,9 +90,8 @@ def cleanup_old_logs(log_dir: str, days: int = 3):
             file_mtime = datetime.fromtimestamp(log_file.stat().st_mtime)
             if file_mtime < cutoff_time:
                 log_file.unlink()
-                print(f"Deleted old log: {log_file.name}")
-        except Exception as e:
-            print(f"Error deleting {log_file}: {e}")
+        except Exception:
+            pass
 
 
 def get_log_filename(prefix: str = "parser") -> str:
@@ -100,7 +100,9 @@ def get_log_filename(prefix: str = "parser") -> str:
     return f"{prefix}_{timestamp}.log"
 
 
+# Глобальные переменные для отслеживания состояния
 _current_log_file: Optional[str] = None
+_logging_initialized: bool = False
 
 
 def setup_logger(
@@ -116,10 +118,7 @@ def setup_logger(
     logger.setLevel(logging.DEBUG)
     logger.handlers.clear()
     
-    # Создаём директорию логов
     Path(log_dir).mkdir(exist_ok=True)
-    
-    # Очищаем старые логи
     cleanup_old_logs(log_dir, days=3)
     
     # Создаём имя файла при первом вызове
@@ -138,17 +137,15 @@ def setup_logger(
     file_handler.setFormatter(FileFormatter())
     logger.addHandler(file_handler)
     
-    # Консольный handler (для fallback когда UI неактивен)
+    # Консольный handler
     if console_output:
         console_handler = logging.StreamHandler(sys.stdout)
         console_handler.setLevel(getattr(logging, level))
         console_handler.setFormatter(ColoredConsoleFormatter())
         
-        # Добавляем фильтр чтобы не дублировать вывод когда UI активен
         class UIFilter(logging.Filter):
             def filter(self, record):
                 ui = _get_ui()
-                # Пропускаем в консоль только если UI неактивен
                 return ui is None or not ui._running
         
         console_handler.addFilter(UIFilter())
@@ -187,16 +184,22 @@ def setup_worker_logger(region_key: str, log_dir: str = "logs") -> logging.Logge
 
 def setup_report_logger(log_dir: str = "logs") -> logging.Logger:
     """Настройка логгера для отчётов"""
+    global _current_log_file
+    
     logger = logging.getLogger('report')
     logger.setLevel(logging.INFO)
     logger.handlers.clear()
     
     Path(log_dir).mkdir(exist_ok=True)
     
-    report_file = Path(log_dir) / get_log_filename("reports")
+    # Используем тот же файл что и основной логгер
+    if _current_log_file is None:
+        _current_log_file = get_log_filename("parser")
+    
+    log_file_path = Path(log_dir) / _current_log_file
     
     file_handler = logging.FileHandler(
-        report_file,
+        log_file_path,
         encoding='utf-8',
         mode='a'
     )
@@ -213,8 +216,13 @@ def get_logger(name: str) -> logging.Logger:
 
 
 def init_logging(log_dir: str = "logs", level: str = "INFO"):
-    """Инициализация всех логгеров"""
-    global _current_log_file
+    """Инициализация всех логгеров - вызывается ОДИН раз за сессию"""
+    global _current_log_file, _logging_initialized
+    
+    # Предотвращаем повторную инициализацию
+    if _logging_initialized:
+        return
+    
     _current_log_file = None  # Сброс для нового файла
     
     setup_logger('main', log_dir, level, console_output=True)
@@ -236,6 +244,15 @@ def init_logging(log_dir: str = "logs", level: str = "INFO"):
     main_logger.info("=" * 60)
     main_logger.info(f"New parsing session started at {datetime.now().isoformat()}")
     main_logger.info("=" * 60)
+    
+    _logging_initialized = True
+
+
+def reset_logging():
+    """Сброс состояния логирования (для тестов или перезапуска)"""
+    global _current_log_file, _logging_initialized
+    _current_log_file = None
+    _logging_initialized = False
 
 
 def set_progress_mode(active: bool):

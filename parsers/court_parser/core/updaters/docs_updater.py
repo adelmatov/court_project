@@ -12,17 +12,18 @@ from search.document_handler import DocumentHandler
 class DocsUpdater(BaseUpdater):
     """
     Updater для скачивания документов
-    
+
     Команда: --mode update docs
-    
+
     Логика:
     1. Находит дела по фильтру (ключевые слова в ответчике)
-    2. Исключает дела с финальными событиями
-    3. Для каждого дела:
-       - Ищет на сайте
-       - Открывает карточку дела
-       - Скачивает новые документы
-    """
+    2. Для активных дел (без финальных событий) — проверяет по check_interval_days
+    3. Для завершённых дел — проверяет в течение final_check_period_days после финала
+    4. Для каждого дела:
+    - Ищет на сайте
+    - Открывает карточку дела
+    - Скачивает новые документы
+    """ 
     MODE = 'docs'
 
     def __init__(self, *args, **kwargs):
@@ -54,91 +55,46 @@ class DocsUpdater(BaseUpdater):
         
         filters_config = config.get('filters', {})
         
+        # Базовые фильтры
         filters = {
-            'mode': filters_config.get('mode', 'any'),
-            'missing_parties': filters_config.get('missing_parties', False),
-            'missing_judge': filters_config.get('missing_judge', False),
             'party_keywords': filters_config.get('party_keywords', []),
             'party_role': filters_config.get('party_role'),
             'court_types': filters_config.get('court_types'),
             'regions': filters_config.get('regions'),
             'year': filters_config.get('year'),
             'check_interval_days': config.get('check_interval_days', 7),
-            'order': filters_config.get('order', 'newest'),
+            'order': filters_config.get('order', 'oldest'),
         }
         
+        # Параметры финальных событий и возраста
+        final_event_types = config.get('final_event_types', [])
+        final_check_period_days = config.get('final_check_period_days', 30)
+        max_active_age_days = config.get('max_active_age_days')
+        
+        # Получаем дела
         max_per_session = config.get('max_per_session')
-        max_per_court = config.get('max_per_court')
         
-        # Если есть лимит на суд — собираем по судам
-        if max_per_court:
-            all_cases = []
-            
-            # Получаем список регионов
-            target_regions = filters_config.get('regions')
-            if not target_regions:
-                target_regions = list(self.settings.regions.keys())
-            
-            # Получаем список типов судов
-            target_courts = filters_config.get('court_types')
-            if not target_courts:
-                target_courts = ['smas', 'appellate', 'cassation', 'supreme']
-            
-            for region_key in target_regions:
-                region_config = self.settings.regions.get(region_key)
-                if not region_config:
-                    continue
-                
-                kato_code = region_config.get('kato_code')
-                if not kato_code:
-                    continue
-                
-                courts = region_config.get('courts', {})
-                
-                for court_key in target_courts:
-                    court_config = courts.get(court_key)
-                    if not court_config:
-                        continue
-                    
-                    instance_code = court_config.get('instance_code')
-                    if not instance_code:
-                        continue
-                    
-                    # Запрос для конкретного суда
-                    court_cases = await self.db_manager.get_cases_for_documents(
-                        filters=filters,
-                        limit=max_per_court,
-                        kato_code=kato_code,
-                        instance_code=instance_code
-                    )
-                    
-                    all_cases.extend(court_cases)
-                    
-                    if court_cases:
-                        self.logger.info(
-                            f"{region_key}/{court_key}: {len(court_cases)} дел"
-                        )
-            
-            cases = all_cases
-        else:
-            # Старая логика — общий лимит
-            cases = await self.db_manager.get_cases_for_documents(filters, max_per_session)
-        
-        # Применяем max_per_session если указан
-        if max_per_session and len(cases) > max_per_session:
-            cases = cases[:max_per_session]
+        cases = await self.db_manager.get_cases_for_documents(
+            filters=filters,
+            limit=max_per_session,
+            final_event_types=final_event_types,
+            final_check_period_days=final_check_period_days,
+            max_active_age_days=max_active_age_days
+        )
         
         # Логирование
         active_filters = []
-        if filters['missing_parties']:
-            active_filters.append('missing_parties')
-        if filters['missing_judge']:
-            active_filters.append('missing_judge')
         if filters['party_keywords']:
             active_filters.append(f"keywords={filters['party_keywords']}")
+        if filters['party_role']:
+            active_filters.append(f"role={filters['party_role']}")
+        if final_event_types:
+            active_filters.append(f"final_window={final_check_period_days}д")
+        if max_active_age_days:
+            active_filters.append(f"макс. возраст={max_active_age_days}д")
         
         self.logger.info(
-            f"Всего дел: {len(cases)}, фильтры: {', '.join(active_filters)}"
+            f"Дел для обработки: {len(cases)}, фильтры: {', '.join(active_filters) or 'none'}"
         )
         
         return [c['case_number'] for c in cases]
