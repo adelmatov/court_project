@@ -13,6 +13,17 @@ from utils.logger import init_logging, get_logger
 from utils.terminal_ui import init_ui, get_ui, Mode, RegionStatus, CourtStatus
 
 
+def _reset_ui():
+    """Сброс глобального UI для корректного вывода логов"""
+    try:
+        from utils.terminal_ui import _ui_instance
+        import utils.terminal_ui as terminal_ui
+        if terminal_ui._ui_instance:
+            terminal_ui._ui_instance._running = False
+            terminal_ui._ui_instance = None
+    except:
+        pass
+
 async def parse_all_regions_from_config() -> dict:
     """Парсинг всех регионов"""
     
@@ -594,6 +605,205 @@ async def run_update_docs():
         await db_manager.disconnect()
 
 
+async def run_gaps_check():
+    """Режим проверки пропусков"""
+    settings = Settings()
+    db_manager = DatabaseManager(settings.database)
+    await db_manager.connect()
+    
+    try:
+        from core.updaters.gaps_updater import GapsUpdater
+        
+        gaps_updater = GapsUpdater(settings, db_manager)
+        result = await gaps_updater.run()
+        
+        return result
+        
+    finally:
+        await db_manager.disconnect()
+    
+
+async def run_pipeline(): 
+    """
+    Режим полного пайплайна: gaps → parse → events → docs
+    """
+    logger = get_logger('pipeline')
+    
+    logger.info("=" * 60)
+    logger.info("PIPELINE START: gaps → parse → events → docs")
+    logger.info("=" * 60)
+    
+    pipeline_start = datetime.now()
+    results = {
+        'gaps': {'found': 0, 'closed': 0, 'time': '0:00'},
+        'parse': {'saved': 0, 'time': '0:00'},
+        'events': {'processed': 0, 'events_added': 0, 'time': '0:00'},
+        'docs': {'processed': 0, 'docs_downloaded': 0, 'time': '0:00'},
+    }
+    
+    # =========================================================================
+    # ЭТАП 0: GAPS
+    # =========================================================================
+    logger.info("-" * 60)
+    logger.info("STAGE 0: CHECKING GAPS")
+    logger.info("-" * 60)
+    
+    stage_start = datetime.now()
+    
+    try:
+        settings = Settings()
+        db_manager = DatabaseManager(settings.database)
+        await db_manager.connect()
+        
+        try:
+            from core.updaters.gaps_updater import GapsUpdater
+            
+            gaps_updater = GapsUpdater(settings, db_manager)
+            gaps_result = await gaps_updater.run()
+            
+            stage_elapsed = datetime.now() - stage_start
+            minutes, seconds = divmod(int(stage_elapsed.total_seconds()), 60)
+            results['gaps']['time'] = f"{minutes}:{seconds:02d}"
+            results['gaps']['found'] = gaps_result.get('total_gaps', 0)
+            results['gaps']['closed'] = gaps_result.get('closed', 0)
+            
+            logger.info(
+                f"Gaps completed: {results['gaps']['closed']}/{results['gaps']['found']} closed, "
+                f"{results['gaps']['time']}"
+            )
+        
+        finally:
+            await db_manager.disconnect()
+        
+    except Exception as e:
+        logger.error(f"Gaps stage failed: {e}", exc_info=True)
+    
+    # Сброс UI после gaps
+    _reset_ui()
+    
+    # =========================================================================
+    # ЭТАП 1: PARSE
+    # =========================================================================
+    print()
+    logger.info("-" * 60)
+    logger.info("STAGE 1: PARSING NEW CASES")
+    logger.info("-" * 60)
+    
+    stage_start = datetime.now()
+    
+    try:
+        await parse_all_regions_from_config()
+        
+        stage_elapsed = datetime.now() - stage_start
+        minutes, seconds = divmod(int(stage_elapsed.total_seconds()), 60)
+        results['parse']['time'] = f"{minutes}:{seconds:02d}"
+        
+        ui = get_ui()
+        if ui:
+            results['parse']['saved'] = ui.stats.total_saved
+        
+        logger.info(f"Parse completed: {results['parse']['saved']} cases, {results['parse']['time']}")
+        
+    except Exception as e:
+        logger.error(f"Parse stage failed: {e}", exc_info=True)
+    
+    # Сброс UI после parse
+    _reset_ui()
+    
+    # =========================================================================
+    # ЭТАП 2: EVENTS
+    # =========================================================================
+    print()
+    logger.info("-" * 60)
+    logger.info("STAGE 2: UPDATING EVENTS")
+    logger.info("-" * 60)
+    
+    stage_start = datetime.now()
+    
+    try:
+        settings = Settings()
+        db_manager = DatabaseManager(settings.database)
+        await db_manager.connect()
+        
+        try:
+            from core.updaters.events_updater import EventsUpdater
+            
+            events_updater = EventsUpdater(settings, db_manager)
+            events_result = await events_updater.run()
+            
+            stage_elapsed = datetime.now() - stage_start
+            minutes, seconds = divmod(int(stage_elapsed.total_seconds()), 60)
+            results['events']['time'] = f"{minutes}:{seconds:02d}"
+            results['events']['processed'] = events_result.get('processed', 0)
+            
+            if hasattr(events_updater, 'reporter') and events_updater.reporter:
+                results['events']['events_added'] = events_updater.reporter.stats.events_added
+            
+            logger.info(f"Events completed: {results['events']['processed']} cases, {results['events']['time']}")
+        
+        finally:
+            await db_manager.disconnect()
+        
+    except Exception as e:
+        logger.error(f"Events stage failed: {e}", exc_info=True)
+    
+    # Сброс UI после events
+    _reset_ui()
+    
+    # =========================================================================
+    # ЭТАП 3: DOCS
+    # =========================================================================
+    print()
+    logger.info("-" * 60)
+    logger.info("STAGE 3: DOWNLOADING DOCUMENTS")
+    logger.info("-" * 60)
+    
+    stage_start = datetime.now()
+    
+    try:
+        settings = Settings()
+        db_manager = DatabaseManager(settings.database)
+        await db_manager.connect()
+        
+        try:
+            from core.updaters.docs_updater import DocsUpdater
+            
+            docs_updater = DocsUpdater(settings, db_manager)
+            docs_result = await docs_updater.run()
+            
+            stage_elapsed = datetime.now() - stage_start
+            minutes, seconds = divmod(int(stage_elapsed.total_seconds()), 60)
+            results['docs']['time'] = f"{minutes}:{seconds:02d}"
+            results['docs']['processed'] = docs_result.get('processed', 0)
+            results['docs']['docs_downloaded'] = getattr(docs_updater, 'downloaded_count', 0)
+            
+            logger.info(f"Docs completed: {results['docs']['docs_downloaded']} docs, {results['docs']['time']}")
+        
+        finally:
+            await db_manager.disconnect()
+        
+    except Exception as e:
+        logger.error(f"Docs stage failed: {e}", exc_info=True)
+    
+    # =========================================================================
+    # ФИНАЛЬНЫЙ ОТЧЁТ
+    # =========================================================================
+    pipeline_elapsed = datetime.now() - pipeline_start
+    total_minutes, total_seconds = divmod(int(pipeline_elapsed.total_seconds()), 60)
+    
+    print()
+    logger.info("=" * 60)
+    logger.info("PIPELINE COMPLETE")
+    logger.info("=" * 60)
+    logger.info(f"Total time: {total_minutes}:{total_seconds:02d}")
+    logger.info(f"Gaps:   {results['gaps']['closed']}/{results['gaps']['found']} closed ({results['gaps']['time']})")
+    logger.info(f"Parse:  {results['parse']['saved']} cases ({results['parse']['time']})")
+    logger.info(f"Events: {results['events']['events_added']} events ({results['events']['time']})")
+    logger.info(f"Docs:   {results['docs']['docs_downloaded']} docs ({results['docs']['time']})")
+    
+    return results
+
+
 def main():
     """Главная функция"""
     init_logging(log_dir="logs", level="DEBUG")
@@ -608,9 +818,17 @@ def main():
         if idx + 2 < len(sys.argv) and not sys.argv[idx + 2].startswith('-'):
             submode = sys.argv[idx + 2]
     
+    logger = get_logger('main')
+    
     try:
         if mode == 'parse':
             asyncio.run(parse_all_regions_from_config())
+        
+        elif mode == 'gaps':
+            asyncio.run(run_gaps_check())
+        
+        elif mode == 'pipeline':
+            asyncio.run(run_pipeline())
         
         elif mode == 'update':
             if submode == 'judge':
@@ -620,14 +838,14 @@ def main():
             elif submode == 'docs':
                 asyncio.run(run_update_docs())
             else:
-                print("Usage: --mode update [judge|case_events|docs]")
+                logger.error("Usage: --mode update [judge|case_events|docs]")
                 sys.exit(1)
         else:
-            print("Usage: --mode [parse|update]")
+            logger.error("Usage: --mode [parse|gaps|pipeline|update]")
             sys.exit(1)
             
     except KeyboardInterrupt:
-        print("\n⚠ Interrupted")
+        logger.warning("Interrupted by user")
         sys.exit(0)
 
 
