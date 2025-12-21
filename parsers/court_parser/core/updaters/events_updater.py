@@ -5,28 +5,18 @@ from typing import Dict, List, Any
 
 from core.updaters.base_updater import BaseUpdater
 from core.region_worker import RegionWorker
+from utils.terminal_ui import Mode
 
 
 class EventsUpdater(BaseUpdater):
-    """
-    Updater для обновления событий дел
+    """Updater для обновления событий дел"""
     
-    Команда: --mode update case_events
-    
-    Логика:
-    1. Находит дела по фильтру (ключевые слова в ответчике)
-    2. Исключает дела с финальными событиями
-    3. Ищет каждое дело на сайте
-    4. Добавляет новые события в БД
-    """
-    MODE = 'events'
+    MODE = Mode.EVENTS
 
     def get_config(self) -> Dict[str, Any]:
-        """Получить конфигурацию для events updater"""
         return self.settings.config.get('update_settings', {}).get('case_events', {})
     
     async def get_cases_to_process(self) -> List[str]:
-        """Получить дела для обновления событий"""
         config = self.get_config()
         
         if not config.get('enabled', True):
@@ -44,22 +34,10 @@ class EventsUpdater(BaseUpdater):
             'max_active_age_days': max_active_age_days
         })
         
-        # Логирование
-        log_parts = [
-            f"фильтр: {filters.get('party_keywords', [])}",
-            f"интервал: {interval_days}д"
-        ]
-        if max_active_age_days:
-            log_parts.append(f"макс. возраст: {max_active_age_days}д")
-        
-        self.logger.info(
-            f"Найдено дел для обновления событий: {len(cases)} ({', '.join(log_parts)})"
-        )
-        
+        self.logger.info(f"Дел для обновления событий: {len(cases)}")
         return cases
     
     async def process_case(self, worker: RegionWorker, case_number: str) -> Dict[str, Any]:
-        """Обработать одно дело — найти и добавить новые события"""
         result = {
             'case_number': case_number,
             'success': False,
@@ -67,14 +45,11 @@ class EventsUpdater(BaseUpdater):
         }
         
         try:
-            # Поиск дела на сайте
             _, cases = await worker.search_case_by_number(case_number)
             
             if not cases:
-                self.logger.debug(f"Дело не найдено на сайте: {case_number}")
                 return result
             
-            # Ищем целевое дело
             target = next(
                 (c for c in cases 
                  if self.text_processor.is_matching_case_number(c.case_number, case_number)),
@@ -82,25 +57,19 @@ class EventsUpdater(BaseUpdater):
             )
             
             if not target:
-                self.logger.debug(f"Целевое дело не найдено: {case_number}")
                 return result
             
-            # Обновляем дело (события + судья если появился)
             update_result = await self.db_manager.update_case(target)
             await self.db_manager.mark_case_as_updated(case_number)
             
-            result['success'] = True
+            result['success'] = True 
             result['events_added'] = update_result.get('events_added', 0)
             
             if result['events_added'] > 0:
-                self.logger.info(
-                    f"✅ Добавлено событий: {result['events_added']} для {case_number}"
-                )
-            else:
-                self.logger.debug(f"Новых событий нет: {case_number}")
+                self.logger.info(f"Добавлено событий: {result['events_added']} для {case_number}")
         
         except Exception as e:
-            self.logger.error(f"Ошибка обработки {case_number}: {e}")
+            self.logger.error(f"Ошибка: {case_number}: {e}")
             result['error'] = str(e)
         
         return result
