@@ -16,12 +16,12 @@ from utils.terminal_ui import init_ui, get_ui, Mode, RegionStatus, CourtStatus
 def _reset_ui():
     """Сброс глобального UI для корректного вывода логов"""
     try:
-        from utils.terminal_ui import _ui_instance
         import utils.terminal_ui as terminal_ui
-        if terminal_ui._ui_instance:
+        if terminal_ui._ui_instance is not None:
+            # Принудительно останавливаем UI
             terminal_ui._ui_instance._running = False
             terminal_ui._ui_instance = None
-    except:
+    except Exception:
         pass
 
 async def parse_all_regions_from_config() -> dict:
@@ -316,7 +316,7 @@ async def run_update_judge():
         cases = await db_manager.get_smas_cases_without_judge(settings)
         
         if not cases:
-            print("Нет дел для обновления")
+            logger.info("Нет дел для обновления")
             return
         
         from utils.text_processor import TextProcessor
@@ -410,7 +410,7 @@ async def run_update_events():
         })
         
         if not cases:
-            print("Нет дел для обновления")
+            logger.info("Нет дел для обновления")
             return
         
         from utils.text_processor import TextProcessor
@@ -503,7 +503,7 @@ async def run_update_docs():
         cases = await db_manager.get_cases_for_documents(filters, config.get('max_per_session'))
         
         if not cases:
-            print("Нет дел для обработки")
+            logger.info("Нет дел для обработки")
             return
         
         from utils.text_processor import TextProcessor
@@ -635,20 +635,20 @@ async def run_pipeline():
     
     pipeline_start = datetime.now()
     results = {
-        'gaps': {'found': 0, 'closed': 0, 'time': '0:00'},
-        'parse': {'saved': 0, 'time': '0:00'},
-        'events': {'processed': 0, 'events_added': 0, 'time': '0:00'},
-        'docs': {'processed': 0, 'docs_downloaded': 0, 'time': '0:00'},
+        'gaps': {'found': 0, 'closed': 0},
+        'parse': {'saved': 0},
+        'events': {'processed': 0, 'events_added': 0},
+        'docs': {'processed': 0, 'docs_downloaded': 0},
     }
     
     # =========================================================================
     # ЭТАП 0: GAPS
     # =========================================================================
+    _reset_ui()
+    logger.info("")
     logger.info("-" * 60)
     logger.info("STAGE 0: CHECKING GAPS")
     logger.info("-" * 60)
-    
-    stage_start = datetime.now()
     
     try:
         settings = Settings()
@@ -657,68 +657,87 @@ async def run_pipeline():
         
         try:
             from core.updaters.gaps_updater import GapsUpdater
-            
             gaps_updater = GapsUpdater(settings, db_manager)
             gaps_result = await gaps_updater.run()
             
-            stage_elapsed = datetime.now() - stage_start
-            minutes, seconds = divmod(int(stage_elapsed.total_seconds()), 60)
-            results['gaps']['time'] = f"{minutes}:{seconds:02d}"
             results['gaps']['found'] = gaps_result.get('total_gaps', 0)
             results['gaps']['closed'] = gaps_result.get('closed', 0)
-            
-            logger.info(
-                f"Gaps completed: {results['gaps']['closed']}/{results['gaps']['found']} closed, "
-                f"{results['gaps']['time']}"
-            )
-        
         finally:
             await db_manager.disconnect()
-        
     except Exception as e:
-        logger.error(f"Gaps stage failed: {e}", exc_info=True)
-    
-    # Сброс UI после gaps
-    _reset_ui()
+        logger.error(f"Gaps failed: {e}", exc_info=True)
+    finally:
+        _reset_ui()
     
     # =========================================================================
     # ЭТАП 1: PARSE
     # =========================================================================
-    print()
+    _reset_ui()
+    logger.info("")
     logger.info("-" * 60)
     logger.info("STAGE 1: PARSING NEW CASES")
     logger.info("-" * 60)
     
-    stage_start = datetime.now()
-    
     try:
         await parse_all_regions_from_config()
-        
-        stage_elapsed = datetime.now() - stage_start
-        minutes, seconds = divmod(int(stage_elapsed.total_seconds()), 60)
-        results['parse']['time'] = f"{minutes}:{seconds:02d}"
         
         ui = get_ui()
         if ui:
             results['parse']['saved'] = ui.stats.total_saved
-        
-        logger.info(f"Parse completed: {results['parse']['saved']} cases, {results['parse']['time']}")
-        
     except Exception as e:
-        logger.error(f"Parse stage failed: {e}", exc_info=True)
+        logger.error(f"Parse failed: {e}", exc_info=True)
+    finally:
+        _reset_ui()
     
-    # Сброс UI после parse
-    _reset_ui()
+    # =========================================================================
+    # ПОДСЧЁТ ДЕЛ ДЛЯ СЛЕДУЮЩИХ ЭТАПОВ
+    # =========================================================================
+    settings = Settings()
+    db_manager = DatabaseManager(settings.database)
+    await db_manager.connect()
+    
+    try:
+        # Подсчёт дел для events
+        events_config = settings.update_settings.get('case_events', {})
+        events_filters = events_config.get('filters', {})
+        events_cases = await db_manager.get_cases_for_update({
+            'defendant_keywords': events_filters.get('party_keywords', []),
+            'exclude_event_types': events_filters.get('exclude_event_types', []),
+            'update_interval_days': events_config.get('check_interval_days', 2),
+            'max_active_age_days': events_config.get('max_active_age_days')
+        })
+        
+        # Подсчёт дел для docs
+        docs_config = settings.update_settings.get('docs', {})
+        docs_filters = docs_config.get('filters', {})
+        docs_cases = await db_manager.get_cases_for_documents(
+            filters={
+                'party_keywords': docs_filters.get('party_keywords', []),
+                'party_role': docs_filters.get('party_role'),
+                'check_interval_days': docs_config.get('check_interval_days', 7),
+            },
+            limit=docs_config.get('max_per_session'),
+            final_event_types=docs_config.get('final_event_types', []),
+            final_check_period_days=docs_config.get('final_check_period_days', 30),
+            max_active_age_days=docs_config.get('max_active_age_days')
+        )
+        
+        logger.info("")
+        logger.info("=" * 60)
+        logger.info(f"PENDING: Events={len(events_cases)} cases, Docs={len(docs_cases)} cases")
+        logger.info("=" * 60)
+        
+    finally:
+        await db_manager.disconnect()
     
     # =========================================================================
     # ЭТАП 2: EVENTS
     # =========================================================================
-    print()
+    _reset_ui()
+    logger.info("")
     logger.info("-" * 60)
     logger.info("STAGE 2: UPDATING EVENTS")
     logger.info("-" * 60)
-    
-    stage_start = datetime.now()
     
     try:
         settings = Settings()
@@ -727,38 +746,26 @@ async def run_pipeline():
         
         try:
             from core.updaters.events_updater import EventsUpdater
-            
             events_updater = EventsUpdater(settings, db_manager)
             events_result = await events_updater.run()
             
-            stage_elapsed = datetime.now() - stage_start
-            minutes, seconds = divmod(int(stage_elapsed.total_seconds()), 60)
-            results['events']['time'] = f"{minutes}:{seconds:02d}"
             results['events']['processed'] = events_result.get('processed', 0)
-            
-            if hasattr(events_updater, 'reporter') and events_updater.reporter:
-                results['events']['events_added'] = events_updater.reporter.stats.events_added
-            
-            logger.info(f"Events completed: {results['events']['processed']} cases, {results['events']['time']}")
-        
+            results['events']['events_added'] = events_updater.stats.get('events_added', 0)
         finally:
             await db_manager.disconnect()
-        
     except Exception as e:
-        logger.error(f"Events stage failed: {e}", exc_info=True)
-    
-    # Сброс UI после events
-    _reset_ui()
+        logger.error(f"Events failed: {e}", exc_info=True)
+    finally:
+        _reset_ui()
     
     # =========================================================================
     # ЭТАП 3: DOCS
     # =========================================================================
-    print()
+    _reset_ui()
+    logger.info("")
     logger.info("-" * 60)
     logger.info("STAGE 3: DOWNLOADING DOCUMENTS")
     logger.info("-" * 60)
-    
-    stage_start = datetime.now()
     
     try:
         settings = Settings()
@@ -767,23 +774,17 @@ async def run_pipeline():
         
         try:
             from core.updaters.docs_updater import DocsUpdater
-            
             docs_updater = DocsUpdater(settings, db_manager)
             docs_result = await docs_updater.run()
             
-            stage_elapsed = datetime.now() - stage_start
-            minutes, seconds = divmod(int(stage_elapsed.total_seconds()), 60)
-            results['docs']['time'] = f"{minutes}:{seconds:02d}"
             results['docs']['processed'] = docs_result.get('processed', 0)
-            results['docs']['docs_downloaded'] = getattr(docs_updater, 'downloaded_count', 0)
-            
-            logger.info(f"Docs completed: {results['docs']['docs_downloaded']} docs, {results['docs']['time']}")
-        
+            results['docs']['docs_downloaded'] = docs_updater.stats.get('docs_downloaded', 0)
         finally:
             await db_manager.disconnect()
-        
     except Exception as e:
-        logger.error(f"Docs stage failed: {e}", exc_info=True)
+        logger.error(f"Docs failed: {e}", exc_info=True)
+    finally:
+        _reset_ui()
     
     # =========================================================================
     # ФИНАЛЬНЫЙ ОТЧЁТ
@@ -791,15 +792,16 @@ async def run_pipeline():
     pipeline_elapsed = datetime.now() - pipeline_start
     total_minutes, total_seconds = divmod(int(pipeline_elapsed.total_seconds()), 60)
     
-    print()
+    logger.info("")
     logger.info("=" * 60)
     logger.info("PIPELINE COMPLETE")
     logger.info("=" * 60)
     logger.info(f"Total time: {total_minutes}:{total_seconds:02d}")
-    logger.info(f"Gaps:   {results['gaps']['closed']}/{results['gaps']['found']} closed ({results['gaps']['time']})")
-    logger.info(f"Parse:  {results['parse']['saved']} cases ({results['parse']['time']})")
-    logger.info(f"Events: {results['events']['events_added']} events ({results['events']['time']})")
-    logger.info(f"Docs:   {results['docs']['docs_downloaded']} docs ({results['docs']['time']})")
+    logger.info(f"Gaps:   {results['gaps']['closed']}/{results['gaps']['found']} closed")
+    logger.info(f"Parse:  {results['parse']['saved']} cases")
+    logger.info(f"Events: {results['events']['events_added']} added")
+    logger.info(f"Docs:   {results['docs']['docs_downloaded']} downloaded")
+    logger.info("=" * 60)
     
     return results
 

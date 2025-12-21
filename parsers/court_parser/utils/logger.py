@@ -145,8 +145,19 @@ def setup_logger(
         
         class UIFilter(logging.Filter):
             def filter(self, record):
-                ui = _get_ui()
-                return ui is None or not ui._running
+                try:
+                    ui = _get_ui()
+                    # Пропускаем логи если:
+                    # - UI не существует
+                    # - UI не запущен
+                    # - UI завершён (проверяем по наличию атрибута и значению)
+                    if ui is None:
+                        return True
+                    if not hasattr(ui, '_running'):
+                        return True
+                    return not ui._running
+                except Exception:
+                    return True  # При любой ошибке — пропускаем лог
         
         console_handler.addFilter(UIFilter())
         logger.addHandler(console_handler)
