@@ -290,15 +290,32 @@ class QamqorParser:
                 self.logger.info("🔒 Браузер закрыт")
     
     async def _run_missing_numbers_search(self):
-        """Поиск и обработка пропущенных номеров."""
-        missing_numbers = await self.db_manager.find_missing_numbers()
+        """Поиск и обработка пропущенных номеров для всех годов."""
+        missing_by_year = await self.db_manager.find_missing_numbers()
         
-        if not missing_numbers:
+        if not missing_by_year:
             self.logger.info("✅ Пропущенных номеров не найдено")
             return
         
-        total_missing = sum(len(nums) for nums in missing_numbers.values())
+        total_missing = sum(
+            len(nums) 
+            for year_data in missing_by_year.values() 
+            for nums in year_data.values()
+        )
+        
+        current_year_missing = sum(
+            len(nums) 
+            for nums in missing_by_year.get(self.config.YEAR_PREFIX, {}).values()
+        )
+        
+        past_years_missing = total_missing - current_year_missing
+        
         self.logger.info("📋 Найдено пропущенных номеров: %d", total_missing)
+        for year_prefix in sorted(missing_by_year.keys()):
+            year_data = missing_by_year[year_prefix]
+            year_total = sum(len(nums) for nums in year_data.values())
+            year_label = "(текущий)" if year_prefix == self.config.YEAR_PREFIX else ""
+            self.logger.info(f"   └─ 20{year_prefix}: {year_total} номеров {year_label}")
         
         async with async_playwright() as playwright:
             browser = await playwright.chromium.launch(
@@ -320,9 +337,10 @@ class QamqorParser:
             )
             
             missing_queue: asyncio.Queue = asyncio.Queue()
-            for region_code, numbers in missing_numbers.items():
-                region_name = self.config.REGIONS[region_code]
-                await missing_queue.put((region_code, region_name, numbers))
+            for year_prefix, year_data in missing_by_year.items():
+                for region_code, numbers in year_data.items():
+                    region_name = self.config.REGIONS[region_code]
+                    await missing_queue.put((year_prefix, region_code, region_name, numbers))
             
             self.active_workers = [
                 asyncio.create_task(
@@ -417,7 +435,7 @@ class QamqorParser:
     async def _missing_numbers_worker(
         self,
         worker_id: int,
-        missing_queue: asyncio.Queue[Tuple[int, str, List[int]]],
+        missing_queue: asyncio.Queue[Tuple[str, int, str, List[int]]],
         tab_manager: StealthTabManager
     ) -> None:
         """Воркер для обработки пропущенных номеров."""
@@ -435,14 +453,16 @@ class QamqorParser:
                         break
                     continue
                 
-                region_code, region_name, numbers = region_data
+                year_prefix, region_code, region_name, numbers = region_data
                     
             except asyncio.CancelledError:
                 self.logger.debug(f"🛑 MW{worker_id} отменен")
                 break
             
             if self.shutdown_event.is_set():
-                self.logger.warning(f"⚠️ MW{worker_id} | {region_name} (missing) пропущен")
+                self.logger.warning(
+                    f"⚠️ MW{worker_id} | 20{year_prefix} | {region_name} (missing) пропущен"
+                )
                 missing_queue.task_done()
                 continue
             
@@ -450,7 +470,7 @@ class QamqorParser:
                 try:
                     async with tab_manager.get_tab() as page:
                         await self._process_missing_numbers(
-                            page, region_code, region_name, numbers, worker_id
+                            page, year_prefix, region_code, region_name, numbers, worker_id
                         )
                     break
                     
@@ -460,7 +480,9 @@ class QamqorParser:
                     
                     if attempt < self.config.REGION_RETRY_LIMIT:
                         delay = self.config.RETRY_DELAY * attempt
-                        self.logger.warning(f"⚠️ MW{worker_id} | {region_name} retry {attempt}")
+                        self.logger.warning(
+                            f"⚠️ MW{worker_id} | 20{year_prefix} | {region_name} retry {attempt}"
+                        )
                         await asyncio.sleep(delay)
             
             missing_queue.task_done()
@@ -507,7 +529,7 @@ class QamqorParser:
                 if self.shutdown_event.is_set():
                     break
                 
-                reg_num = f"25{region_code}170101{check_type}/{current_position:05d}"
+                reg_num = f"{self.config.YEAR_PREFIX}{region_code}170101{check_type}/{current_position:05d}"
                 
                 try:
                     result = await self._try_number_safe(
@@ -542,6 +564,7 @@ class QamqorParser:
     async def _process_missing_numbers(
         self,
         page: Page,
+        year_prefix: str,
         region_code: int,
         region_name: str,
         numbers: List[int],
@@ -567,7 +590,7 @@ class QamqorParser:
                 break
             
             for check_type in [1, 2]:
-                reg_num = f"25{region_code}170101{check_type}/{number:05d}"
+                reg_num = f"{year_prefix}{region_code}170101{check_type}/{number:05d}"
                 
                 try:
                     result = await self._try_number_safe(
@@ -589,11 +612,14 @@ class QamqorParser:
                 except Exception:
                     pass
         
-        if region_code in self.region_stats:
-            self.region_stats[region_code]['found_new'] += found_count
+        # Обновляем статистику только для текущего года
+        if year_prefix == self.config.YEAR_PREFIX:
+            if region_code in self.region_stats:
+                self.region_stats[region_code]['found_new'] += found_count
         
         self.logger.info(
-            "✅ %s: пропущенные (%d/%d)", 
+            "✅ 20%s | %s: пропущенные (%d/%d)", 
+            year_prefix,
             region_name, 
             found_count, 
             len(numbers)
@@ -794,7 +820,7 @@ class QamqorParser:
         """Вывод красивой итоговой таблицы."""
         self.logger.info("")
         self.logger.info("=" * 120)
-        self.logger.info("📊 СВОДНАЯ ТАБЛИЦА ПО РЕГИОНАМ")
+        self.logger.info("📊 СВОДНАЯ ТАБЛИЦА ПО РЕГИОНАМ (20%s)", self.config.YEAR_PREFIX)
         self.logger.info("=" * 120)
         
         header = f"{'Регион':<20} | {'Записей':>10} | {'След. номер':>12} | {'Пропущено':>11} | {'Найдено':>10}"

@@ -46,7 +46,7 @@ DB_COMPANIES = {
     'port': 5432
 }
 
-OUTPUT_FILE = r'C:\Users\adelmatov001\OneDrive - PwC\SharePoint List Update\qamqor_sharepoint_sync.xlsx'
+OUTPUT_FILE = r'C:\Users\adelmatov001\OneDrive - PwC\TCDR portal - Documents\qamqor_sharepoint_sync.xlsx'
 
 # Все колонки (добавлена колонка Статус)
 ALL_COLUMNS = [

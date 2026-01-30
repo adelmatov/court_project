@@ -200,20 +200,20 @@ class DatabaseManager:
         
         async with self.get_connection() as conn:
             cursor = conn.cursor()
-            cursor.execute("""
+            cursor.execute(f"""
                 SELECT region_code, COALESCE(MAX(seq_number), 0) + 1 as next_number
                 FROM (
                     SELECT 
                         CAST(SUBSTRING(registration_number, 3, 7) AS INTEGER) as region_code,
                         CAST(SPLIT_PART(registration_number, '/', 2) AS INTEGER) as seq_number
                     FROM qamqor_tax 
-                    WHERE registration_number ~ '^25[0-9]{7}170101[12]/[0-9]{5}$'
+                    WHERE registration_number ~ '^{self.config.YEAR_PREFIX}[0-9]{{7}}170101[12]/[0-9]{{5}}$'
                     UNION ALL
                     SELECT 
                         CAST(SUBSTRING(registration_number, 3, 7) AS INTEGER) as region_code,
                         CAST(SPLIT_PART(registration_number, '/', 2) AS INTEGER) as seq_number
                     FROM qamqor_customs 
-                    WHERE registration_number ~ '^25[0-9]{7}170101[12]/[0-9]{5}$'
+                    WHERE registration_number ~ '^{self.config.YEAR_PREFIX}[0-9]{{7}}170101[12]/[0-9]{{5}}$'
                 ) combined 
                 GROUP BY region_code
             """)
@@ -240,7 +240,7 @@ class DatabaseManager:
             cursor = conn.cursor()
             
             for region_code in self.config.REGIONS.keys():
-                pattern = f'^25{region_code}170101[12]/[0-9]{{5}}$'
+                pattern = f'^{self.config.YEAR_PREFIX}{region_code}170101[12]/[0-9]{{5}}$'
                 
                 # Подсчет записей
                 cursor.execute("""
@@ -293,45 +293,74 @@ class DatabaseManager:
         
         return stats
     
-    async def find_missing_numbers(self) -> Dict[int, List[int]]:
+    async def find_missing_numbers(self) -> Dict[str, Dict[int, List[int]]]:
         """
-        Поиск пропущенных номеров в БД.
+        Поиск пропущенных номеров в БД для всех годов.
         
         Returns:
-            Словарь {region_code: [missing_numbers]}
+            Словарь {year: {region_code: [missing_numbers]}}
         """
         missing_numbers = {}
         
         async with self.get_connection() as conn:
             cursor = conn.cursor()
             
-            for region_code in self.config.REGIONS.keys():
-                pattern = f'^25{region_code}170101[12]/[0-9]{{5}}$'
+            # Находим все уникальные годы в БД
+            cursor.execute("""
+                SELECT DISTINCT SUBSTRING(registration_number, 1, 2) as year_prefix
+                FROM (
+                    SELECT registration_number FROM qamqor_tax
+                    UNION
+                    SELECT registration_number FROM qamqor_customs
+                ) combined
+                WHERE registration_number ~ '^[0-9]{2}[0-9]{7}170101[12]/[0-9]{5}$'
+                ORDER BY year_prefix
+            """)
+            
+            years_in_db = [row[0] for row in cursor.fetchall()]
+            
+            # Добавляем текущий год, если его ещё нет
+            if self.config.YEAR_PREFIX not in years_in_db:
+                years_in_db.append(self.config.YEAR_PREFIX)
+            
+            self.logger.info(f"📅 Поиск пропущенных для годов: {years_in_db}")
+            
+            for year_prefix in years_in_db:
+                year_missing = {}
                 
-                cursor.execute("""
-                    SELECT CAST(SPLIT_PART(registration_number, '/', 2) AS INTEGER) as seq_num
-                    FROM (
-                        SELECT registration_number FROM qamqor_tax WHERE registration_number ~ %s
-                        UNION 
-                        SELECT registration_number FROM qamqor_customs WHERE registration_number ~ %s
-                    ) combined 
-                    ORDER BY seq_num
-                """, (pattern, pattern))
-                
-                existing_numbers = {row[0] for row in cursor.fetchall()}
-                
-                if existing_numbers:
-                    max_num = max(existing_numbers)
-                    expected_numbers = set(range(1, max_num + 1))
-                    region_missing = sorted(list(expected_numbers - existing_numbers))
+                for region_code in self.config.REGIONS.keys():
+                    pattern = f'^{year_prefix}{region_code}170101[12]/[0-9]{{5}}$'
                     
-                    # Исключаем номера из конфигурации
-                    if region_code in self.config.EXCLUDED_MISSING_NUMBERS:
-                        excluded = set(self.config.EXCLUDED_MISSING_NUMBERS[region_code])
-                        region_missing = [num for num in region_missing if num not in excluded]
+                    cursor.execute("""
+                        SELECT CAST(SPLIT_PART(registration_number, '/', 2) AS INTEGER) as seq_num
+                        FROM (
+                            SELECT registration_number FROM qamqor_tax WHERE registration_number ~ %s
+                            UNION 
+                            SELECT registration_number FROM qamqor_customs WHERE registration_number ~ %s
+                        ) combined 
+                        ORDER BY seq_num
+                    """, (pattern, pattern))
                     
-                    if region_missing:
-                        missing_numbers[region_code] = region_missing
+                    existing_numbers = {row[0] for row in cursor.fetchall()}
+                    
+                    if existing_numbers:
+                        max_num = max(existing_numbers)
+                        expected_numbers = set(range(1, max_num + 1))
+                        region_missing = sorted(list(expected_numbers - existing_numbers))
+                        
+                        # Исключаем номера из конфигурации (с учётом года)
+                        year_exclusions = self.config.EXCLUDED_MISSING_NUMBERS.get(
+                            year_prefix, {}
+                        )
+                        if region_code in year_exclusions:
+                            excluded = set(year_exclusions[region_code])
+                            region_missing = [num for num in region_missing if num not in excluded]
+                        
+                        if region_missing:
+                            year_missing[region_code] = region_missing
+                
+                if year_missing:
+                    missing_numbers[year_prefix] = year_missing
         
         return missing_numbers
     
