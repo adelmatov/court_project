@@ -533,7 +533,8 @@ class DatabaseManager:
     async def get_smas_cases_without_judge(
         self, 
         settings,
-        interval_days: int = 2
+        interval_days: int = 2,
+        max_active_age_days: int = None
     ) -> List[str]:
         """
         Получить номера дел СМАС без назначенного судьи
@@ -541,6 +542,7 @@ class DatabaseManager:
         Args:
             settings: экземпляр Settings для получения instance_codes
             interval_days: интервал проверки (общий для update mode)
+            max_active_age_days: максимальный возраст дела в днях (None = без ограничения)
         
         Returns:
             ['7194-25-00-4/123', '7594-25-00-4/456', ...]
@@ -551,11 +553,6 @@ class DatabaseManager:
         if not smas_codes:
             self.logger.warning("Не найдены instance_codes для СМАС в конфиге")
             return []
-        
-        # Формируем условия для SQL
-        # Номер дела: "7194-25-00-4/123" → court_code = "7194" → instance = "94"
-        # Паттерн: символы 3-4 в court_code (индексы 2-3 в номере до первого дефиса)
-        # SQL: SUBSTRING(case_number FROM 3 FOR 2)
         
         # Строим условие для проверки instance_code
         code_conditions = []
@@ -569,16 +566,25 @@ class DatabaseManager:
         
         codes_where = f"({' OR '.join(code_conditions)})"
         
+        # Базовые условия
+        conditions = [
+            "judge_id IS NULL",
+            codes_where,
+            f"""(
+                last_updated_at IS NULL
+                OR last_updated_at < NOW() - INTERVAL '{interval_days} days'
+            )"""
+        ]
+        
+        # Фильтр по возрасту дела
+        if max_active_age_days:
+            conditions.append(f"case_date > CURRENT_DATE - INTERVAL '{max_active_age_days} days'")
+        
+        # Собираем запрос
         query = f"""
             SELECT case_number
             FROM cases
-            WHERE 
-                judge_id IS NULL
-                AND {codes_where}
-                AND (
-                    last_updated_at IS NULL
-                    OR last_updated_at < NOW() - INTERVAL '{interval_days} days'
-                )
+            WHERE {' AND '.join(conditions)}
             ORDER BY case_date DESC
         """
         

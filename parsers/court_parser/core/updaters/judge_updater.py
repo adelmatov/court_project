@@ -27,7 +27,8 @@ class JudgeUpdater(BaseUpdater):
         
         cases = await self.db_manager.get_smas_cases_without_judge(
             self.settings,
-            interval_days=interval_days
+            interval_days=interval_days,
+            max_active_age_days=config.get('max_active_age_days')
         )
         
         self.logger.info(f"Дел без судьи: {len(cases)}")

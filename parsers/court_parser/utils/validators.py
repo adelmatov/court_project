@@ -28,7 +28,8 @@ class DataValidator:
         if data.get('case_date'):
             date = data['case_date']
             if isinstance(date, datetime):
-                if not (1990 <= date.year <= 2030):
+                current_year = datetime.now().year
+                if not (1990 <= date.year <= current_year + 2):
                     raise ValidationError(f"Некорректный год: {date.year}")
         
         # Проверка судьи

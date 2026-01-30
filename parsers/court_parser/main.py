@@ -30,7 +30,7 @@ async def parse_all_regions_from_config() -> dict:
     settings = Settings()
     ps = settings.parsing_settings
     
-    year = ps.get('year', '2025')
+    year = settings.get_parsing_year()
     court_types = ps.get('court_types', ['smas', 'appellate'])
     start_from = ps.get('start_from', 1)
     max_number = ps.get('max_number', 9999)
@@ -637,6 +637,7 @@ async def run_pipeline():
     results = {
         'gaps': {'found': 0, 'closed': 0},
         'parse': {'saved': 0},
+        'judge': {'processed': 0, 'found': 0},
         'events': {'processed': 0, 'events_added': 0},
         'docs': {'processed': 0, 'docs_downloaded': 0},
     }
@@ -731,7 +732,38 @@ async def run_pipeline():
         await db_manager.disconnect()
     
     # =========================================================================
-    # ЭТАП 2: EVENTS
+    # ЭТАП 2: JUDGE
+    # =========================================================================
+    _reset_ui()
+    logger.info("")
+    logger.info("-" * 60)
+    logger.info("STAGE 2: UPDATING JUDGES")
+    logger.info("-" * 60)
+
+    try:
+        settings = Settings()
+        db_manager = DatabaseManager(settings.database)
+        await db_manager.connect()
+        
+        try:
+            from core.updaters.judge_updater import JudgeUpdater
+            judge_updater = JudgeUpdater(settings, db_manager)
+            judge_result = await judge_updater.run()
+            
+            results['judge'] = {
+                'processed': judge_result.get('processed', 0),
+                'found': judge_updater.stats.get('judges_found', 0)
+            }
+        finally:
+            await db_manager.disconnect()
+    except Exception as e:
+        logger.error(f"Judge failed: {e}", exc_info=True)
+    finally:
+        _reset_ui()
+
+
+    # =========================================================================
+    # ЭТАП 3: EVENTS
     # =========================================================================
     _reset_ui()
     logger.info("")
@@ -759,7 +791,7 @@ async def run_pipeline():
         _reset_ui()
     
     # =========================================================================
-    # ЭТАП 3: DOCS
+    # ЭТАП 4: DOCS
     # =========================================================================
     _reset_ui()
     logger.info("")
@@ -799,6 +831,7 @@ async def run_pipeline():
     logger.info(f"Total time: {total_minutes}:{total_seconds:02d}")
     logger.info(f"Gaps:   {results['gaps']['closed']}/{results['gaps']['found']} closed")
     logger.info(f"Parse:  {results['parse']['saved']} cases")
+    logger.info(f"Judge:  {results['judge']['found']}/{results['judge']['processed']} found")
     logger.info(f"Events: {results['events']['events_added']} added")
     logger.info(f"Docs:   {results['docs']['docs_downloaded']} downloaded")
     logger.info("=" * 60)
