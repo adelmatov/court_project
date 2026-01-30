@@ -2,7 +2,7 @@
 Обработка и очистка текста
 """
 import re
-from datetime import datetime
+from datetime import datetime  # ← оставляем на уровне модуля
 from typing import List, Optional, Dict
 
 
@@ -46,7 +46,6 @@ class TextProcessor:
                 parsed = parsed.replace(year=year)
             
             # ВАЛИДАЦИЯ: год должен быть в разумном диапазоне
-            from datetime import datetime
             current_year = datetime.now().year
             if not (2000 <= parsed.year <= current_year + 2):
                 return None
