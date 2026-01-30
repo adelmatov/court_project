@@ -128,7 +128,7 @@ class GapsUpdater(BaseUpdater):
         
         Переопределяем базовый run() для специфичной логики gaps
         """
-        year = self.gaps_config.get('year', '2025')
+        year = self.settings.get_parsing_year()
         court_types = self.gaps_config.get('court_types', ['smas', 'appellate'])
         target_regions = self.settings.get_target_regions()
         

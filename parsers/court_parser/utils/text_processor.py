@@ -46,7 +46,9 @@ class TextProcessor:
                 parsed = parsed.replace(year=year)
             
             # ВАЛИДАЦИЯ: год должен быть в разумном диапазоне
-            if not (2000 <= parsed.year <= 2030):
+            from datetime import datetime
+            current_year = datetime.now().year
+            if not (2000 <= parsed.year <= current_year + 2):
                 return None
             
             return parsed

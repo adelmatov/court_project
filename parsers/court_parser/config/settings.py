@@ -99,6 +99,22 @@ class Settings:
         """Лимит дел на регион"""
         return self.parsing_settings.get('limit_cases_per_region')
     
+    def get_parsing_year(self) -> str:
+        """
+        Получить год для парсинга
+        
+        Returns:
+            Текущий год если 'auto', иначе значение из конфига
+        """
+        from datetime import datetime
+        
+        year = self.parsing_settings.get('year', 'auto')
+        
+        if year == 'auto' or year is None:
+            return str(datetime.now().year)
+        
+        return str(year)
+    
     @property
     def update_settings(self) -> Dict[str, Any]:
         """Настройки обновления"""
