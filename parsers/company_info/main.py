@@ -24,11 +24,7 @@ if sys.platform == "win32":
         # Если ничего не сработало, просто переменная окружения
         pass
 
-# 2. Очистить кеш модуля при запуске через python -m
-if __name__ == "__main__":
-    keys_to_remove = [k for k in sys.modules.keys() if 'company_info.main' in k]
-    for key in keys_to_remove:
-        sys.modules.pop(key, None)
+
 # ====================================================================
 
 import sys
@@ -390,10 +386,9 @@ Examples:
     
     args = parser.parse_args()
     
-    # Setup logger
+    # Setup logger (console only, file logging by orchestrator)
     setup_logger(
         'company_parser',
-        log_file='logs/company_parser.log',
         level=args.log_level
     )
     
@@ -420,8 +415,8 @@ Examples:
         sys.exit(1)
     
     if not bins:
-        logger.error("No BINs to process")
-        sys.exit(1)
+        logger.info("✅ No new BINs to process - all already in database")
+        sys.exit(0)  # Успешное завершение
     
     # Apply limit
     if args.limit and len(bins) > args.limit:

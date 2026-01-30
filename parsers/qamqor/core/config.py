@@ -1,6 +1,7 @@
 """Централизованная конфигурация парсера."""
 
 import os
+from datetime import datetime
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Dict, List, Set
@@ -54,9 +55,7 @@ class Config:
     RETRY_BACKOFF_BASE: int = 2
     
     # Логирование
-    LOG_DIR: Path = field(default_factory=lambda: Path("logs"))
     LOG_LEVEL: str = "INFO"
-    SCREENSHOT_DIR: Path = field(default_factory=lambda: Path("screenshots"))
     
     # База данных
     DB_HOST: str = field(
@@ -86,6 +85,10 @@ class Config:
     UPDATE_STATUSES: List[str] = field(default_factory=lambda: ["1"])
     UPDATE_TRACK_CHANGES: bool = True
     
+    YEAR_PREFIX: str = field(
+        default_factory=lambda: datetime.now().strftime("%y")
+    )
+
     # Регионы
     REGIONS: Dict[int, str] = field(default_factory=lambda: {
         1000000: "Abay",
@@ -129,12 +132,15 @@ class Config:
         "suspend_date", "resume_date", "prolong_start", "prolong_end"
     })
     
-    # Исключенные пропущенные номера (известные отсутствующие данные)
-    EXCLUDED_MISSING_NUMBERS: Dict[int, List[int]] = field(
+    # Структура: год → регион → список номеров
+    EXCLUDED_MISSING_NUMBERS: Dict[str, Dict[int, List[int]]] = field(
         default_factory=lambda: {
-            5900000: [1],
+            "25": {
+                5900000: [1],
+            },
         }
     )
+
     
     # Тестовый номер для health check
     TEST_NUMBER: str = "2559000001701011/00002"
@@ -146,9 +152,6 @@ class Config:
         Raises:
             ValueError: При некорректных значениях параметров
         """
-        # Создание директорий
-        self.LOG_DIR.mkdir(parents=True, exist_ok=True)
-        self.SCREENSHOT_DIR.mkdir(parents=True, exist_ok=True)
         
         # Валидация параметров
         self._validate_parameters()
@@ -180,3 +183,5 @@ class Config:
         
         if self.NATURAL_DELAY_MIN > self.NATURAL_DELAY_MAX:
             raise ValueError("MIN delay не может быть больше MAX")
+    
+    

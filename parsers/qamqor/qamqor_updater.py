@@ -5,6 +5,7 @@ QAMQOR Updater - Апдейтер существующих записей.
 
 import asyncio
 import argparse
+import re
 import signal
 import sys
 import random
@@ -27,6 +28,7 @@ from .core import (
     apply_stealth
 )
 
+
 class QamqorUpdater:
     """Апдейтер с синхронизацией парсера."""
     
@@ -34,11 +36,22 @@ class QamqorUpdater:
         self, 
         force: bool = False, 
         statuses: Optional[List[str]] = None,
-        single_number: Optional[str] = None  # ✅ Новый параметр
+        single_number: Optional[str] = None
     ) -> None:
         self.config = Config()
         self.log_manager = LogManager(self.config, name="qamqor_updater")
         self.logger = self.log_manager.logger
+        
+        # ✅ Валидация номера с логированием
+        if single_number:
+            pattern = r'^' + self.config.YEAR_PREFIX + r'\d{7}170101[12]/\d{5}$'
+            
+            if not re.match(pattern, single_number):
+                self.logger.error(f"Неверный формат номера: {single_number}")
+                self.logger.error(
+                    f"Ожидается: {self.config.YEAR_PREFIX}RRRRRRR170101T/SSSSS"
+                )
+                raise ValueError(f"Неверный формат номера: {single_number}")
         
         self.db_manager = DatabaseManager(self.config, self.logger)
         self.data_processor = DataProcessor(self.config, self.logger)
@@ -47,9 +60,7 @@ class QamqorUpdater:
         
         self.force = force
         self.statuses = statuses or self.config.UPDATE_STATUSES
-        self.single_number = single_number  # ✅ Сохраняем номер
-        
-        # ... остальное без изменений
+        self.single_number = single_number
         
         self.update_queue: asyncio.Queue = asyncio.Queue()
         self.data_queue: asyncio.Queue = asyncio.Queue()
@@ -110,6 +121,7 @@ class QamqorUpdater:
                 self.logger.info(f"   Номер: {self.single_number}")
                 
                 try:
+                    # ✅ Позиция типа проверки: 2 (год) + 7 (регион) + 6 (170101) = 15
                     check_type = self.single_number[15]
                     
                     if check_type == '1':
@@ -133,14 +145,13 @@ class QamqorUpdater:
                 self.logger.info("📊 Критерии отбора:")
                 self.logger.info(f"   ├─ Статусы: {self.statuses}")
                 self.logger.info(f"   ├─ Минимальный возраст: {self.config.UPDATE_MIN_AGE_DAYS} дней")
-                self.logger.info(f"   ├─ Максимальный возраст: {self.config.UPDATE_MAX_AGE_DAYS} дней")  # ⬅️ НОВОЕ
+                self.logger.info(f"   ├─ Максимальный возраст: {self.config.UPDATE_MAX_AGE_DAYS} дней")
                 self.logger.info(f"   ├─ Cooldown: {self.config.UPDATE_COOLDOWN_DAYS} дней")
                 self.logger.info(f"   └─ Принудительно: {'Да' if self.force else 'Нет'}")
                 
                 records = await self.db_manager.get_records_to_update(
                     statuses=self.statuses,
                     force=self.force
-                    # ⬅️ max_age_days передается автоматически через Config
                 )
                 
                 total = len(records['tax']) + len(records['customs'])
@@ -177,7 +188,6 @@ class QamqorUpdater:
         """Процесс обновления."""
         all_numbers = records['tax'] + records['customs']
         
-        # ✅ ВАЖНО: Проверяем, что есть номера для обработки
         if not all_numbers:
             self.logger.warning("⚠️ Нет номеров для обработки")
             return
@@ -248,7 +258,7 @@ class QamqorUpdater:
                 name="update_data_handler"
             )
             
-            # ✅ КРИТИЧНО: Заполняем очередь номерами ДО запуска воркеров
+            # Заполняем очередь номерами ДО запуска воркеров
             self.logger.info(f"📋 Добавление {len(all_numbers)} номеров в очередь...")
             for reg_num in all_numbers:
                 await self.update_queue.put(reg_num)
@@ -300,9 +310,7 @@ class QamqorUpdater:
         """Воркер обновления с постоянной вкладкой."""
         self.logger.debug(f"✅ UW{worker_id} запущен")
         
-        # ✅ КЛЮЧЕВОЕ ИЗМЕНЕНИЕ: Получаем вкладку ОДИН РАЗ
         async with tab_manager.get_tab() as page:
-            # Загружаем страницу один раз
             try:
                 await page.goto(
                     self.config.SEARCH_URL,
@@ -322,7 +330,6 @@ class QamqorUpdater:
                 self.logger.error(f"❌ UW{worker_id}: Ошибка загрузки страницы: {e}")
                 return
             
-            # ✅ Обрабатываем номера последовательно на ОДНОЙ вкладке
             processed_count = 0
             
             while not self.shutdown_event.is_set():
@@ -354,7 +361,7 @@ class QamqorUpdater:
                 finally:
                     self.update_queue.task_done()
             
-            self.logger.info(f"✅ UW{worker_id} завершен (обработано: {processed_count})")
+            self.logger.info(f" ✅ UW{worker_id} завершен (обработано: {processed_count})")
     
     async def _fetch_record_data(
         self,
@@ -362,7 +369,7 @@ class QamqorUpdater:
         registration_number: str,
         worker_id: int
     ) -> Optional[Dict]:
-        """Получение данных записи (БЕЗ повторной загрузки страницы)."""
+        """Получение данных записи."""
         self.log_manager.increment_metric('api_requests')
         
         for attempt in range(1, self.config.MAX_RETRIES + 1):
@@ -370,10 +377,6 @@ class QamqorUpdater:
                 if self.shutdown_event.is_set():
                     return None
                 
-                # ✅ УБРАЛИ: await page.goto() и wait_for_selector()
-                # Страница уже загружена в воркере!
-                
-                # Случайная задержка для имитации человека
                 await asyncio.sleep(
                     random.uniform(
                         self.config.NATURAL_DELAY_MIN, 
@@ -381,7 +384,6 @@ class QamqorUpdater:
                     )
                 )
 
-                # Заполняем поле
                 input_selector = 'input[placeholder="Тексеру/ тіркеу нөмірі"]'
                 await page.fill(input_selector, '')
                 await page.fill(input_selector, registration_number)
@@ -393,7 +395,6 @@ class QamqorUpdater:
                     )
                 )
                 
-                # Кликаем и ждем ответ
                 async with self._response_listener(page) as wait_response:
                     await page.click("button.btn.btn-primary:has-text('Іздеу')")
                     response_data = await wait_response()
@@ -404,7 +405,6 @@ class QamqorUpdater:
                         continue
                     return None
                 
-                # Валидация
                 is_valid, error_msg = self.api_validator.validate_response(
                     response_data,
                     context=f"UW{worker_id}:{registration_number}"
@@ -420,11 +420,9 @@ class QamqorUpdater:
                         continue
                     return None
                 
-                # Проверка наличия данных
                 if response_data.get("data", {}).get("totalElements", 0) == 0:
                     return None
                 
-                # Обработка данных
                 processed = self.data_processor.process_api_response(response_data)
                 if processed:
                     self.log_manager.increment_metric('records_processed')
@@ -599,8 +597,8 @@ def parse_arguments():
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Примеры использования:
-  # Обновить конкретный номер
-  python -m parsers.qamqor.qamqor_updater --number "251000000170101/00123"
+  # Обновить конкретный номер (2026 год)
+  python -m parsers.qamqor.qamqor_updater --number "2610000001701011/00123"
   
   # Массовое обновление по статусу "1"
   python -m parsers.qamqor.qamqor_updater --status "1"
@@ -613,7 +611,7 @@ def parse_arguments():
     parser.add_argument(
         '--number',
         type=str,
-        help='Обновить конкретный номер (пример: 251000000170101/00123)'
+        help='Обновить конкретный номер (пример: 2610000001701011/00123)'
     )
     parser.add_argument(
         '--force',
@@ -633,40 +631,22 @@ async def main():
     """Точка входа."""
     args = parse_arguments()
     
-    # Валидация
+    # Валидация комбинации аргументов
     if args.number and (args.status or args.force):
         print("❌ --number нельзя использовать с --status или --force")
         sys.exit(1)
     
-    # ✅ Проверка формата номера
-    if args.number:
-        import re
-        # Формат: 25 + 7 цифр (регион) + 170101 + тип (1 или 2) + / + 5 цифр
-        pattern = r'^25\d{7}170101[12]/\d{5}$'
-        if not re.match(pattern, args.number):
-            print(f"❌ Неверный формат номера: {args.number}")
-            print("   Ожидается: 25RRRRRRR170101T/SSSSS")
-            print("   Где:")
-            print("     RRRRRRR = код региона (7 цифр)")
-            print("     T       = тип проверки (1=налоговая, 2=таможенная)")
-            print("     SSSSS   = порядковый номер (5 цифр)")
-            print("")
-            print("   Пример: 2575000001701012/01598")
-            sys.exit(1)
-        
-        # ✅ Дополнительная проверка существования в БД
-        check_type = args.number[12]
-        table = 'qamqor_tax' if check_type == '1' else 'qamqor_customs'
-        
-        print(f"ℹ️  Проверяем наличие номера в таблице {table}...")
-    
     statuses = [s.strip() for s in args.status.split(',')] if args.status else None
     
-    updater = QamqorUpdater(
-        force=args.force,
-        statuses=statuses,
-        single_number=args.number
-    )
+    try:
+        updater = QamqorUpdater(
+            force=args.force,
+            statuses=statuses,
+            single_number=args.number
+        )
+    except ValueError:
+        # Ошибка валидации номера уже залогирована в __init__
+        sys.exit(1)
     
     success = await updater.run()
     sys.exit(0 if success else 1)

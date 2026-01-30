@@ -24,31 +24,22 @@ class LogManager:
         }
         
     def _setup_logger(self, name: str) -> logging.Logger:
-        """Настройка логгера."""
-        self.config.LOG_DIR.mkdir(exist_ok=True)
-        
+        """Настройка логгера (только консольный вывод)."""
         logger = logging.getLogger(name)
         logger.setLevel(getattr(logging, self.config.LOG_LEVEL))
         logger.handlers.clear()
-        logger.propagate = False  # ✅ Предотвращаем дублирование
+        logger.propagate = False
         
         formatter = logging.Formatter(
             '%(asctime)s | %(levelname)-8s | %(message)s',
             datefmt='%H:%M:%S'
         )
         
-        # Файловый хендлер
-        log_file = self.config.LOG_DIR / f"{name}_{datetime.now():%Y%m%d_%H%M%S}.log"
-        fh = logging.FileHandler(log_file, encoding='utf-8')
-        fh.setFormatter(formatter)
-        fh.setLevel(logging.DEBUG)
-        
-        # Консольный хендлер
+        # Только консольный хендлер
         ch = logging.StreamHandler()
         ch.setFormatter(formatter)
         ch.setLevel(getattr(logging, self.config.LOG_LEVEL))
         
-        logger.addHandler(fh)
         logger.addHandler(ch)
         
         return logger
