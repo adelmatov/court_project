@@ -57,7 +57,10 @@ screenshots/
 *.pdf
 docs/
 *.txt
+*.xlsx
+*.bat
 # Test files
+test*
 parsers/court_parser/test.py
 parsers/court_parser/test2_bot.py
 parsers/court_parser/text_test.py

@@ -132,6 +132,12 @@ class BaseUpdater(ABC):
     ) -> Dict[str, Any]:
         """Обработка группы дел одного региона"""
         async with semaphore:
+            # Локальные счётчики для текущего региона
+            region_stats = {
+                'judges_found': 0,
+                'events_added': 0,
+                'docs_downloaded': 0,
+            }
             worker = RegionWorker(self.settings, region_key)
             
             try:
@@ -156,18 +162,25 @@ class BaseUpdater(ABC):
                         # Mode-specific stats
                         if result.get('judge_found'):
                             self.stats['judges_found'] += 1
+                            region_stats['judges_found'] += 1  # ← ДОБАВИТЬ
+
                         if result.get('events_added'):
-                            self.stats['events_added'] += result['events_added']
+                            events_count = result['events_added']
+                            self.stats['events_added'] += events_count
+                            region_stats['events_added'] += events_count  # ← ДОБАВИТЬ
+
                         if result.get('documents_downloaded'):
-                            self.stats['docs_downloaded'] += result['documents_downloaded']
+                            docs_count = result['documents_downloaded']
+                            self.stats['docs_downloaded'] += docs_count
+                            region_stats['docs_downloaded'] += docs_count
                         
                         # Обновляем UI
                         ui.update_progress(
                             region_key,
                             processed=processed,
-                            found=self.stats.get('judges_found', 0),
-                            events=self.stats.get('events_added', 0),
-                            docs=self.stats.get('docs_downloaded', 0)
+                            found=region_stats['judges_found'],
+                            events=region_stats['events_added'],
+                            docs=region_stats['docs_downloaded']
                         )
                         
                         await asyncio.sleep(self.delay)

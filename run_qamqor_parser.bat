@@ -12,7 +12,7 @@ REM Активация виртуального окружения
 call venv\Scripts\activate.bat
 
 REM ========== ОЧИСТКА СТАРЫХ ЛОГОВ (Python) ==========
-python -u -m utils.cleanup_logs logs 3
+python -u parsers\qamqor\utils\cleanup_logs.py logs 3
 
 REM ========== ИМЯ ФАЙЛА ЛОГА ==========
 set LOG_FILE=logs\orchestrator_%date:~-4,4%%date:~-7,2%%date:~-10,2%_%time:~0,2%%time:~3,2%%time:~6,2%.log
