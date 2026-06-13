@@ -179,46 +179,86 @@ class DocumentHandler:
     async def fetch_all_documents(
         self,
         session: aiohttp.ClientSession,
-        results_html: str, 
+        results_html: str,
         case_number: str,
         case_index: int = 0,
         existing_keys: Optional[Set[str]] = None,
         delay: float = 1.0
-    ) -> List[Dict]:
-        """Скачать все новые документы для дела"""
+    ) -> Dict:
+        """
+        Скачать все новые документы для дела.
+
+        Returns:
+            {
+                'downloaded': [...],        # список скачанных в этой сессии
+                'total_on_site': int,       # всего документов на сайте
+                'already_had': int,         # уже было в БД (existing_keys)
+                'complete': bool,           # ВСЕ ли документы с сайта теперь на месте
+                'made_progress': bool       # скачали ли хоть один новый
+            }
+        """
         existing_keys = existing_keys or set()
         downloaded = []
-        
+
+        result = {
+            'downloaded': downloaded,
+            'total_on_site': 0,
+            'already_had': len(existing_keys),
+            'complete': False,
+            'made_progress': False,
+        }
+
+        # Не удалось открыть карточку — полнота неизвестна (считаем НЕ полным)
         if not await self.open_case_card(session, results_html, case_index):
-            return downloaded
-        
+            self.logger.warning(f"Не удалось открыть карточку дела {case_number}")
+            return result
+
         await asyncio.sleep(delay)
-        
+
         documents, form_data = await self.get_document_list(session)
-        if not documents or not form_data:
-            return downloaded
-        
+
+        # Список документов получить не удалось — полнота неизвестна
+        if documents is None:
+            return result
+
+        result['total_on_site'] = len(documents)
+
+        # Если на сайте документов нет — дело "полное" (скачивать нечего)
+        if not documents:
+            result['complete'] = True
+            return result
+
+        if not form_data:
+            self.logger.warning(f"Нет form_data для документов {case_number}")
+            return result
+
         new_docs = [d for d in documents if d.unique_key not in existing_keys]
+
+        # Все документы уже есть в БД → полное
         if not new_docs:
-            self.logger.info(f"Новых документов нет для {case_number}")
-            return downloaded
-        
-        self.logger.info(f"Новых документов: {len(new_docs)}")
-        
+            result['complete'] = True
+            self.logger.info(f"Все документы уже скачаны для {case_number}")
+            return result
+
+        self.logger.info(f"Новых документов: {len(new_docs)} для {case_number}")
+
+        # Ключи, которые удалось закрыть (скачать) в этой сессии
+        downloaded_keys = set()
+
         for doc in new_docs:
             try:
                 if not await self.open_document(session, form_data, doc.index):
                     continue
                 await asyncio.sleep(delay)
-                
+
                 doc_html = await self.get_document_page(session)
                 if not doc_html:
                     continue
-                
+
                 pdf_url = self.parser.extract_pdf_url(doc_html)
                 if not pdf_url:
                     continue
-                
+
                 file_info = await self.download_pdf(session, pdf_url, case_number, doc)
                 if file_info:
                     downloaded.append({
@@ -227,12 +267,20 @@ class DocumentHandler:
                         'file_path': file_info['file_path'],
                         'file_size': file_info['file_size']
                     })
-                
+                    downloaded_keys.add(doc.unique_key)
+
                 await asyncio.sleep(delay)
             except Exception as e:
-                self.logger.error(f"Ошибка скачивания {doc.doc_name}: {e}")
-        
-        return downloaded
+                self.logger.error(f"Ошибка скачивания {doc.doc_name} ({case_number}): {e}")
+
+        result['made_progress'] = len(downloaded) > 0
+
+        # Полнота: все документы с сайта теперь есть (старые existing + скачанные сейчас)
+        covered = existing_keys | downloaded_keys
+        all_site_keys = {d.unique_key for d in documents}
+        result['complete'] = all_site_keys.issubset(covered)
+
+        return result
     
     def _get_headers(self) -> Dict[str, str]:
         return HttpHeaders.get_base()

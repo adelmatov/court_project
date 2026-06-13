@@ -24,14 +24,14 @@ class EventsUpdater(BaseUpdater):
             return []
         
         filters = config.get('filters', {})
-        interval_days = config.get('check_interval_days', 2)
-        max_active_age_days = config.get('max_active_age_days')
         
         cases = await self.db_manager.get_cases_for_update({
             'defendant_keywords': filters.get('party_keywords', []),
             'exclude_event_types': filters.get('exclude_event_types', []),
-            'update_interval_days': interval_days,
-            'max_active_age_days': max_active_age_days
+            'update_interval_days': config.get('check_interval_days', 2),
+            'final_event_types': config.get('final_event_types', []),
+            'final_check_period_days': config.get('final_check_period_days', 30),
+            'max_stale_days': config.get('max_stale_days'),
         })
         
         self.logger.info(f"Дел для обновления событий: {len(cases)}")

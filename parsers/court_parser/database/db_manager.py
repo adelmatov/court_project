@@ -294,90 +294,114 @@ class DatabaseManager:
     
     async def get_cases_for_update(self, filters: Dict) -> List[str]:
         """
-        Получить номера дел для обновления событий
-        
-        Логика:
-        1. Ответчик содержит ключевые слова
-        2. Нет финальных событий
-        3. Не проверялось дольше check_interval_days
-        4. Возраст дела < max_active_age_days
+        Получить номера дел для обновления событий.
+
+        Логика (по жизненному циклу, НЕ по возрасту):
+        1. Ответчик содержит ключевые слова (если заданы)
+        2. Нет исключённых событий (exclude_event_types)
+        3. Не проверялось дольше update_interval_days
+        4. Дело АКТИВНО (нет финального события)
+           ИЛИ финал появился недавно (окно дозагрузки)
+        5. Предохранитель: дело не заброшено (есть движение)
         """
         defendant_keywords = filters.get('defendant_keywords', [])
         exclude_events = filters.get('exclude_event_types', [])
         interval_days = filters.get('update_interval_days', 2)
-        max_active_age_days = filters.get('max_active_age_days')
-        
-        # Построение SQL запроса
+
+        # НОВОЕ: критерий завершённости вместо возраста
+        final_event_types = filters.get('final_event_types', [])
+        final_check_period_days = filters.get('final_check_period_days', 30)
+        max_stale_days = filters.get('max_stale_days')
+
         query = """
             SELECT DISTINCT c.case_number, c.case_date
             FROM cases c
         """
-        
+
         conditions = []
         params = []
         param_counter = 1
-        
-        # ФИЛЬТР 1: По ответчику (если указан)
+
+        # ФИЛЬТР 1: По ответчику
         if defendant_keywords:
             query += """
                 JOIN case_parties cp ON c.id = cp.case_id AND cp.party_role = 'defendant'
                 JOIN parties p ON cp.party_id = p.id
             """
-            
             keyword_conditions = []
             for keyword in defendant_keywords:
                 keyword_conditions.append(f"p.name ILIKE ${param_counter}")
                 params.append(f'%{keyword}%')
                 param_counter += 1
-            
             conditions.append(f"({' OR '.join(keyword_conditions)})")
-        
+
         # ФИЛЬТР 2: Исключить дела с определёнными событиями
         if exclude_events:
-            placeholders = ', '.join([f'${i}' for i in range(param_counter, param_counter + len(exclude_events))])
-            
+            placeholders = ', '.join(
+                [f'${i}' for i in range(param_counter, param_counter + len(exclude_events))]
+            )
             conditions.append(f"""
                 NOT EXISTS (
-                    SELECT 1 
+                    SELECT 1
                     FROM case_events ce
                     JOIN event_types et ON ce.event_type_id = et.id
                     WHERE ce.case_id = c.id
                     AND et.name IN ({placeholders})
                 )
             """)
-            
             params.extend(exclude_events)
             param_counter += len(exclude_events)
-        
+
         # ФИЛЬТР 3: Не проверялись последние N дней
         conditions.append(f"""
             (
-                c.last_updated_at IS NULL 
+                c.last_updated_at IS NULL
                 OR c.last_updated_at < NOW() - INTERVAL '{interval_days} days'
             )
         """)
-        
-        # ФИЛЬТР 4: Максимальный возраст активного дела
-        if max_active_age_days:
+
+        # ★ ФИЛЬТР 4: Дело активно (нет финала) ИЛИ финал в окне дозагрузки
+        if final_event_types:
+            event_placeholders = ', '.join(
+                [f"${param_counter + i}" for i in range(len(final_event_types))]
+            )
+            params.extend(final_event_types)
+            param_counter += len(final_event_types)
+
+            final_subq = f"""
+                SELECT MAX(ce.event_date)
+                FROM case_events ce
+                JOIN event_types et ON ce.event_type_id = et.id
+                WHERE ce.case_id = c.id
+                AND et.name IN ({event_placeholders})
+            """
             conditions.append(f"""
-                c.case_date > CURRENT_DATE - INTERVAL '{max_active_age_days} days'
+                (
+                    ({final_subq}) IS NULL
+                    OR ({final_subq}) > CURRENT_DATE - INTERVAL '{final_check_period_days} days'
+                )
             """)
-        
-        # Собираем WHERE
+
+        # ★ ФИЛЬТР 5: Предохранитель от заброшенных дел
+        # Смотрим давность ПОСЛЕДНЕГО события (или дату дела если событий нет)
+        if max_stale_days:
+            conditions.append(f"""
+                COALESCE(
+                    (SELECT MAX(ce.event_date) FROM case_events ce WHERE ce.case_id = c.id),
+                    c.case_date
+                ) > CURRENT_DATE - INTERVAL '{max_stale_days} days'
+            """)
+
         if conditions:
             query += " WHERE " + " AND ".join(conditions)
-        
-        # Сортировка: старые дела первыми
+
         query += " ORDER BY c.case_date ASC"
-        
-        # Выполнение запроса
+
         async with self.pool.acquire() as conn:
             rows = await conn.fetch(query, *params)
-        
-        # Извлекаем только номера дел
+
         case_numbers = [row['case_number'] for row in rows]
-        
-        self.logger.info(f"Найдено дел для обновления: {len(case_numbers)}")
+        self.logger.info(f"Найдено дел для обновления событий: {len(case_numbers)}")
         return case_numbers
 
     async def mark_case_as_updated(self, case_number: str):
@@ -531,42 +555,39 @@ class DatabaseManager:
         return smas_codes
     
     async def get_smas_cases_without_judge(
-        self, 
+        self,
         settings,
         interval_days: int = 2,
-        max_active_age_days: int = None
+        final_event_types: List[str] = None,
+        max_stale_days: int = None
     ) -> List[str]:
         """
-        Получить номера дел СМАС без назначенного судьи
-        
-        Args:
-            settings: экземпляр Settings для получения instance_codes
-            interval_days: интервал проверки (общий для update mode)
-            max_active_age_days: максимальный возраст дела в днях (None = без ограничения)
-        
-        Returns:
-            ['7194-25-00-4/123', '7594-25-00-4/456', ...]
+        Получить номера дел СМАС без назначенного судьи.
+
+        Логика (по жизненному циклу):
+        - судья не назначен
+        - дело СМАС
+        - не проверялось последние interval_days
+        - дело НЕ завершено (нет финала) — у закрытого дела судья уже не появится
+        - предохранитель: дело не заброшено
         """
-        # Получаем все instance_code для СМАС
         smas_codes = self.get_smas_instance_codes(settings)
-        
+
         if not smas_codes:
             self.logger.warning("Не найдены instance_codes для СМАС в конфиге")
             return []
-        
-        # Строим условие для проверки instance_code
+
         code_conditions = []
         params = []
         param_counter = 1
-        
+
         for code in smas_codes:
             code_conditions.append(f"SUBSTRING(case_number FROM 3 FOR 2) = ${param_counter}")
             params.append(code)
             param_counter += 1
-        
+
         codes_where = f"({' OR '.join(code_conditions)})"
-        
-        # Базовые условия
+
         conditions = [
             "judge_id IS NULL",
             codes_where,
@@ -575,28 +596,44 @@ class DatabaseManager:
                 OR last_updated_at < NOW() - INTERVAL '{interval_days} days'
             )"""
         ]
-        
-        # Фильтр по возрасту дела
-        if max_active_age_days:
-            conditions.append(f"case_date > CURRENT_DATE - INTERVAL '{max_active_age_days} days'")
-        
-        # Собираем запрос
+
+        # ★ Вместо возраста — дело не завершено
+        if final_event_types:
+            event_placeholders = ', '.join(
+                [f"${param_counter + i}" for i in range(len(final_event_types))]
+            )
+            params.extend(final_event_types)
+            param_counter += len(final_event_types)
+            conditions.append(f"""
+                NOT EXISTS (
+                    SELECT 1 FROM case_events ce
+                    JOIN event_types et ON ce.event_type_id = et.id
+                    WHERE ce.case_id = cases.id
+                    AND et.name IN ({event_placeholders})
+                )
+            """)
+
+        # ★ Предохранитель от заброшенных дел
+        if max_stale_days:
+            conditions.append(f"""
+                COALESCE(
+                    (SELECT MAX(ce.event_date) FROM case_events ce WHERE ce.case_id = cases.id),
+                    case_date
+                ) > CURRENT_DATE - INTERVAL '{max_stale_days} days'
+            """)
+
         query = f"""
             SELECT case_number
             FROM cases
             WHERE {' AND '.join(conditions)}
             ORDER BY case_date DESC
         """
-        
+
         async with self.pool.acquire() as conn:
             rows = await conn.fetch(query, *params)
-        
+
         case_numbers = [row['case_number'] for row in rows]
-        
-        self.logger.info(
-            f"Найдено дел СМАС без судьи: {len(case_numbers)}"
-        )
-        
+        self.logger.info(f"Найдено дел СМАС без судьи: {len(case_numbers)}")
         return case_numbers
     
     # Docs processing:
@@ -644,13 +681,79 @@ class DatabaseManager:
             rows = await conn.fetch(query)
         return [{'id': r['id'], 'case_number': r['case_number']} for r in rows]
 
-    async def mark_documents_downloaded(self, case_id: int):
-        """Пометить что документы скачаны"""
+    async def mark_documents_complete(self, case_id: int):
+        """
+        Документы скачаны ПОЛНОСТЬЮ.
+        Сбрасываем попытки, помечаем complete, фиксируем дату проверки.
+        """
         async with self.pool.acquire() as conn:
             await conn.execute("""
-                UPDATE cases SET documents_pending = FALSE, documents_checked_at = CURRENT_TIMESTAMP
+                UPDATE cases
+                SET documents_pending = FALSE,
+                    documents_complete = TRUE,
+                    documents_attempts = 0,
+                    documents_checked_at = CURRENT_TIMESTAMP
                 WHERE id = $1
             """, case_id)
+        self.logger.debug(f"Документы полные: case_id={case_id}")
+
+    async def mark_documents_incomplete(self, case_id: int, made_progress: bool):
+        """
+        Документы скачаны НЕ полностью.
+
+        made_progress=True  → скачали хоть один новый док → сброс счётчика (второй шанс)
+        made_progress=False → прогресса нет → увеличиваем счётчик попыток
+
+        documents_checked_at ставим, чтобы сработал интервал (не долбить каждую минуту),
+        но documents_complete остаётся FALSE → дело снова попадёт в выборку после интервала.
+        """
+        async with self.pool.acquire() as conn:
+            if made_progress:
+                await conn.execute("""
+                    UPDATE cases
+                    SET documents_attempts = 0,
+                        documents_checked_at = CURRENT_TIMESTAMP
+                    WHERE id = $1
+                """, case_id)
+            else:
+                await conn.execute("""
+                    UPDATE cases
+                    SET documents_attempts = documents_attempts + 1,
+                        documents_checked_at = CURRENT_TIMESTAMP
+                    WHERE id = $1
+                """, case_id)
+        self.logger.debug(
+            f"Документы НЕ полные: case_id={case_id}, progress={made_progress}"
+        )
+
+    async def mark_documents_exhausted(self, case_id: int):
+        """
+        Попытки исчерпаны (attempts >= лимит), но документы не полные.
+        Принудительно отпускаем дело (complete=TRUE), чтобы не зацикливаться.
+        Логируем как WARNING для ручного разбора.
+        """
+        async with self.pool.acquire() as conn:
+            row = await conn.fetchrow("SELECT case_number FROM cases WHERE id = $1", case_id)
+            await conn.execute("""
+                UPDATE cases
+                SET documents_pending = FALSE,
+                    documents_complete = TRUE,
+                    documents_checked_at = CURRENT_TIMESTAMP
+                WHERE id = $1
+            """, case_id)
+        case_number = row['case_number'] if row else case_id
+        self.logger.warning(
+            f"⚠️ Документы ЧАСТИЧНО скачаны (исчерпаны попытки): {case_number} "
+            f"— требуется ручная проверка"
+        )
+
+    async def get_documents_attempts(self, case_id: int) -> int:
+        """Текущее число попыток скачивания для дела."""
+        async with self.pool.acquire() as conn:
+            val = await conn.fetchval(
+                "SELECT documents_attempts FROM cases WHERE id = $1", case_id
+            )
+        return val or 0
 
     async def mark_case_for_documents(self, case_id: int):
         """Пометить дело для скачивания документов"""
@@ -660,61 +763,64 @@ class DatabaseManager:
             )
 
     async def get_cases_for_documents(
-        self, 
-        filters: Dict, 
+        self,
+        filters: Dict,
         limit: int = None,
         final_event_types: List[str] = None,
         final_check_period_days: int = 30,
-        max_active_age_days: int = None
+        max_attempts: int = 5,
+        **kwargs  # совместимость со старыми вызовами (напр. max_active_age_days игнорируется)
     ) -> List[Dict]:
         """
-        Получить дела для скачивания документов
-        
-        Логика:
-        1. Активные дела (без финальных событий, возраст < max_active_age_days)
-        2. Завершённые дела в окне дозагрузки (финал < final_check_period_days)
-        3. Исключаем: завершённые после окна + заброшенные (старше max_active_age_days без финала)
+        Получить дела для скачивания документов.
+
+        Принцип: если у дела ответчик содержит keyword — документы ОБЯЗАНЫ быть скачаны.
+
+        Берём дело, если keyword совпал И интервал прошёл И попытки не исчерпаны И:
+        • дело АКТИВНО (нет финала) — проверяем всегда, без ограничения возраста
+        ИЛИ
+        • дело ЗАВЕРШЕНО, но документы НЕ полные (documents_complete = FALSE)
+        ИЛИ
+        • дело ЗАВЕРШЕНО и финал в окне final_check_period_days (дозагрузка поздних)
         """
-        interval_days = filters.get('check_interval_days', 7)
-        
+        interval_days = filters.get('check_interval_days', 5)
+
         params = []
         param_counter = 1
-        
-        # === Базовые условия ===
         base_conditions = []
-        
-        # Интервал проверки
+
+        # === Интервал проверки ===
         base_conditions.append(f"""
             (
-                c.documents_checked_at IS NULL 
+                c.documents_checked_at IS NULL
                 OR c.documents_checked_at < NOW() - INTERVAL '{interval_days} days'
             )
         """)
-        
-        # === Фильтр по сторонам ===
+
+        # === Защита от зацикливания: попытки не исчерпаны ===
+        base_conditions.append(f"c.documents_attempts < {int(max_attempts)}")
+
+        # === Фильтр по сторонам (keyword) ===
         party_keywords = filters.get('party_keywords', [])
         party_role = filters.get('party_role')
-        
+
         if party_keywords:
             role_condition = ""
-            
             if party_role:
                 if isinstance(party_role, str):
                     party_role = [party_role]
-                
                 role_placeholders = [f"${param_counter + i}" for i in range(len(party_role))]
                 role_condition = f"AND cp.party_role IN ({', '.join(role_placeholders)})"
                 params.extend(party_role)
                 param_counter += len(party_role)
-            
+
             keyword_placeholders = []
             for keyword in party_keywords:
                 keyword_placeholders.append(f"p.name ILIKE ${param_counter}")
                 params.append(f'%{keyword}%')
                 param_counter += 1
-            
             keywords_sql = ' OR '.join(keyword_placeholders)
-            
+
             base_conditions.append(f"""
                 EXISTS (
                     SELECT 1 FROM case_parties cp
@@ -724,7 +830,7 @@ class DatabaseManager:
                     AND ({keywords_sql})
                 )
             """)
-        
+
         # === Фильтр по регионам ===
         regions = filters.get('regions')
         if regions:
@@ -736,7 +842,7 @@ class DatabaseManager:
                     params.append(code)
                     param_counter += 1
                 base_conditions.append(f"({' OR '.join(region_conditions)})")
-        
+
         # === Фильтр по типам судов ===
         court_types = filters.get('court_types')
         if court_types:
@@ -748,7 +854,7 @@ class DatabaseManager:
                     params.append(code)
                     param_counter += 1
                 base_conditions.append(f"({' OR '.join(code_conditions)})")
-        
+
         # === Фильтр по году ===
         year = filters.get('year')
         if year:
@@ -756,16 +862,14 @@ class DatabaseManager:
             base_conditions.append(f"SUBSTRING(c.case_number FROM 6 FOR 2) = ${param_counter}")
             params.append(year_short)
             param_counter += 1
-        
-        # === Логика финальных событий и возраста ===
+
+        # === Логика жизненного цикла (активно / завершено-неполно / окно дозагрузки) ===
         if final_event_types:
-            # Подготовка плейсхолдеров для типов событий
             event_placeholders = [f"${param_counter + i}" for i in range(len(final_event_types))]
             event_placeholders_str = ', '.join(event_placeholders)
             params.extend(final_event_types)
             param_counter += len(final_event_types)
-            
-            # Подзапрос для получения даты финального события
+
             final_event_subquery = f"""
                 SELECT MAX(ce.event_date)
                 FROM case_events ce
@@ -773,68 +877,50 @@ class DatabaseManager:
                 WHERE ce.case_id = c.id
                 AND et.name IN ({event_placeholders_str})
             """
-            
-            if max_active_age_days:
-                # Три варианта:
-                # 1. Есть финал в окне → берём
-                # 2. Нет финала + возраст < max_active_age_days → берём
-                # 3. Нет финала + возраст >= max_active_age_days → НЕ берём
-                # 4. Есть финал за окном → НЕ берём
-                base_conditions.append(f"""
-                    (
-                        -- Вариант 1: Финал в окне дозагрузки
-                        (
-                            ({final_event_subquery}) IS NOT NULL
-                            AND ({final_event_subquery}) > CURRENT_DATE - INTERVAL '{final_check_period_days} days'
-                        )
-                        OR
-                        -- Вариант 2: Нет финала + дело не заброшено
-                        (
-                            ({final_event_subquery}) IS NULL
-                            AND c.case_date > CURRENT_DATE - INTERVAL '{max_active_age_days} days'
-                        )
-                    )
-                """)
-            else:
-                # Без ограничения по возрасту — старая логика
-                base_conditions.append(f"""
-                    (
-                        ({final_event_subquery}) IS NULL
-                        OR ({final_event_subquery}) > CURRENT_DATE - INTERVAL '{final_check_period_days} days'
-                    )
-                """)
-        elif max_active_age_days:
-            # Нет списка финальных событий, но есть ограничение по возрасту
+
             base_conditions.append(f"""
-                c.case_date > CURRENT_DATE - INTERVAL '{max_active_age_days} days'
+                (
+                    -- АКТИВНОЕ: нет финала → проверяем всегда (без ограничения возраста)
+                    ({final_event_subquery}) IS NULL
+                    OR
+                    -- ЗАВЕРШЕНО, но документы НЕ полные → докачиваем
+                    (
+                        ({final_event_subquery}) IS NOT NULL
+                        AND c.documents_complete = FALSE
+                    )
+                    OR
+                    -- ЗАВЕРШЕНО + финал в окне дозагрузки → проверяем поздние документы
+                    (
+                        ({final_event_subquery}) IS NOT NULL
+                        AND ({final_event_subquery}) > CURRENT_DATE - INTERVAL '{final_check_period_days} days'
+                    )
+                )
             """)
-        
+        else:
+            # Нет списка финальных событий → берём все неполные
+            base_conditions.append("c.documents_complete = FALSE")
+
         # === Сборка запроса ===
         query = """
             SELECT DISTINCT c.id, c.case_number, c.case_date, c.documents_checked_at
             FROM cases c
             WHERE 
         """
-        
         query += ' AND '.join(base_conditions)
-        
-        # Сортировка
+
         order = filters.get('order', 'oldest')
         if order == 'oldest':
             query += " ORDER BY c.case_date ASC, c.documents_checked_at NULLS FIRST"
         else:
             query += " ORDER BY c.case_date DESC, c.documents_checked_at NULLS FIRST"
-        
-        # Лимит
+
         if limit:
             query += f" LIMIT {limit}"
-        
-        # Выполнение
+
         async with self.pool.acquire() as conn:
             rows = await conn.fetch(query, *params)
-        
+
         self.logger.info(f"Найдено дел для документов: {len(rows)}")
-        
         return [{'id': r['id'], 'case_number': r['case_number']} for r in rows]
     
     async def get_final_event_date(self, case_id: int, final_event_types: List[str]) -> Optional[datetime]:
@@ -979,6 +1065,32 @@ class DatabaseManager:
             self.logger.debug(
                 f"Обновлена дата проверки пропусков: {region_key}/{court_key}/{year}"
             )
+    
+    async def reset_gaps_check_date(
+        self,
+        region_key: str,
+        court_key: str,
+        year: str
+    ):
+        """
+        Сбросить дату проверки пропусков → GAPS обязан перепроверить
+        этот суд/год при следующем запуске, ИГНОРИРУЯ интервал.
+
+        Вызывается когда после всех retry остались неподтверждённые
+        (грязные) номера от технических ошибок.
+        """
+        async with self.pool.acquire() as conn:
+            await conn.execute("""
+                INSERT INTO parsing_metadata (region_key, court_key, year, gaps_checked_at)
+                VALUES ($1, $2, $3, NULL)
+                ON CONFLICT (region_key, court_key, year)
+                DO UPDATE SET gaps_checked_at = NULL, updated_at = CURRENT_TIMESTAMP
+            """, region_key, court_key, year)
+
+        self.logger.warning(
+            f"Дата проверки пропусков СБРОШЕНА (требуется re-check): "
+            f"{region_key}/{court_key}/{year}"
+        )
 
     async def should_check_gaps(
         self, 

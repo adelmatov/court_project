@@ -1,6 +1,7 @@
 """
 Загрузка и валидация конфигурации
 """
+from datetime import datetime
 import json
 from pathlib import Path
 from typing import Dict, Any, Optional, List
@@ -115,6 +116,38 @@ class Settings:
         
         return str(year)
     
+    def get_parsing_years(self) -> List[str]:
+        """
+        Список годов для парсинга и проверки пропусков.
+
+        Логика:
+        - текущий год: всегда
+        - прошлый год: в переходный период (первые N месяцев года)
+                       для добора декабрьских хвостов
+        - можно переопределить явным списком в конфиге через 'years'
+
+        Returns:
+            ['2027'] или ['2027', '2026'] в переходный период
+        """
+
+        ps = self.parsing_settings
+
+        # Явное переопределение списком (для ручного управления)
+        explicit = ps.get('years')
+        if explicit:
+            return [str(y) for y in explicit]
+
+        now = datetime.now()
+        current = now.year
+        years = [str(current)]
+
+        # Переходное окно — добираем прошлый год в начале года
+        transition_months = ps.get('year_transition_months', 3)
+        if now.month <= transition_months:
+            years.append(str(current - 1))
+
+        return years
+
     @property
     def update_settings(self) -> Dict[str, Any]:
         """Настройки обновления"""

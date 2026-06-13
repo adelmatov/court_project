@@ -2,8 +2,18 @@
 Точка входа парсера
 """
 import sys
+import os
 import asyncio
 from datetime import datetime
+
+# ★ ФОРСИРУЕМ UTF-8 НА WINDOWS
+if sys.platform == "win32":
+    os.environ["PYTHONIOENCODING"] = "utf-8"
+    try:
+        sys.stdout.reconfigure(encoding="utf-8")
+        sys.stderr.reconfigure(encoding="utf-8")
+    except:
+        pass
 
 from core.parser import CourtParser
 from core.region_worker import RegionWorker
@@ -30,7 +40,7 @@ async def parse_all_regions_from_config() -> dict:
     settings = Settings()
     ps = settings.parsing_settings
     
-    year = settings.get_parsing_year()
+    years = settings.get_parsing_years()   # ← список годов
     court_types = ps.get('court_types', ['smas', 'appellate'])
     start_from = ps.get('start_from', 1)
     max_number = ps.get('max_number', 9999)
@@ -91,23 +101,24 @@ async def parse_all_regions_from_config() -> dict:
         
         async def process_region(region_key: str):
             async with semaphore:
-                # Передаём суды конкретного региона
                 region_court_types = region_courts.get(region_key, court_types)
-                
-                await process_region_with_ui(
-                    region_key=region_key,
-                    settings=settings,
-                    db_manager=db_manager,
-                    ui=ui,
-                    court_types=region_court_types,  # Суды этого региона
-                    year=year,
-                    start_from=start_from,
-                    max_number=max_number,
-                    max_consecutive_empty=max_consecutive_empty,
-                    delay=delay_between_requests,
-                    report_data=report_data,
-                    logger=logger
-                )
+
+                # ★ Цикл по годам: текущий + хвост прошлого (в Q1)
+                for year in years:
+                    await process_region_with_ui(
+                        region_key=region_key,
+                        settings=settings,
+                        db_manager=db_manager,
+                        ui=ui,
+                        court_types=region_court_types,
+                        year=year,
+                        start_from=start_from,
+                        max_number=max_number,
+                        max_consecutive_empty=max_consecutive_empty,
+                        delay=delay_between_requests,
+                        report_data=report_data,
+                        logger=logger
+                    )
         
         tasks = [process_region(r) for r in regions_to_process]
         await asyncio.gather(*tasks, return_exceptions=True)
@@ -123,7 +134,6 @@ async def parse_all_regions_from_config() -> dict:
         await db_manager.disconnect()
     
     return {}
-
 
 async def process_region_with_ui(
     region_key: str,
@@ -200,7 +210,6 @@ async def process_region_with_ui(
     finally:
         await worker.cleanup()
 
-
 async def parse_court(
     worker,
     db_manager,
@@ -224,6 +233,21 @@ async def parse_court(
         'consecutive_empty': 0,
     }
     
+    # ★ Номера, по которым была ТЕХНИЧЕСКАЯ ошибка (не "дело отсутствует")
+    failed_numbers: list = []
+    
+    def _is_technical_error(err) -> bool:
+        """
+        True  → запрос не подтвердил отсутствие дела (сеть/авторизация/circuit breaker/БД)
+        False → сайт корректно ответил 'нет дела' (no_results / target_not_found)
+                или номер некорректен (region_not_found)
+        """
+        if not err:
+            return False
+        if err in ('no_results', 'target_not_found', 'region_not_found'):
+            return False  # подтверждённое отсутствие или баг номера — НЕ переспрашиваем
+        return True       # сеть, авторизация, circuit breaker, save_failed
+    
     # Получаем существующие номера
     existing = await db_manager.get_existing_case_numbers(
         region_key, court_key, year, settings
@@ -239,7 +263,6 @@ async def parse_court(
             logger.info(f"Reached {max_consecutive_empty} consecutive empty results, stopping")
             break
         
-        # Поиск дела
         result = await worker.search_and_save(
             db_manager=db_manager,
             court_key=court_key,
@@ -254,27 +277,20 @@ async def parse_court(
             saved_count = result.get('saved_count', 1)
             stats['saved'] += saved_count
             stats['consecutive_empty'] = 0
-            
             ui.increment_saved(region_key, court_key, saved_count)
             
-            # Логирование каждого сохранённого дела
             case_numbers = result.get('case_numbers', [result.get('case_number')])
             for case_num in case_numbers:
                 has_judge = result.get('has_judge', True)
                 if not has_judge:
                     stats['no_judge'] += 1
-                
                 logger.info(
                     f"Saved: {case_num}",
-                    extra={
-                        'region': region_key,
-                        'court': court_key,
-                        'case_number': case_num
-                    }
+                    extra={'region': region_key, 'court': court_key, 'case_number': case_num}
                 )
         
         elif result.get('error') == 'no_results':
-            # Это НЕ ошибка, просто нет результатов
+            # Сайт подтвердил: дела нет → реальная пустота
             stats['consecutive_empty'] += 1
             logger.debug(
                 f"No results for #{current_number} (consecutive: {stats['consecutive_empty']})",
@@ -282,23 +298,65 @@ async def parse_court(
             )
         
         elif result.get('error') == 'target_not_found':
-            # Это тоже НЕ ошибка
+            # Сайт ответил, но целевого нет → тоже подтверждённая пустота
             stats['consecutive_empty'] += 1
             logger.debug(
                 f"Target not found for #{current_number}",
                 extra={'region': region_key, 'court': court_key}
             )
         
-        elif result.get('error'):
-            # Настоящая ошибка (сеть, авторизация, etc)
+        elif _is_technical_error(result.get('error')):
+            # ★ ТЕХНИЧЕСКАЯ ошибка: НЕ трогаем consecutive_empty, ЗАПОМИНАЕМ номер
+            failed_numbers.append(current_number)
             logger.warning(
-                f"Error for #{current_number}: {result.get('error')}",
+                f"Technical error for #{current_number}: {result.get('error')} "
+                f"(will retry at end of court)",
                 extra={'region': region_key, 'court': court_key}
             )
-            # НЕ увеличиваем errors в UI - это не считается ошибкой парсинга
         
         current_number += 1
         await asyncio.sleep(delay)
+    
+    # =========================================================================
+    # ★ ФИНАЛЬНЫЙ ПЕРЕСПРОС сбойных номеров (Уровень 2)
+    # Сеть могла восстановиться за время прохода суда
+    # =========================================================================
+    if failed_numbers:
+        logger.info(
+            f"Retrying {len(failed_numbers)} failed numbers for {region_key}/{court_key}/{year}"
+        )
+        still_failed = []
+        
+        for num in failed_numbers:
+            result = await worker.search_and_save(
+                db_manager=db_manager,
+                court_key=court_key,
+                sequence_number=num,
+                year=year
+            )
+            stats['queries'] += 1
+            ui.increment_queries(region_key)
+            
+            if result['success'] and result.get('saved'):
+                saved_count = result.get('saved_count', 1)
+                stats['saved'] += saved_count
+                ui.increment_saved(region_key, court_key, saved_count)
+                logger.info(f"Retry success: #{num} saved")
+            elif _is_technical_error(result.get('error')):
+                still_failed.append(num)
+            # no_results / target_not_found на ретрае → дело реально отсутствует, ОК
+            
+            await asyncio.sleep(delay)
+        
+        if still_failed:
+            # Уровень 3: оставляем для GAPS следующей сессии.
+            # Сбрасываем дату проверки этого суда → GAPS обязан перепроверить.
+            logger.warning(
+                f"{len(still_failed)} numbers still failed after retry "
+                f"for {region_key}/{court_key}/{year}: {still_failed}. "
+                f"Resetting gaps date for re-check next session."
+            )
+            await db_manager.reset_gaps_check_date(region_key, court_key, year)
     
     return stats
 
@@ -313,7 +371,13 @@ async def run_update_judge():
     logger = get_logger('main')
     
     try:
-        cases = await db_manager.get_smas_cases_without_judge(settings)
+        judge_config = settings.update_settings.get('judge', {})
+        cases = await db_manager.get_smas_cases_without_judge(
+            settings,
+            interval_days=judge_config.get('check_interval_days', 1),
+            final_event_types=judge_config.get('final_event_types', []),
+            max_stale_days=judge_config.get('max_stale_days'),
+        )
         
         if not cases:
             logger.info("Нет дел для обновления")
@@ -402,11 +466,15 @@ async def run_update_events():
     try:
         config = settings.update_settings.get('case_events', {})
         filters = config.get('filters', {})
-        
+
         cases = await db_manager.get_cases_for_update({
             'defendant_keywords': filters.get('party_keywords', []),
             'exclude_event_types': filters.get('exclude_event_types', []),
-            'update_interval_days': config.get('check_interval_days', 2)
+            'update_interval_days': config.get('check_interval_days', 2),
+            # НОВОЕ:
+            'final_event_types': config.get('final_event_types', []),
+            'final_check_period_days': config.get('final_check_period_days', 30),
+            'max_stale_days': config.get('max_stale_days'),
         })
         
         if not cases:
@@ -499,8 +567,22 @@ async def run_update_docs():
     try:
         config = settings.update_settings.get('docs', {})
         filters = config.get('filters', {})
-        
-        cases = await db_manager.get_cases_for_documents(filters, config.get('max_per_session'))
+
+        cases = await db_manager.get_cases_for_documents(
+            filters={
+                'party_keywords': filters.get('party_keywords', []),
+                'party_role': filters.get('party_role'),
+                'court_types': filters.get('court_types'),
+                'regions': filters.get('regions'),
+                'year': filters.get('year'),
+                'check_interval_days': config.get('check_interval_days', 5),
+                'order': filters.get('order', 'oldest'),
+            },
+            limit=config.get('max_per_session'),
+            final_event_types=config.get('final_event_types', []),
+            final_check_period_days=config.get('final_check_period_days', 30),
+            max_attempts=config.get('documents_max_attempts', 5)
+        )
         
         if not cases:
             logger.info("Нет дел для обработки")
@@ -566,22 +648,33 @@ async def run_update_docs():
                             continue
                         
                         existing_keys = await db_manager.get_document_keys(case_id)
-                        
-                        downloaded = await doc_handler.fetch_all_documents(
+                        max_attempts = config.get('documents_max_attempts', 5)
+
+                        fetch = await doc_handler.fetch_all_documents(
                             session=worker.session,
                             results_html=results_html,
                             case_number=case_number,
                             case_index=target.result_index,
                             existing_keys=existing_keys,
-                            delay=config.get('download_delay', 2)
+                            delay=config.get('download_delay', 0)
                         )
-                        
+
+                        downloaded = fetch['downloaded']
                         if downloaded:
                             await db_manager.save_documents(case_id, downloaded)
                             docs_total += len(downloaded)
                             logger.info(f"Downloaded {len(downloaded)} docs for {case_number}")
-                        
-                        await db_manager.mark_documents_downloaded(case_id)
+
+                        if fetch['complete']:
+                            await db_manager.mark_documents_complete(case_id)
+                        else:
+                            attempts = await db_manager.get_documents_attempts(case_id)
+                            if not fetch['made_progress'] and attempts + 1 >= max_attempts:
+                                await db_manager.mark_documents_exhausted(case_id)
+                            else:
+                                await db_manager.mark_documents_incomplete(
+                                    case_id, made_progress=fetch['made_progress']
+                                )
                         
                         ui.update_progress(region_key, processed=processed, docs=docs_total)
                         
@@ -634,6 +727,12 @@ async def run_pipeline():
     logger.info("=" * 60)
     
     pipeline_start = datetime.now()
+
+    # ★ Фиксируем годы один раз на весь pipeline (защита от запуска в полночь смены года)
+    _settings_init = Settings()
+    frozen_years = _settings_init.get_parsing_years()
+    logger.info(f"Pipeline years: {frozen_years}")
+
     results = {
         'gaps': {'found': 0, 'closed': 0},
         'parse': {'saved': 0},
@@ -705,7 +804,10 @@ async def run_pipeline():
             'defendant_keywords': events_filters.get('party_keywords', []),
             'exclude_event_types': events_filters.get('exclude_event_types', []),
             'update_interval_days': events_config.get('check_interval_days', 2),
-            'max_active_age_days': events_config.get('max_active_age_days')
+            # НОВОЕ:
+            'final_event_types': events_config.get('final_event_types', []),
+            'final_check_period_days': events_config.get('final_check_period_days', 30),
+            'max_stale_days': events_config.get('max_stale_days'),
         })
         
         # Подсчёт дел для docs
@@ -715,12 +817,16 @@ async def run_pipeline():
             filters={
                 'party_keywords': docs_filters.get('party_keywords', []),
                 'party_role': docs_filters.get('party_role'),
-                'check_interval_days': docs_config.get('check_interval_days', 7),
+                'court_types': docs_filters.get('court_types'),
+                'regions': docs_filters.get('regions'),
+                'year': docs_filters.get('year'),
+                'check_interval_days': docs_config.get('check_interval_days', 5),
+                'order': docs_filters.get('order', 'oldest'),
             },
             limit=docs_config.get('max_per_session'),
             final_event_types=docs_config.get('final_event_types', []),
             final_check_period_days=docs_config.get('final_check_period_days', 30),
-            max_active_age_days=docs_config.get('max_active_age_days')
+            max_attempts=docs_config.get('documents_max_attempts', 5)
         )
         
         logger.info("")
@@ -768,7 +874,7 @@ async def run_pipeline():
     _reset_ui()
     logger.info("")
     logger.info("-" * 60)
-    logger.info("STAGE 2: UPDATING EVENTS")
+    logger.info("STAGE 3: UPDATING EVENTS")
     logger.info("-" * 60)
     
     try:
@@ -796,7 +902,7 @@ async def run_pipeline():
     _reset_ui()
     logger.info("")
     logger.info("-" * 60)
-    logger.info("STAGE 3: DOWNLOADING DOCUMENTS")
+    logger.info("STAGE 4: DOWNLOADING DOCUMENTS")
     logger.info("-" * 60)
     
     try:

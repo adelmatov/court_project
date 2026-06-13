@@ -98,29 +98,35 @@ class GapsUpdater(BaseUpdater):
         year: str
     ) -> List[int]:
         """
-        Получить список пропущенных номеров для суда
-        
-        Returns:
-            Список пропущенных порядковых номеров
+        Получить список пропущенных номеров для суда.
+
+        Ищет дырки ДВУХ типов:
+        1. Внутренние — между min и max существующих (классические пропуски)
+        2. Хвостовые — несколько номеров ЗА max (на случай если сетевой сбой
+        прервал парсинг в хвосте, и дела после max остались несобранными)
         """
-        # Получаем существующие номера
         existing = await self.db_manager.get_existing_case_numbers(
             region_key, court_key, year, self.settings
         )
-        
+
         if not existing:
             return []
-        
+
         max_seq = max(existing)
         min_seq = min(existing)
-        
-        # Полный диапазон
+
+        # 1. Внутренние дырки
         full_range = set(range(min_seq, max_seq + 1))
-        
-        # Пропуски
-        gaps = sorted(full_range - existing)
-        
-        return gaps
+        gaps = full_range - existing
+
+        # 2. Хвостовая проверка: пробуем несколько номеров за max.
+        #    Если сбой оборвал хвост — дела найдутся. Если их реально нет —
+        #    process_case вернёт no_results, и они просто не сохранятся.
+        tail_probe = self.gaps_config.get('gaps_tail_probe', 5)
+        for i in range(1, tail_probe + 1):
+            gaps.add(max_seq + i)
+
+        return sorted(gaps)
     
     async def run(self) -> Dict[str, Any]:
         """
@@ -128,61 +134,64 @@ class GapsUpdater(BaseUpdater):
         
         Переопределяем базовый run() для специфичной логики gaps
         """
-        year = self.settings.get_parsing_year()
+        years = self.settings.get_parsing_years()  # ← список годов
         court_types = self.gaps_config.get('court_types', ['smas', 'appellate'])
         target_regions = self.settings.get_target_regions()
-        
+
         # Собираем все пропуски по регионам
         all_gaps: Dict[str, List[str]] = defaultdict(list)
         gaps_by_court: Dict[str, Dict[str, int]] = defaultdict(lambda: defaultdict(int))
-        
+
+        # Сохраняем для какого года какой суд проверялся (для обновления метаданных)
+        # ключ: (region_key, court_key) → year
+        checked_pairs: List[Tuple[str, str, str]] = []
+
         self.logger.info("=" * 60)
-        self.logger.info("GAPS CHECK: Поиск пропусков")
+        self.logger.info(f"GAPS CHECK: Поиск пропусков по годам {years}")
         self.logger.info("=" * 60)
-        
-        # Фаза 1: Сбор пропусков
-        for region_key in target_regions:
-            region_config = self.settings.get_region(region_key)
-            available_courts = list(region_config.get('courts', {}).keys())
-            
-            # Определяем суды для проверки
-            courts_to_check = [c for c in court_types if c in available_courts]
-            if not courts_to_check and available_courts:
-                courts_to_check = available_courts
-            
-            for court_key in courts_to_check:
-                # Проверяем нужна ли проверка по интервалу
-                should_check = await self.db_manager.should_check_gaps(
-                    region_key, court_key, year, self.gaps_check_interval_days
-                )
-                
-                if not should_check:
-                    self.logger.debug(
-                        f"Пропускаем {region_key}/{court_key}/{year} - "
-                        f"проверялось менее {self.gaps_check_interval_days} дней назад"
+
+        # Фаза 1: Сбор пропусков по ВСЕМ годам
+        for year in years:
+            for region_key in target_regions:
+                region_config = self.settings.get_region(region_key)
+                available_courts = list(region_config.get('courts', {}).keys())
+
+                courts_to_check = [c for c in court_types if c in available_courts]
+                if not courts_to_check and available_courts:
+                    courts_to_check = available_courts
+
+                for court_key in courts_to_check:
+                    should_check = await self.db_manager.should_check_gaps(
+                        region_key, court_key, year, self.gaps_check_interval_days
                     )
-                    continue
-                
-                # Получаем пропуски
-                gaps = await self.get_gaps_for_court(region_key, court_key, year)
-                
-                if gaps:
-                    # Генерируем полные номера дел
-                    region_cfg = self.settings.get_region(region_key)
-                    court_cfg = self.settings.get_court(region_key, court_key)
-                    
-                    for seq in gaps:
-                        case_number = self.text_processor.generate_case_number(
-                            region_cfg, court_cfg, year, seq
+
+                    if not should_check:
+                        self.logger.debug(
+                            f"Пропускаем {region_key}/{court_key}/{year} - "
+                            f"проверялось менее {self.gaps_check_interval_days} дней назад"
                         )
-                        all_gaps[region_key].append(case_number)
-                    
-                    gaps_by_court[region_key][court_key] = len(gaps)
-                    self.total_gaps_found += len(gaps)
-                    
-                    self.logger.info(
-                        f"📋 {region_key}/{court_key}: найдено {len(gaps)} пропусков"
-                    )
+                        continue
+
+                    gaps = await self.get_gaps_for_court(region_key, court_key, year)
+
+                    checked_pairs.append((region_key, court_key, year))
+
+                    if gaps:
+                        region_cfg = self.settings.get_region(region_key)
+                        court_cfg = self.settings.get_court(region_key, court_key)
+
+                        for seq in gaps:
+                            case_number = self.text_processor.generate_case_number(
+                                region_cfg, court_cfg, year, seq
+                            )
+                            all_gaps[region_key].append(case_number)
+
+                        gaps_by_court[region_key][court_key] += len(gaps)
+                        self.total_gaps_found += len(gaps)
+
+                        self.logger.info(
+                            f"📋 {region_key}/{court_key}/{year}: найдено {len(gaps)} пропусков"
+                        )
         
         # Проверяем есть ли пропуски
         if not all_gaps:
@@ -259,14 +268,18 @@ class GapsUpdater(BaseUpdater):
                     
                     ui.region_done(region_key)
                     
-                    # Обновляем дату проверки пропусков
-                    for court_key in gaps_by_court[region_key]:
+                    # Обновляем дату проверки пропусков по всем проверенным (суд, год)
+                    region_checked = [
+                        (ck, yr) for (rk, ck, yr) in checked_pairs
+                        if rk == region_key
+                    ]
+                    for court_key, yr in region_checked:
                         existing = await self.db_manager.get_existing_case_numbers(
-                            region_key, court_key, year, self.settings
+                            region_key, court_key, yr, self.settings
                         )
                         max_seq = max(existing) if existing else 0
                         await self.db_manager.update_gaps_check_date(
-                            region_key, court_key, year, max_seq
+                            region_key, court_key, yr, max_seq
                         )
                     
                 except Exception as e:

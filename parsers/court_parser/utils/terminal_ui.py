@@ -175,6 +175,12 @@ class TerminalUI:
         elif sys.platform == 'win32':
             self._enable_windows_ansi()
     
+    def _print_line(self, text: str) -> None:
+        """Выводит строку в stdout с автоматическим flush"""
+        import sys
+        print(text)
+        sys.stdout.flush()
+
     def _get_terminal_width(self) -> int:
         try:
             return shutil.get_terminal_size().columns
@@ -419,8 +425,8 @@ class TerminalUI:
             court.status = CourtStatus.ACTIVE
         
         region.current_court = court_key
-        
         self._update_region_display(region_key)
+
     
     def court_done(self, region_key: str, court_key: str, saved: int = 0):
         """Суд завершил обработку"""
@@ -490,7 +496,8 @@ class TerminalUI:
         if court:
             court.saved += count
         
-        # Не обновляем дисплей на каждое сохранение - будет обновлено в court_done
+        # ★ ОБНОВЛЯЕМ ДИСПЛЕЙ
+        self._update_region_display(region_key)
     
     def increment_queries(self, region_key: str, count: int = 1):
         """Увеличить счётчик запросов"""
@@ -498,10 +505,9 @@ class TerminalUI:
         if region:
             region.total_queries += count
         self.stats.total_queries += count
-    
-    # Для update режимов
+
     def update_progress(self, region_key: str, processed: int = None, 
-                       found: int = None, events: int = None, docs: int = None):
+                    found: int = None, events: int = None, docs: int = None):
         """Обновить прогресс update режима"""
         region = self.regions.get(region_key)
         if not region:
@@ -523,6 +529,7 @@ class TerminalUI:
             region.docs_downloaded = docs
             self.stats.total_found = sum(r.docs_downloaded for r in self.regions.values())
         
+        # ★ ОБНОВЛЯЕМ ДИСПЛЕЙ
         self._update_region_display(region_key)
     
     # =========================================================================
@@ -679,3 +686,26 @@ def init_ui(mode: Mode = Mode.PARSE, regions: Dict[str, str] = None,
             _ui_instance.add_region(key, name, courts)
     
     return _ui_instance
+
+def _render_region_line_plain(self, region: RegionStats) -> str:
+    """Рендеринг строки БЕЗ цветов (для логов)"""
+    time_str = datetime.now().strftime('%H:%M:%S')
+    
+    # Суды
+    court_parts = []
+    for court_key, court in region.courts.items():
+        if court.status == CourtStatus.WAIT:
+            court_str = f"{court_key}: waiting"
+        elif court.status == CourtStatus.ACTIVE:
+            court_str = f"{court_key}: active"
+        elif court.status == CourtStatus.DONE:
+            court_str = f"{court_key}: done ({court.saved} saved)"
+        elif court.status == CourtStatus.ERROR:
+            court_str = f"{court_key}: error"
+        else:
+            court_str = f"{court_key}: unknown"
+        court_parts.append(court_str)
+    
+    courts_str = " | ".join(court_parts)
+    
+    return f"[{time_str}] {region.name:<14} | {courts_str}"
