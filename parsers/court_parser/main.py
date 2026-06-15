@@ -567,6 +567,9 @@ async def run_update_docs():
     try:
         config = settings.update_settings.get('docs', {})
         filters = config.get('filters', {})
+        final_post_check_delay_days = config.get('final_post_check_delay_days', 10)
+        final_event_types = config.get('final_event_types', [])
+        max_attempts = config.get('documents_max_attempts', 5)
 
         cases = await db_manager.get_cases_for_documents(
             filters={
@@ -576,12 +579,12 @@ async def run_update_docs():
                 'regions': filters.get('regions'),
                 'year': filters.get('year'),
                 'check_interval_days': config.get('check_interval_days', 5),
+                'final_post_check_delay_days': final_post_check_delay_days,
                 'order': filters.get('order', 'oldest'),
             },
             limit=config.get('max_per_session'),
-            final_event_types=config.get('final_event_types', []),
-            final_check_period_days=config.get('final_check_period_days', 30),
-            max_attempts=config.get('documents_max_attempts', 5)
+            final_event_types=final_event_types,
+            max_attempts=max_attempts
         )
         
         if not cases:
@@ -637,6 +640,13 @@ async def run_update_docs():
                         processed += 1
                         
                         if not results_html or not cases_found:
+                            await db_manager.finalize_document_check(
+                                case_id=case_id,
+                                final_event_types=final_event_types,
+                                final_post_check_delay_days=final_post_check_delay_days,
+                                made_progress=False,
+                                max_attempts=max_attempts
+                            )
                             continue
                         
                         target = next(
@@ -645,10 +655,19 @@ async def run_update_docs():
                         )
                         
                         if not target or target.result_index is None:
+                            await db_manager.finalize_document_check(
+                                case_id=case_id,
+                                final_event_types=final_event_types,
+                                final_post_check_delay_days=final_post_check_delay_days,
+                                made_progress=False,
+                                max_attempts=max_attempts
+                            )
                             continue
                         
+                        # Обновляем события дела (если найдены новые статусы/события)
+                        await db_manager.update_case(target)
+                        
                         existing_keys = await db_manager.get_document_keys(case_id)
-                        max_attempts = config.get('documents_max_attempts', 5)
 
                         fetch = await doc_handler.fetch_all_documents(
                             session=worker.session,
@@ -665,16 +684,14 @@ async def run_update_docs():
                             docs_total += len(downloaded)
                             logger.info(f"Downloaded {len(downloaded)} docs for {case_number}")
 
-                        if fetch['complete']:
-                            await db_manager.mark_documents_complete(case_id)
-                        else:
-                            attempts = await db_manager.get_documents_attempts(case_id)
-                            if not fetch['made_progress'] and attempts + 1 >= max_attempts:
-                                await db_manager.mark_documents_exhausted(case_id)
-                            else:
-                                await db_manager.mark_documents_incomplete(
-                                    case_id, made_progress=fetch['made_progress']
-                                )
+                        # Вызов централизованного планировщика жизненного цикла документа
+                        await db_manager.finalize_document_check(
+                            case_id=case_id,
+                            final_event_types=final_event_types,
+                            final_post_check_delay_days=final_post_check_delay_days,
+                            made_progress=fetch['made_progress'],
+                            max_attempts=max_attempts
+                        )
                         
                         ui.update_progress(region_key, processed=processed, docs=docs_total)
                         
@@ -821,11 +838,11 @@ async def run_pipeline():
                 'regions': docs_filters.get('regions'),
                 'year': docs_filters.get('year'),
                 'check_interval_days': docs_config.get('check_interval_days', 5),
+                'final_post_check_delay_days': docs_config.get('final_post_check_delay_days', 10),
                 'order': docs_filters.get('order', 'oldest'),
             },
             limit=docs_config.get('max_per_session'),
             final_event_types=docs_config.get('final_event_types', []),
-            final_check_period_days=docs_config.get('final_check_period_days', 30),
             max_attempts=docs_config.get('documents_max_attempts', 5)
         )
         

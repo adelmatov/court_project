@@ -12,3 +12,4 @@ sqlalchemy>=2.0.0
 # Optional
 selenium>=4.15.0  # For JavaScript-heavy pages
 pandas>=2.0.0  # For data export
+asyncpg>=0.29.0

@@ -45,17 +45,17 @@ class DocsUpdater(BaseUpdater):
                 'regions': filters.get('regions'),
                 'year': filters.get('year'),
                 'check_interval_days': config.get('check_interval_days', 5),
+                'final_post_check_delay_days': config.get('final_post_check_delay_days', 10),
                 'order': filters.get('order', 'oldest'),
             },
             limit=config.get('max_per_session'),
             final_event_types=config.get('final_event_types', []),
-            final_check_period_days=config.get('final_check_period_days', 30),
             max_attempts=config.get('documents_max_attempts', 5)
         )
 
         self.logger.info(f"Дел для скачивания документов: {len(cases)}")
         return [c['case_number'] for c in cases]
-    
+
     async def process_case(self, worker: RegionWorker, case_number: str) -> Dict[str, Any]:
         result = {
             'case_number': case_number,
@@ -65,6 +65,8 @@ class DocsUpdater(BaseUpdater):
 
         config = self.get_config()
         max_attempts = config.get('documents_max_attempts', 5)
+        final_post_check_delay_days = config.get('final_post_check_delay_days', 10)
+        final_event_types = config.get('final_event_types', [])
 
         try:
             results_html, cases = await worker.search_case_by_number(case_number)
@@ -73,23 +75,40 @@ class DocsUpdater(BaseUpdater):
             if not case_id:
                 return result
 
-            # Дело не найдено на сайте сейчас — НЕ помечаем complete, оставляем попытку
+            # Дело не найдено на сайте сейчас — фиксируем как проверку без прогресса
             if not results_html or not cases:
-                await self.db_manager.mark_documents_incomplete(case_id, made_progress=False)
+                await self.db_manager.finalize_document_check(
+                    case_id=case_id,
+                    final_event_types=final_event_types,
+                    final_post_check_delay_days=final_post_check_delay_days,
+                    made_progress=False,
+                    max_attempts=max_attempts
+                )
                 return result
 
             target = next(
                 (c for c in cases
-                if self.text_processor.is_matching_case_number(c.case_number, case_number)),
+                 if self.text_processor.is_matching_case_number(c.case_number, case_number)),
                 None
             )
 
             if not target or target.result_index is None:
-                await self.db_manager.mark_documents_incomplete(case_id, made_progress=False)
+                await self.db_manager.finalize_document_check(
+                    case_id=case_id,
+                    final_event_types=final_event_types,
+                    final_post_check_delay_days=final_post_check_delay_days,
+                    made_progress=False,
+                    max_attempts=max_attempts
+                )
                 return result
 
+            # Обновляем события дела (если найдены новые статусы/события)
+            await self.db_manager.update_case(target)
+
+            # Получаем ключи уже скачанных ранее документов
             existing_keys = await self.db_manager.get_document_keys(case_id)
 
+            # Скачиваем новые документы
             fetch = await self.doc_handler.fetch_all_documents(
                 session=worker.session,
                 results_html=results_html,
@@ -105,18 +124,14 @@ class DocsUpdater(BaseUpdater):
                 result['documents_downloaded'] = len(downloaded)
                 self.logger.info(f"Скачано: {len(downloaded)} документов для {case_number}")
 
-            # === Фиксация по полноте ===
-            if fetch['complete']:
-                await self.db_manager.mark_documents_complete(case_id)
-            else:
-                attempts = await self.db_manager.get_documents_attempts(case_id)
-                # +1 т.к. mark_incomplete без прогресса увеличит; проверяем заранее
-                if not fetch['made_progress'] and attempts + 1 >= max_attempts:
-                    await self.db_manager.mark_documents_exhausted(case_id)
-                else:
-                    await self.db_manager.mark_documents_incomplete(
-                        case_id, made_progress=fetch['made_progress']
-                    )
+            # Фиксируем статус жизненного цикла дела по результатам проверки
+            await self.db_manager.finalize_document_check(
+                case_id=case_id,
+                final_event_types=final_event_types,
+                final_post_check_delay_days=final_post_check_delay_days,
+                made_progress=fetch['made_progress'],
+                max_attempts=max_attempts
+            )
 
             result['success'] = True
 

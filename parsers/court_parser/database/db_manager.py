@@ -767,38 +767,79 @@ class DatabaseManager:
         filters: Dict,
         limit: int = None,
         final_event_types: List[str] = None,
-        final_check_period_days: int = 30,
         max_attempts: int = 5,
-        **kwargs  # совместимость со старыми вызовами (напр. max_active_age_days игнорируется)
+        **kwargs
     ) -> List[Dict]:
         """
-        Получить дела для скачивания документов.
+        Получить дела для скачивания документов на основе конечного автомата (FSM).
 
-        Принцип: если у дела ответчик содержит keyword — документы ОБЯЗАНЫ быть скачаны.
-
-        Берём дело, если keyword совпал И интервал прошёл И попытки не исчерпаны И:
-        • дело АКТИВНО (нет финала) — проверяем всегда, без ограничения возраста
-        ИЛИ
-        • дело ЗАВЕРШЕНО, но документы НЕ полные (documents_complete = FALSE)
-        ИЛИ
-        • дело ЗАВЕРШЕНО и финал в окне final_check_period_days (дозагрузка поздних)
+        Критерии выбора:
+        - c.documents_complete = FALSE (дело еще не заархивировано окончательно)
+        - c.documents_attempts < max_attempts (количество неудачных попыток не превышено)
+        - Соответствует фильтрам по сторонам, регионам, судам и годам.
+        - Разделение на две группы планирования:
+          1. Активные дела (нет финальных событий):
+             - c.documents_checked_at IS NULL
+             - ИЛИ c.documents_checked_at < NOW() - INTERVAL 'check_interval_days' (стандартно 5 дней)
+          2. Завершенные дела в ожидании финального чека:
+             - Есть финальное событие.
+             - Прошло не менее final_post_check_delay_days (стандартно 10 дней) с момента финального события.
+             - Финальный чек еще не проводился (c.documents_checked_at < final_event_date + final_post_check_delay_days).
         """
         interval_days = filters.get('check_interval_days', 5)
+        final_post_check_delay_days = filters.get('final_post_check_delay_days', 10)
+
+        events_to_use = final_event_types if final_event_types else [
+            "Возврат", "Завершение дела", "Решение вступило в силу",
+            "Отправлено в архив", "Передано по неподсудности",
+            "Оставлено без движения", "Прекращено"
+        ]
 
         params = []
         param_counter = 1
         base_conditions = []
 
-        # === Интервал проверки ===
+        # Защита от зацикливания при постоянных сетевых сбоях
+        base_conditions.append(f"c.documents_attempts < {int(max_attempts)}")
+
+        # Формируем CTE для нахождения дат последних финальных событий
+        event_placeholders = [f"${param_counter + i}" for i in range(len(events_to_use))]
+        event_placeholders_str = ', '.join(event_placeholders)
+        params.extend(events_to_use)
+        param_counter += len(events_to_use)
+
+        p_interval_days_idx = param_counter
+        params.append(interval_days)
+        param_counter += 1
+
+        p_delay_days_idx = param_counter
+        params.append(final_post_check_delay_days)
+        param_counter += 1
+
+        # CTE для получения максимальной даты закрытия дела
+        cte = f"""
+            WITH case_final_dates AS (
+                SELECT ce.case_id, MAX(ce.event_date) as max_final_date
+                FROM case_events ce
+                JOIN event_types et ON ce.event_type_id = et.id
+                WHERE et.name IN ({event_placeholders_str})
+                GROUP BY ce.case_id
+            )
+        """
+
+        # Добавляем FSM логику планирования проверок
         base_conditions.append(f"""
             (
-                c.documents_checked_at IS NULL
-                OR c.documents_checked_at < NOW() - INTERVAL '{interval_days} days'
+                -- Группа 1: Активные дела (нет закрывающих событий) -> проверяем с интервалом (5 дней)
+                (fd.max_final_date IS NULL AND (c.documents_checked_at IS NULL OR c.documents_checked_at < NOW() - (${p_interval_days_idx} * INTERVAL '1 day')))
+                OR
+                -- Группа 2: Завершенные дела -> ждем ровно delay_days (10 дней) с даты закрытия для финальной проверки
+                (fd.max_final_date IS NOT NULL 
+                 AND CURRENT_DATE >= fd.max_final_date + (${p_delay_days_idx} * INTERVAL '1 day')
+                 AND (c.documents_checked_at IS NULL OR c.documents_checked_at < fd.max_final_date + (${p_delay_days_idx} * INTERVAL '1 day'))
+                )
             )
         """)
-
-        # === Защита от зацикливания: попытки не исчерпаны ===
-        base_conditions.append(f"c.documents_attempts < {int(max_attempts)}")
 
         # === Фильтр по сторонам (keyword) ===
         party_keywords = filters.get('party_keywords', [])
@@ -863,48 +904,12 @@ class DatabaseManager:
             params.append(year_short)
             param_counter += 1
 
-        # === Логика жизненного цикла (активно / завершено-неполно / окно дозагрузки) ===
-        if final_event_types:
-            event_placeholders = [f"${param_counter + i}" for i in range(len(final_event_types))]
-            event_placeholders_str = ', '.join(event_placeholders)
-            params.extend(final_event_types)
-            param_counter += len(final_event_types)
-
-            final_event_subquery = f"""
-                SELECT MAX(ce.event_date)
-                FROM case_events ce
-                JOIN event_types et ON ce.event_type_id = et.id
-                WHERE ce.case_id = c.id
-                AND et.name IN ({event_placeholders_str})
-            """
-
-            base_conditions.append(f"""
-                (
-                    -- АКТИВНОЕ: нет финала → проверяем всегда (без ограничения возраста)
-                    ({final_event_subquery}) IS NULL
-                    OR
-                    -- ЗАВЕРШЕНО, но документы НЕ полные → докачиваем
-                    (
-                        ({final_event_subquery}) IS NOT NULL
-                        AND c.documents_complete = FALSE
-                    )
-                    OR
-                    -- ЗАВЕРШЕНО + финал в окне дозагрузки → проверяем поздние документы
-                    (
-                        ({final_event_subquery}) IS NOT NULL
-                        AND ({final_event_subquery}) > CURRENT_DATE - INTERVAL '{final_check_period_days} days'
-                    )
-                )
-            """)
-        else:
-            # Нет списка финальных событий → берём все неполные
-            base_conditions.append("c.documents_complete = FALSE")
-
-        # === Сборка запроса ===
-        query = """
+        query = f"""
+            {cte}
             SELECT DISTINCT c.id, c.case_number, c.case_date, c.documents_checked_at
             FROM cases c
-            WHERE 
+            LEFT JOIN case_final_dates fd ON c.id = fd.case_id
+            WHERE c.documents_complete = FALSE AND 
         """
         query += ' AND '.join(base_conditions)
 
@@ -1190,3 +1195,66 @@ class DatabaseManager:
         except Exception as e:
             self.logger.error(f"Ошибка обновления дела {case_data.case_number}: {e}")
             return {'case_id': None, 'events_added': 0}
+        
+    async def finalize_document_check(
+        self,
+        case_id: int,
+        final_event_types: List[str],
+        final_post_check_delay_days: int = 10,
+        made_progress: bool = False,
+        max_attempts: int = 5
+    ) -> bool:
+        """
+        Обновляет статус планирования и полноты документов дела на основе его жизненного цикла.
+        
+        Логика:
+        1. Если у дела обнаружено закрывающее событие:
+           - Проверяем, наступил ли срок финального чека (прошло >= final_post_check_delay_days с даты закрытия).
+           - Если срок наступил: переводим в documents_complete = TRUE (Архивировано). Больше не проверяем.
+           - Если срок еще не наступил: обновляем дату последней проверки и ставим documents_complete = FALSE.
+             Дело "замораживается" в БД и не будет выбираться до наступления даты финальной проверки.
+        2. Если дело активное (нет закрывающих событий):
+           - c.documents_complete остается FALSE (его нужно проверять каждые 5 дней).
+           - Если есть прогресс (made_progress = True), сбрасываем попытки.
+           - Если прогресса нет и превышен лимит попыток, переводим в complete = TRUE как предохранитель.
+           - Обновляем documents_checked_at = NOW(), чтобы следующая проверка произошла через 5 дней.
+        """
+        events_to_use = final_event_types if final_event_types else [
+            "Возврат", "Завершение дела", "Решение вступило в силу",
+            "Отправлено в архив", "Передано по неподсудности",
+            "Оставлено без движения", "Прекращено"
+        ]
+
+        final_date = await self.get_final_event_date(case_id, events_to_use)
+
+        if final_date:
+            now = datetime.now()
+            days_passed = (now - final_date).days
+            
+            if days_passed >= final_post_check_delay_days:
+                # Срок финального чека подошел -> переводим в завершенные окончательно!
+                await self.mark_documents_complete(case_id)
+                self.logger.info(
+                    f"Дело [ID: {case_id}] закрыто окончательно (финальная проверка завершена через {days_passed} дн.)"
+                )
+                return True
+            else:
+                # Дело закрылось, но 10 дней еще не прошли -> отправляем в ожидание
+                await self.mark_documents_incomplete(case_id, made_progress=made_progress)
+                self.logger.info(
+                    f"Дело [ID: {case_id}] ожидает срока финальной проверки (прошло {days_passed}/{final_post_check_delay_days} дн.)"
+                )
+                return False
+        else:
+            # Дело активное
+            attempts = await self.get_documents_attempts(case_id)
+            if not made_progress and attempts + 1 >= max_attempts:
+                # Предохранитель для предотвращения зависания при постоянных сетевых сбоях
+                await self.mark_documents_exhausted(case_id)
+                return True
+            else:
+                await self.mark_documents_incomplete(case_id, made_progress=made_progress)
+                self.logger.debug(
+                    f"Дело [ID: {case_id}] проверено (активный статус, следующая проверка через 5 дн.)"
+                )
+                return False
