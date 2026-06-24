@@ -73,7 +73,8 @@ class DocumentHandler:
         
         date_prefix = doc_info.doc_date.strftime('%Y-%m-%d')
         safe_name = self._sanitize_filename(doc_info.doc_name)
-        filename = f"{date_prefix}_{safe_name}.pdf"
+        # Добавляем doc_info.index в имя файла для предотвращения коллизий на диске
+        filename = f"{date_prefix}_{doc_info.index}_{safe_name}.pdf" 
         
         file_path = case_dir / filename
         
@@ -262,6 +263,7 @@ class DocumentHandler:
                 file_info = await self.download_pdf(session, pdf_url, case_number, doc)
                 if file_info:
                     downloaded.append({
+                        'index': doc.index, # Передаем индекс для сохранения в базу данных
                         'doc_date': doc.doc_date,
                         'doc_name': doc.doc_name,
                         'file_path': file_info['file_path'],

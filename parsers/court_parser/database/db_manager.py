@@ -641,11 +641,13 @@ class DatabaseManager:
     async def get_document_keys(self, case_id: int) -> set:
         """Получить ключи уже скачанных документов"""
         async with self.pool.acquire() as conn:
+            # Выбираем doc_index вместе с датой и именем
             rows = await conn.fetch(
-                "SELECT doc_date, doc_name FROM case_documents WHERE case_id = $1",
+                "SELECT doc_index, doc_date, doc_name FROM case_documents WHERE case_id = $1",
                 case_id
             )
-        return {f"{r['doc_date'].isoformat()}|{ r['doc_name']}" for r in rows}
+        # Формируем ключ в новом формате с использованием doc_index
+        return {f"{r['doc_date'].isoformat()}|{r['doc_index']}|{r['doc_name']}" for r in rows if r['doc_index'] is not None}
 
     async def save_documents(self, case_id: int, documents: List[Dict]) -> int:
         """Сохранить информацию о документах"""
@@ -655,14 +657,17 @@ class DatabaseManager:
         async with self.pool.acquire() as conn:
             for doc in documents:
                 try:
+                    # Добавляем doc_index в INSERT-запрос и меняем условие ON CONFLICT на (case_id, doc_index)
                     await conn.execute("""
-                        INSERT INTO case_documents (case_id, doc_date, doc_name, file_path, file_size, downloaded_at)
-                        VALUES ($1, $2, $3, $4, $5, CURRENT_TIMESTAMP)
-                        ON CONFLICT (case_id, doc_date, doc_name) DO UPDATE
+                        INSERT INTO case_documents (case_id, doc_index, doc_date, doc_name, file_path, file_size, downloaded_at)
+                        VALUES ($1, $2, $3, $4, $5, $6, CURRENT_TIMESTAMP)
+                        ON CONFLICT (case_id, doc_index) DO UPDATE
                         SET file_path = EXCLUDED.file_path, 
                             file_size = EXCLUDED.file_size,
+                            doc_date = EXCLUDED.doc_date,
+                            doc_name = EXCLUDED.doc_name,
                             downloaded_at = CURRENT_TIMESTAMP
-                    """, case_id, doc['doc_date'], doc['doc_name'], doc['file_path'], doc.get('file_size'))
+                    """, case_id, doc['index'], doc['doc_date'], doc['doc_name'], doc['file_path'], doc.get('file_size'))
                     saved += 1
                 except Exception as e:
                     self.logger.error(f"Ошибка сохранения документа: {e}")

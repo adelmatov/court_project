@@ -52,15 +52,15 @@ class SearchResult:
 
 @dataclass
 class DocumentInfo:
-    """Информация о документе"""
-    index: int  # Индекс из onclick (уже правильно реализовано)
+    index: int  # Оригинальный ID документа с сайта
     doc_date: date
     doc_name: str
     doc_type: str = ""
     
     @property
     def unique_key(self) -> str:
-        return f"{self.doc_date.isoformat()}|{self.doc_name}"
+        # Теперь ключ гарантированно уникален за счет self.index
+        return f"{self.doc_date.isoformat()}|{self.index}|{self.doc_name}"
     
     def to_dict(self) -> dict:
         return {
