@@ -1,0 +1,269 @@
+{
+  "auth": {
+    "login": "SET_IN_ENV",
+    "password": "SET_IN_ENV",
+    "user_name": "SET_IN_ENV"
+  },
+  "base_url": "https://office.sud.kz",
+  "database": {
+    "dbname": "court",
+    "host": "localhost",
+    "password": "SET_IN_ENV",
+    "port": 5432,
+    "user": "postgres"
+  },
+  "parsing_settings": {
+    "court_types": ["supreme", "cassation", "smas", "appellate"],
+    "delay_between_requests": 0,
+    "gaps_check_interval_days": 30,
+    "gaps_tail_probe": 5,
+    "limit_cases_per_region": null,
+    "limit_regions": null,
+    "max_consecutive_empty": 5,
+    "max_consecutive_failures": 5,
+    "max_gaps_per_session": 200,
+    "max_number": 9999,
+    "max_parallel_regions": 3,
+    "region_retry_delay_seconds": 5,
+    "region_retry_max_attempts": 3,
+    "start_from": 1,
+    "target_regions": null,
+    "year": "auto",
+    "year_transition_months": 6,
+    "years": [2024]
+  },
+  "regions": {
+    "abay": {
+      "courts": {
+        "appellate": {"case_type_code": "4а", "id": "456", "instance_code": "00", "name": "Суд области Абай"},
+        "smas": {"case_type_code": "4", "id": "467", "instance_code": "94", "name": "Специализированный межрайонный административный суд области Абай"}
+      },
+      "id": "21", "kato_code": "10", "name": "Область Абай"
+    },
+    "akmola": {
+      "courts": {
+        "appellate": {"case_type_code": "4а", "id": "29", "instance_code": "99", "name": "Акмолинский областной суд"},
+        "smas": {"case_type_code": "4", "id": "416", "instance_code": "94", "name": "Специализированный межрайонный административный суд Акмолинской области"}
+      },
+      "id": "4", "kato_code": "11", "name": "Акмолинская область"
+    },
+    "aktobe": {
+      "courts": {
+        "appellate": {"case_type_code": "4а", "id": "55", "instance_code": "99", "name": "Актюбинский областной суд"},
+        "smas": {"case_type_code": "4", "id": "417", "instance_code": "94", "name": "Специализированный межрайонный административный суд Актюбинской области"}
+      },
+      "id": "5", "kato_code": "15", "name": "Актюбинская область"
+    },
+    "almaty": {
+      "courts": {
+        "appellate": {"case_type_code": "4а", "id": "13", "instance_code": "99", "name": "Алматинский городской суд"},
+        "smas": {"case_type_code": "4", "id": "414", "instance_code": "94", "name": "Специализированный межрайонный административный суд города Алматы"}
+      },
+      "id": "3", "kato_code": "75", "name": "город Алматы"
+    },
+    "almaty_region": {
+      "courts": {
+        "appellate": {"case_type_code": "4а", "id": "75", "instance_code": "99", "name": "Алматинский областной суд"},
+        "smas": {"case_type_code": "4", "id": "430", "instance_code": "93", "name": "Специализированный межрайонный административный суд Алматинской области"}
+      },
+      "id": "6", "kato_code": "19", "name": "Алматинская область"
+    },
+    "astana": {
+      "courts": {
+        "appellate": {"case_type_code": "4а", "id": "2", "instance_code": "99", "name": "Суд города Астаны"},
+        "smas": {"case_type_code": "4", "id": "413", "instance_code": "94", "name": "Специализированный межрайонный административный суд города Астаны"}
+      },
+      "id": "2", "kato_code": "71", "name": "город Астана"
+    },
+    "atyrau": {
+      "courts": {
+        "appellate": {"case_type_code": "4а", "id": "105", "instance_code": "99", "name": "Атырауский областной суд"},
+        "smas": {"case_type_code": "4", "id": "419", "instance_code": "94", "name": "Специализированный межрайонный административный суд Атырауской области"}
+      },
+      "id": "7", "kato_code": "23", "name": "Атырауская область"
+    },
+    "karaganda": {
+      "courts": {
+        "appellate": {"case_type_code": "4а", "id": "199", "instance_code": "99", "name": "Карагандинский областной суд"},
+        "smas": {"case_type_code": "4", "id": "423", "instance_code": "94", "name": "Специализированный межрайонный административный суд Карагандинской области"}
+      },
+      "id": "11", "kato_code": "35", "name": "Карагандинская область"
+    },
+    "kostanay": {
+      "courts": {
+        "appellate": {"case_type_code": "4а", "id": "237", "instance_code": "99", "name": "Костанайский областной суд"},
+        "smas": {"case_type_code": "4", "id": "424", "instance_code": "94", "name": "Специализированный межрайонный административный суд Костанайской области"}
+      },
+      "id": "12", "kato_code": "39", "name": "Костанайская область"
+    },
+    "kyzylorda": {
+      "courts": {
+        "appellate": {"case_type_code": "4а", "id": "266", "instance_code": "99", "name": "Кызылординский областной суд"},
+        "smas": {"case_type_code": "4", "id": "425", "instance_code": "94", "name": "Специализированный межрайонный административный суд Кызылординской области"}
+      },
+      "id": "13", "kato_code": "43", "name": "Кызылординская область"
+    },
+    "mangystau": {
+      "courts": {
+        "appellate": {"case_type_code": "4а", "id": "281", "instance_code": "99", "name": "Мангистауский областной суд"},
+        "smas": {"case_type_code": "4", "id": "426", "instance_code": "94", "name": "Специализированный межрайонный административный суд Мангистауской области"}
+      },
+      "id": "14", "kato_code": "47", "name": "Мангистауская область"
+    },
+    "pavlodar": {
+      "courts": {
+        "appellate": {"case_type_code": "4а", "id": "295", "instance_code": "99", "name": "Павлодарский областной суд"},
+        "smas": {"case_type_code": "4", "id": "427", "instance_code": "94", "name": "Специализированный межрайонный административный суд Павлодарской области"}
+      },
+      "id": "15", "kato_code": "55", "name": "Павлодарская область"
+    },
+    "republic": {
+      "courts": {
+        "cassation": {"case_type_code": "4к", "id": "495", "instance_code": "03", "name": "Кассационный суд Республики Казахстан"},
+        "supreme": {"case_type_code": "6ап", "id": "1", "instance_code": "01", "name": "Верховный Суд Республики Казахстан"}
+      },
+      "id": "2", "kato_code": "60", "name": "Республиканские суды", "search_region_id": "2"
+    },
+    "shymkent": {
+      "courts": {
+        "appellate": {"case_type_code": "4а", "id": "383", "instance_code": "99", "name": "Суд города Шымкента"},
+        "smas": {"case_type_code": "4", "id": "415", "instance_code": "94", "name": "Специализированный межрайонный административный суд города Шымкента"}
+      },
+      "id": "19", "kato_code": "52", "name": "город Шымкент"
+    },
+    "sko": {
+      "courts": {
+        "appellate": {"case_type_code": "4а", "id": "316", "instance_code": "99", "name": "Северо-Казахстанский областной суд"},
+        "smas": {"case_type_code": "4", "id": "428", "instance_code": "94", "name": "Специализированный межрайонный административный суд Северо-Казахстанской области"}
+      },
+      "id": "16", "kato_code": "59", "name": "Северо-Казахстанская область"
+    },
+    "turkestan": {
+      "courts": {
+        "appellate": {"case_type_code": "4а", "id": "340", "instance_code": "99", "name": "Туркестанский областной суд"},
+        "smas": {"case_type_code": "4", "id": "429", "instance_code": "94", "name": "Специализированный межрайонный административный суд Туркестанской области"}
+      },
+      "id": "17", "kato_code": "51", "name": "Туркестанская область"
+    },
+    "ulytau": {
+      "courts": {
+        "appellate": {"case_type_code": "4а", "id": "476", "instance_code": "00", "name": "Суд области Ұлытау"},
+        "smas": {"case_type_code": "4", "id": "482", "instance_code": "94", "name": "Специализированный межрайонный административный суд области Ұлытау"}
+      },
+      "id": "20", "kato_code": "62", "name": "Область Ұлытау"
+    },
+    "vko": {
+      "courts": {
+        "appellate": {"case_type_code": "4а", "id": "119", "instance_code": "99", "name": "Восточно-Казахстанский областной суд"},
+        "smas": {"case_type_code": "4", "id": "420", "instance_code": "94", "name": "Специализированный межрайонный административный суд Восточно-Казахстанской области"}
+      },
+      "id": "8", "kato_code": "63", "name": "Восточно-Казахстанская область"
+    },
+    "zhambyl": {
+      "courts": {
+        "appellate": {"case_type_code": "4а", "id": "158", "instance_code": "99", "name": "Жамбылский областной суд"},
+        "smas": {"case_type_code": "4", "id": "421", "instance_code": "94", "name": "Специализированный межрайонный административный суд Жамбылской области"}
+      },
+      "id": "9", "kato_code": "31", "name": "Жамбылская область"
+    },
+    "zhetysu": {
+      "courts": {
+        "appellate": {"case_type_code": "4а", "id": "437", "instance_code": "00", "name": "Суд области Жетісу"},
+        "smas": {"case_type_code": "4", "id": "450", "instance_code": "94", "name": "Специализированный межрайонный административный суд области Жетісу"}
+      },
+      "id": "22", "kato_code": "33", "name": "Область Жетісу"
+    },
+    "zko": {
+      "courts": {
+        "appellate": {"case_type_code": "4а", "id": "175", "instance_code": "99", "name": "Западно-Казахстанский областной суд"},
+        "smas": {"case_type_code": "4", "id": "422", "instance_code": "94", "name": "Специализированный межрайонный административный суд Западно-Казахстанской области"}
+      },
+      "id": "10", "kato_code": "27", "name": "Западно-Казахстанская область"
+    }
+  },
+  "retry_settings": {
+    "authentication": {
+      "backoff_multiplier": 2.0,
+      "create_new_session": true,
+      "initial_delay": 2.0,
+      "max_attempts": 5,
+      "max_delay": 60.0,
+      "retriable_on_auth_check_fail": true
+    },
+    "circuit_breaker": {
+      "enabled": true,
+      "failure_threshold": 20,
+      "half_open_max_attempts": 3,
+      "recovery_timeout": 300
+    },
+    "http_request": {
+      "backoff_multiplier": 2.0,
+      "initial_delay": 1.0,
+      "jitter": true,
+      "max_attempts": 3,
+      "max_delay": 30.0,
+      "retriable_exceptions": ["TimeoutError", "ClientError", "ServerDisconnectedError"],
+      "retriable_status_codes": [500, 502, 503, 504]
+    },
+    "rate_limit": {
+      "default_wait": 60,
+      "respect_retry_after_header": true,
+      "slow_down_duration": 600,
+      "slow_down_multiplier": 2.0
+    },
+    "search_case": {
+      "backoff": "linear",
+      "delay": 3.0,
+      "max_attempts": 3,
+      "save_failed_html": true
+    },
+    "session_recovery": {
+      "max_reauth_attempts": 2,
+      "reauth_on_401": true
+    }
+  },
+  "update_settings": {
+    "case_events": {
+      "check_interval_days": 2,
+      "enabled": true,
+      "filters": {
+        "exclude_event_types": [],
+        "party_keywords": ["доход"],
+        "party_role": "defendant"
+      },
+      "final_check_period_days": 30,
+      "final_event_types": ["Возврат", "Завершение дела", "Решение вступило в силу", "Отправлено в архив", "Передано по неподсудности", "Оставлено без движения", "Прекращено"],
+      "max_stale_days": 730
+    },
+    "common": {
+      "delay_between_requests": 0,
+      "max_parallel_workers": 3
+    },
+    "docs": {
+      "check_interval_days": 5,
+      "final_post_check_delay_days": 10,
+      "documents_max_attempts": 5,
+      "download_delay": 0,
+      "enabled": true,
+      "filters": {
+        "court_types": ["smas"],
+        "order": "oldest",
+        "party_keywords": ["Каражанбасмунай"],
+        "party_role": "plaintiff",
+        "regions": ["astana"],
+        "year": "2024"
+      },
+      "final_event_types": ["Возврат", "Завершение дела", "Решение вступило в силу", "Отправлено в архив", "Передано по неподсудности", "Оставлено без движения", "Прекращено"],
+      "max_per_court": null,
+      "max_per_session": null,
+      "storage_dir": "./docs"
+    },
+    "judge": {
+      "check_interval_days": 0,
+      "enabled": true,
+      "final_event_types": ["Возврат", "Завершение дела", "Решение вступило в силу", "Отправлено в архив", "Передано по неподсудности", "Оставлено без движения", "Прекращено"],
+      "max_stale_days": 730,
+      "target_courts": ["smas"]
+    }
+  }
+}
