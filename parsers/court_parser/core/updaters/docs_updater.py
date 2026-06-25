@@ -1,6 +1,9 @@
 """
 Скачивание документов дел
 """
+
+import re
+from datetime import datetime
 from typing import Dict, List, Any
 
 from core.updaters.base_updater import BaseUpdater
@@ -105,6 +108,14 @@ class DocsUpdater(BaseUpdater):
             # Обновляем события дела (если найдены новые статусы/события)
             await self.db_manager.update_case(target)
 
+            # Извлекаем год из номера дела
+            year_match = re.match(r'\d+-(\d{2})-', case_number)
+            if year_match:
+                year_short = year_match.group(1)
+                year = f"20{year_short}"
+            else:
+                year = datetime.now().strftime('%Y')
+
             # Получаем ключи уже скачанных ранее документов
             existing_keys = await self.db_manager.get_document_keys(case_id)
 
@@ -115,7 +126,8 @@ class DocsUpdater(BaseUpdater):
                 case_number=case_number,
                 case_index=target.result_index,
                 existing_keys=existing_keys,
-                delay=self.download_delay
+                delay=self.download_delay,
+                year=year
             )
 
             downloaded = fetch['downloaded']

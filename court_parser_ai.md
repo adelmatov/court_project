@@ -1,6 +1,6 @@
 # 🤖 COURT PARSER - AI-Optimized Code Snapshot
 
-**⏰ Generated:** 2026-06-22 23:54:25
+**⏰ Generated:** 2026-06-26 01:41:28
 
 ## 📊 Quick Stats
 
@@ -8,9 +8,9 @@
 |--------|-------|
 | **Files** | 26 |
 | **Resources** | 1 |
-| **Total Lines** | 7,284 |
-| **Original Size** | 255.1 KB |
-| **Optimized Size** | 245.5 KB |
+| **Total Lines** | 7,314 |
+| **Original Size** | 255.9 KB |
+| **Optimized Size** | 246.5 KB |
 | **Compression** | -95.3% ↓ |
 
 ---
@@ -56,7 +56,7 @@ parsers/court_parser/
 - **4.** `region_worker.py` (333 lines)
 - **5.** `session.py` (122 lines)
 - **6.** `base_updater.py` (214 lines)
-- **7.** `docs_updater.py` (141 lines)
+- **7.** `docs_updater.py` (153 lines)
 - **8.** `events_updater.py` (74 lines)
 - **9.** `gaps_updater.py` (359 lines)
 - **10.** `judge_updater.py` (71 lines)
@@ -66,7 +66,7 @@ parsers/court_parser/
 - **14.** `data_extractor.py` (93 lines)
 - **15.** `document_parser.py` (122 lines)
 - **16.** `html_parser.py` (142 lines)
-- **17.** `document_handler.py` (290 lines)
+- **17.** `document_handler.py` (308 lines)
 - **18.** `form_handler.py` (214 lines)
 - **19.** `search_engine.py` (148 lines)
 - **20.** `constants.py` (23 lines)
@@ -79,7 +79,7 @@ parsers/court_parser/
 ## 📚 Module Overview
 
 ### ROOT
-**Files:** 26 | **Lines:** 7284
+**Files:** 26 | **Lines:** 7314
 
 ```
 parsers\court_parser\auth\authenticator.py
@@ -644,14 +644,18 @@ parsers\court_parser\utils\validators.py
       "download_delay": 0,
       "enabled": true,
       "filters": {
-        "court_types": null,
+        "court_types": [
+          "smas"
+        ],
         "order": "oldest",
         "party_keywords": [
-          "доход"
+          "Каражанбасмунай"
         ],
-        "party_role": "defendant",
-        "regions": null,
-        "year": null
+        "party_role": "plaintiff",
+        "regions": [
+          "astana"
+        ],
+        "year": "2024"
       },
       "final_event_types": [
         "Возврат",
@@ -2313,12 +2317,15 @@ class BaseUpdater(ABC):
 ```
 
 ### File 7/26: `parsers\court_parser\core\updaters\docs_updater.py`
-**Module:** `root` | **Lines:** 141
+**Module:** `root` | **Lines:** 153
 
 ```python
 """
 Скачивание документов дел
 """
+
+import re
+from datetime import datetime
 from typing import Dict, List, Any
 
 from core.updaters.base_updater import BaseUpdater
@@ -2422,6 +2429,14 @@ class DocsUpdater(BaseUpdater):
             # Обновляем события дела (если найдены новые статусы/события)
             await self.db_manager.update_case(target)
 
+            # Извлекаем год из номера дела
+            year_match = re.match(r'\d+-(\d{2})-', case_number)
+            if year_match:
+                year_short = year_match.group(1)
+                year = f"20{year_short}"
+            else:
+                year = datetime.now().strftime('%Y')
+
             # Получаем ключи уже скачанных ранее документов
             existing_keys = await self.db_manager.get_document_keys(case_id)
 
@@ -2432,7 +2447,8 @@ class DocsUpdater(BaseUpdater):
                 case_number=case_number,
                 case_index=target.result_index,
                 existing_keys=existing_keys,
-                delay=self.download_delay
+                delay=self.download_delay,
+                year=year
             )
 
             downloaded = fetch['downloaded']
@@ -5708,14 +5724,15 @@ class ResultsParser:
 ```
 
 ### File 17/26: `parsers\court_parser\search\document_handler.py`
-**Module:** `root` | **Lines:** 290
+**Module:** `root` | **Lines:** 308
 
 ```python
 # parsers/court_parser/search/document_handler.py
 """
 Обработка документов судебных дел
 """
-from typing import Dict, List, Optional, Set
+import datetime
+from typing import Dict, List, Optional, Set, Any
 from pathlib import Path
 import asyncio
 import re
@@ -5741,13 +5758,28 @@ class DocumentHandler:
         self.regions_config = regions_config or {}
         self.logger = get_logger('document_handler')
 
-    def _get_case_folder(self, case_number: str) -> Path:
+    def _get_case_folder(self, case_number: str, year: str = None) -> Path:
         """
-        Определить папку для дела по номеру
+        Определить папку для дела по номеру и году
 
-        Вход: "7594-25-00-4/5229"
-        Выход: documents/almaty/smas/2025/7594-25-00-4_5229/
+        СТРУКТУРА: year/region/court/case_number/
+
+        Вход: 
+        case_number = "7594-25-00-4/5229"
+        year = "2025"
+
+        Выход: 
+        documents/2025/almaty/smas/7594-25-00-4_5229/
         """
+        # Если год не передан, извлекаем из номера дела
+        if not year:
+            match = re.match(r'\d+-(\d{2})-', case_number)
+            if match:
+                year_short = match.group(1)
+                year = f"20{year_short}"
+            else:
+                year = "unknown"
+
         # Парсим номер дела
         case_info = self.text_processor.find_region_and_court_by_case_number(
             case_number, self.regions_config
@@ -5756,37 +5788,28 @@ class DocumentHandler:
         if case_info:
             region_key = case_info['region_key']
             court_key = case_info['court_key']
-            year = case_info['year']
         else:
-            # Fallback: извлекаем год из номера дела
-            # "7594-25-00-4/5229" → год = "2025"
-            match = re.match(r'\d+-(\d{2})-', case_number)
-            if match:
-                year_short = match.group(1)
-                year = f"20{year_short}"
-            else:
-                year = "unknown"
-
+            # Fallback
             region_key = "unknown"
             court_key = "unknown"
 
         # Безопасное имя папки для дела
         safe_case = case_number.replace('/', '_')
 
-        # Формируем путь: documents/region/court/year/case_number/
-        folder = self.storage_dir / region_key / court_key / year / safe_case
+        # НОВАЯ СТРУКТУРА: storage_dir/year/region/court/case_number/
+        folder = self.storage_dir / year / region_key / court_key / safe_case
         folder.mkdir(parents=True, exist_ok=True)
 
         return folder
 
-    def _save_file(self, case_number: str, doc_info: DocumentInfo, content: bytes) -> dict:
+    def _save_file(self, case_number: str, doc_info: DocumentInfo, content: bytes, year: str = None) -> dict:
         """Сохранить файл на диск атомарно"""        
-        case_dir = self._get_case_folder(case_number)
+        case_dir = self._get_case_folder(case_number, year)
 
         date_prefix = doc_info.doc_date.strftime('%Y-%m-%d')
         safe_name = self._sanitize_filename(doc_info.doc_name)
         # Добавляем doc_info.index в имя файла для предотвращения коллизий на диске
-        filename = f"{date_prefix}_{doc_info.index}_{safe_name}.pdf" 
+        filename = f"{date_prefix}_{doc_info.index}_{safe_name}.pdf"
 
         file_path = case_dir / filename
 
@@ -5877,7 +5900,7 @@ class DocumentHandler:
             return await response.text()
 
     async def download_pdf(self, session: aiohttp.ClientSession, pdf_url: str,
-                       case_number: str, doc_info: DocumentInfo) -> Optional[dict]:
+                   case_number: str, doc_info: DocumentInfo, year: str = None) -> Optional[dict]:
         """Скачать PDF файл"""
         full_url = f"{self.base_url}{pdf_url}" if pdf_url.startswith('/') else pdf_url
         headers = HttpHeaders.get_base()
@@ -5887,17 +5910,18 @@ class DocumentHandler:
             if response.status != 200:
                 return None
             content = await response.read()
-            return self._save_file(case_number, doc_info, content)
+            return self._save_file(case_number, doc_info, content, year)
 
     async def fetch_all_documents(
-        self,
-        session: aiohttp.ClientSession,
-        results_html: str,
-        case_number: str,
-        case_index: int = 0,
-        existing_keys: Optional[Set[str]] = None,
-        delay: float = 1.0
-    ) -> Dict:
+                self,
+                session: aiohttp.ClientSession,
+                results_html: str,
+                case_number: str,
+                case_index: int = 0,
+                existing_keys: Optional[Set[str]] = None,
+                delay: float = 1.0,
+                year: str = None
+            ) -> Dict:
         """
         Скачать все новые документы для дела.
 
@@ -5911,6 +5935,16 @@ class DocumentHandler:
             }
         """
         existing_keys = existing_keys or set()
+
+        # Если год не передан, извлекаем из номера дела
+        if not year:
+            match = re.match(r'\d+-(\d{2})-', case_number)
+            if match:
+                year_short = match.group(1)
+                year = f"20{year_short}"
+            else:
+                year = datetime.now().strftime('%Y')
+
         downloaded = []
 
         result = {
@@ -5972,7 +6006,7 @@ class DocumentHandler:
                 if not pdf_url:
                     continue
 
-                file_info = await self.download_pdf(session, pdf_url, case_number, doc)
+                file_info = await self.download_pdf(session, pdf_url, case_number, doc, year)
                 if file_info:
                     downloaded.append({
                         'index': doc.index, # Передаем индекс для сохранения в базу данных
@@ -8137,9 +8171,9 @@ class DataValidator:
 
 - **Total Files:** 26
 - **Resource Files:** 1
-- **Total Lines:** 7,284
+- **Total Lines:** 7,314
 - **Compression Efficiency:** -95.3% token reduction
-- **Build Hash:** `a9309e259fc2`
+- **Build Hash:** `4988eb91b9e5`
 - **Optimization:** Smart code compression without information loss
 
 ---

@@ -2,7 +2,8 @@
 """
 Обработка документов судебных дел
 """
-from typing import Dict, List, Optional, Set
+import datetime
+from typing import Dict, List, Optional, Set, Any
 from pathlib import Path
 import asyncio
 import re
@@ -29,66 +30,72 @@ class DocumentHandler:
         self.regions_config = regions_config or {}
         self.logger = get_logger('document_handler')
     
-    def _get_case_folder(self, case_number: str) -> Path:
+    def _get_case_folder(self, case_number: str, year: str = None) -> Path:
         """
-        Определить папку для дела по номеру
+        Определить папку для дела по номеру и году
+
+        СТРУКТУРА: year/region/court/case_number/
+
+        Вход: 
+        case_number = "7594-25-00-4/5229"
+        year = "2025"
         
-        Вход: "7594-25-00-4/5229"
-        Выход: documents/almaty/smas/2025/7594-25-00-4_5229/
+        Выход: 
+        documents/2025/almaty/smas/7594-25-00-4_5229/
         """
-        # Парсим номер дела
-        case_info = self.text_processor.find_region_and_court_by_case_number(
-            case_number, self.regions_config
-        )
-        
-        if case_info:
-            region_key = case_info['region_key']
-            court_key = case_info['court_key']
-            year = case_info['year']
-        else:
-            # Fallback: извлекаем год из номера дела
-            # "7594-25-00-4/5229" → год = "2025"
+        # Если год не передан, извлекаем из номера дела
+        if not year:
             match = re.match(r'\d+-(\d{2})-', case_number)
             if match:
                 year_short = match.group(1)
                 year = f"20{year_short}"
             else:
                 year = "unknown"
-            
+
+        # Парсим номер дела
+        case_info = self.text_processor.find_region_and_court_by_case_number(
+            case_number, self.regions_config
+        )
+
+        if case_info:
+            region_key = case_info['region_key']
+            court_key = case_info['court_key']
+        else:
+            # Fallback
             region_key = "unknown"
             court_key = "unknown"
-        
+
         # Безопасное имя папки для дела
         safe_case = case_number.replace('/', '_')
-        
-        # Формируем путь: documents/region/court/year/case_number/
-        folder = self.storage_dir / region_key / court_key / year / safe_case
+
+        # НОВАЯ СТРУКТУРА: storage_dir/year/region/court/case_number/
+        folder = self.storage_dir / year / region_key / court_key / safe_case
         folder.mkdir(parents=True, exist_ok=True)
-        
+
         return folder
     
-    def _save_file(self, case_number: str, doc_info: DocumentInfo, content: bytes) -> dict:
+    def _save_file(self, case_number: str, doc_info: DocumentInfo, content: bytes, year: str = None) -> dict:
         """Сохранить файл на диск атомарно"""        
-        case_dir = self._get_case_folder(case_number)
-        
+        case_dir = self._get_case_folder(case_number, year)
+
         date_prefix = doc_info.doc_date.strftime('%Y-%m-%d')
         safe_name = self._sanitize_filename(doc_info.doc_name)
         # Добавляем doc_info.index в имя файла для предотвращения коллизий на диске
-        filename = f"{date_prefix}_{doc_info.index}_{safe_name}.pdf" 
-        
+        filename = f"{date_prefix}_{doc_info.index}_{safe_name}.pdf"
+
         file_path = case_dir / filename
-        
+
         # Атомарная запись: temp → rename
         with tempfile.NamedTemporaryFile(dir=case_dir, delete=False, suffix='.tmp') as tmp:
             tmp.write(content)
             tmp_path = Path(tmp.name)
-        
+
         shutil.move(str(tmp_path), str(file_path))
-        
+
         relative_path = file_path.relative_to(self.storage_dir)
-        
+
         self.logger.info(f"Сохранён: {relative_path} ({len(content)} bytes)")
-        
+
         return {
             'file_path': str(relative_path),
             'file_size': len(content)
@@ -165,27 +172,28 @@ class DocumentHandler:
             return await response.text()
     
     async def download_pdf(self, session: aiohttp.ClientSession, pdf_url: str,
-                       case_number: str, doc_info: DocumentInfo) -> Optional[dict]:
+                   case_number: str, doc_info: DocumentInfo, year: str = None) -> Optional[dict]:
         """Скачать PDF файл"""
         full_url = f"{self.base_url}{pdf_url}" if pdf_url.startswith('/') else pdf_url
         headers = HttpHeaders.get_base()
         headers['Referer'] = f"{self.base_url}/lawsuit/document.xhtml"
-        
+
         async with session.get(full_url, headers=headers) as response:
             if response.status != 200:
                 return None
             content = await response.read()
-            return self._save_file(case_number, doc_info, content)
+            return self._save_file(case_number, doc_info, content, year)
     
     async def fetch_all_documents(
-        self,
-        session: aiohttp.ClientSession,
-        results_html: str,
-        case_number: str,
-        case_index: int = 0,
-        existing_keys: Optional[Set[str]] = None,
-        delay: float = 1.0
-    ) -> Dict:
+                self,
+                session: aiohttp.ClientSession,
+                results_html: str,
+                case_number: str,
+                case_index: int = 0,
+                existing_keys: Optional[Set[str]] = None,
+                delay: float = 1.0,
+                year: str = None
+            ) -> Dict:
         """
         Скачать все новые документы для дела.
 
@@ -199,6 +207,16 @@ class DocumentHandler:
             }
         """
         existing_keys = existing_keys or set()
+
+        # Если год не передан, извлекаем из номера дела
+        if not year:
+            match = re.match(r'\d+-(\d{2})-', case_number)
+            if match:
+                year_short = match.group(1)
+                year = f"20{year_short}"
+            else:
+                year = datetime.now().strftime('%Y')
+                
         downloaded = []
 
         result = {
@@ -260,7 +278,7 @@ class DocumentHandler:
                 if not pdf_url:
                     continue
 
-                file_info = await self.download_pdf(session, pdf_url, case_number, doc)
+                file_info = await self.download_pdf(session, pdf_url, case_number, doc, year)
                 if file_info:
                     downloaded.append({
                         'index': doc.index, # Передаем индекс для сохранения в базу данных

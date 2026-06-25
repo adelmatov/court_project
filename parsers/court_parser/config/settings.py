@@ -1,15 +1,22 @@
 """
 Загрузка и валидация конфигурации
 """
+import os
 from datetime import datetime
 import json
 from pathlib import Path
 from typing import Dict, Any, Optional, List
 
+from dotenv import load_dotenv
+
+# Загружаем .env из корня пакета court_parser
+load_dotenv(Path(__file__).parent.parent / '.env')
+
 
 class ConfigurationError(Exception):
     """Ошибка конфигурации"""
     pass
+
 
 
 class Settings:
@@ -23,15 +30,27 @@ class Settings:
         self._validate()
     
     def _load_config(self, path: Path) -> Dict[str, Any]:
-        """Загрузка конфигурации из JSON"""
+        """Загрузка конфигурации из JSON + секреты из переменных окружения"""
         if not path.exists():
             raise ConfigurationError(f"Файл конфигурации не найден: {path}")
-        
+
         try:
             with open(path, 'r', encoding='utf-8') as f:
-                return json.load(f)
+                config = json.load(f)
         except json.JSONDecodeError as e:
             raise ConfigurationError(f"Ошибка парсинга JSON: {e}")
+
+        # Секреты ВСЕГДА берём из окружения (.env), а не из config.json
+        config.setdefault('auth', {})
+        config.setdefault('database', {})
+
+        config['auth']['login'] = os.getenv('COURT_LOGIN', config['auth'].get('login'))
+        config['auth']['password'] = os.getenv('COURT_PASSWORD', config['auth'].get('password'))
+        config['auth']['user_name'] = os.getenv('COURT_USER_NAME', config['auth'].get('user_name'))
+        config['database']['password'] = os.getenv('DB_PASSWORD', config['database'].get('password'))
+
+        return config
+
     
     def _validate(self):
         """Валидация обязательных полей"""
